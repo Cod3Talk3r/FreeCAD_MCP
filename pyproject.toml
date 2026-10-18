@@ -1,0 +1,33 @@
+[project]
+name = "freecad-mcp"
+version = "0.1.0"
+description = "MCP server that lets AI agents create, inspect, and validate parametric 3D models in FreeCAD."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Mohammad R. Asadi", email = "Mohammadr3za.1@gmail.com" }
+]
+keywords = ["freecad", "mcp", "cad", "llm", "automation"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
