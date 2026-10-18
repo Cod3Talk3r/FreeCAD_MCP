@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import diagnostics
+from . import diagnostics, freecad
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server.mcpserver import MCPServer
@@ -21,3 +21,4 @@ __all__ = ["register_all"]
 def register_all(server: MCPServer, settings: Settings) -> None:
     """Register every tool group on ``server``."""
     diagnostics.register(server, settings)
+    freecad.register(server, settings)

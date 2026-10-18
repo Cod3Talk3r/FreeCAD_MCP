@@ -74,7 +74,7 @@ explicit approval.
 
 - [x] M0 — Environment and project initialization
 - [x] M1 — Minimal MCP server (`server.py`, `config.py`, one diagnostic tool, tests)
-- [ ] M2 — FreeCAD bridge (connection + version diagnostics)
+- [x] M2 — FreeCAD bridge (connection + version diagnostics)
 - [ ] M3 — Direct modeling tools (box, cylinder, inspect, modify, validate, STEP export)
 - [ ] M4 — Tank and tubular coil
 - [ ] M5 — Taiga-S1 investigation and adapter
@@ -137,9 +137,44 @@ a safe default. Nothing machine-specific is committed.
 | --- | --- | --- |
 | `FREECAD_MCP_SERVER_NAME` | `freecad-mcp` | Name advertised to MCP clients. |
 | `FREECAD_MCP_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. |
-| `FREECAD_MCP_FREECAD_EXECUTABLE` | unset (auto-discover) | Override the FreeCAD console executable; consumed by the bridge from Milestone 2. |
+| `FREECAD_MCP_FREECAD_EXECUTABLE` | unset (auto-discover) | Override the FreeCAD console executable; an explicit value is authoritative. |
+| `FREECAD_MCP_TIMEOUT_SECONDS` | `60` | Per-operation timeout for the FreeCAD bridge, in seconds. |
 
 Invalid values fail fast at startup (for example, an unknown log level).
+
+## FreeCAD bridge
+
+The bridge needs FreeCAD's **console** executable (`freecadcmd`/`FreeCADCmd`), not
+the GUI. Discovery checks, in order: an explicit setting →
+`FREECAD_MCP_FREECAD_EXECUTABLE` → `PATH` → conventional install locations →
+(Windows) Uninstall registry entries.
+
+Verify FreeCAD directly:
+
+```powershell
+& "E:\Softwares\FreeCAD\bin\freecadcmd.exe" --version
+```
+
+Ask the server about it: the `freecad_status` tool reports `available`, `version`,
+embedded `python_version`, and `part_available`. The test suite is the easiest way
+to exercise it (it calls the tool through the MCP client):
+
+```bash
+uv run pytest -q
+```
+
+The suite contains FreeCAD-dependent tests
+(`tests/test_freecad_integration.py`). They **skip** when FreeCAD cannot be
+discovered, so a machine without FreeCAD never sees a false failure. To run only
+those:
+
+```bash
+uv run pytest tests/test_freecad_integration.py -v
+```
+
+The bridge launches `freecadcmd` with `freecad_bridge/runner.py` and exchanges a
+JSON envelope per operation. It is local-only (no sockets), performs only the
+fixed operations listed in `runner.OPERATIONS`, and kills the child on timeout.
 
 ## Using it from OpenCode
 
@@ -192,11 +227,11 @@ Notes:
   flags, e.g. `FREECAD_MCP_LOG_LEVEL=DEBUG`. Do not embed secrets or absolute
   machine paths in tracked configuration.
 
-## Planned next step (M2)
+## Planned next step (M3)
 
-Implement the FreeCAD bridge: verify the installed FreeCAD 1.1.4 console
-(`E:\Softwares\FreeCAD\bin\freecadcmd.exe`) and its embedded Python, choose a
-local-only mechanism (for example a FreeCAD-side script driven by the console
-interpreter), and add connection + version diagnostics with timeouts and
-structured errors. Distributions without FreeCAD must still run the server
-skeleton and report the bridge as unavailable rather than failing to install.
+Implement the first explicit modeling tools on top of the bridge: create a
+document, add a box and a cylinder with validated dimensions, inspect objects
+(name/type/dimensions), modify a parameter, recompute, validate geometry, and
+export a selection to STEP. Each operation is added to `runner.OPERATIONS` and
+exposed as a typed MCP tool; a test creates real geometry and checks the STEP
+export. Bounded, validated inputs only — never arbitrary Python in FreeCAD.

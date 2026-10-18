@@ -32,6 +32,7 @@ def test_server_exposes_server_info_tool() -> None:
 
     tools = {tool.name: tool for tool in result.tools}
     assert "server_info" in tools
+    assert "freecad_status" in tools
 
     tool = tools["server_info"]
     assert tool.description

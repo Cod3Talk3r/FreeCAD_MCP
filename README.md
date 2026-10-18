@@ -31,16 +31,16 @@ Incremental development. Current progress:
 | --------- | ----------- | ------ |
 | 0 | Environment inspection and project initialization | Done |
 | 1 | Minimal MCP server with a diagnostic tool | Done |
-| 2 | FreeCAD bridge (connection + version diagnostics) | Planned |
+| 2 | FreeCAD bridge (connection + version diagnostics) | Done |
 | 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Planned |
 | 4 | Configurable tank and tubular coil | Planned |
 | 5 | Taiga-S1 investigation and optional adapter | Planned |
 | 6 | Comparison framework (Method A vs Method B) | Planned |
 | 7 | Documentation and release preparation | Planned |
 
-The MCP server and its diagnostic tool are implemented and tested. FreeCAD
-modeling tools are not implemented yet; they arrive in the bridge and modeling
-milestones.
+The MCP server, its diagnostic tool, and the local FreeCAD bridge (connection and
+version diagnostics) are implemented and tested. FreeCAD modeling tools are not
+implemented yet; they arrive in the modeling milestone.
 
 ## Requirements
 
@@ -71,13 +71,15 @@ src/freecad_mcp/        # the Python package
     __init__.py         # version
     server.py           # MCP server construction + stdio entry point
     config.py           # environment-based settings
-    tools/              # MCP tool definitions (diagnostics so far)
+    tools/              # MCP tool definitions (diagnostics + freecad_status)
+    freecad_bridge/     # local child-process bridge to FreeCAD
+        runner.py       # runs *inside* FreeCAD; fixed, explicit operations
 docs/                   # architecture and development notes
-tests/                  # tests that do not require FreeCAD
+tests/                  # FreeCAD-independent tests + FreeCAD-gated integration tests
 ```
 
-Directories for `freecad_bridge`, `validation`, and `integrations` are added only
-as the milestones that need them land.
+Directories for `validation` and `integrations` are added only as the milestones
+that need them land.
 
 ## License
 

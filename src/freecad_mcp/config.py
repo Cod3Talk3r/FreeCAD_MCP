@@ -21,6 +21,9 @@ LOG_LEVELS: frozenset[str] = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CR
 
 DEFAULT_SERVER_NAME = "freecad-mcp"
 
+#: Default per-operation timeout for the FreeCAD bridge, in seconds.
+DEFAULT_FREECAD_TIMEOUT_SECONDS = 60.0
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -30,14 +33,16 @@ class Settings:
         server_name: Name advertised to MCP clients.
         log_level: Logging level name.
         freecad_executable: Optional path to the FreeCAD console executable
-            (``freecadcmd`` / ``FreeCADCmd``). ``None`` means "auto-discover",
-            which the bridge implements in Milestone 2. Kept as an override only;
-            no machine-specific path is ever hard-coded.
+            (``freecadcmd`` / ``FreeCADCmd``). ``None`` means "auto-discover".
+            Kept as an override only; no machine-specific path is ever hard-coded.
+        freecad_timeout_seconds: Maximum time to wait for one FreeCAD operation
+            before it is aborted.
     """
 
     server_name: str = DEFAULT_SERVER_NAME
     log_level: LogLevel = "INFO"
     freecad_executable: str | None = None
+    freecad_timeout_seconds: float = DEFAULT_FREECAD_TIMEOUT_SECONDS
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -63,8 +68,19 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     raw_executable = env.get(f"{ENV_PREFIX}FREECAD_EXECUTABLE")
     freecad_executable = raw_executable.strip() if raw_executable else None
 
+    timeout = DEFAULT_FREECAD_TIMEOUT_SECONDS
+    raw_timeout = env.get(f"{ENV_PREFIX}TIMEOUT_SECONDS")
+    if raw_timeout and raw_timeout.strip():
+        try:
+            timeout = float(raw_timeout)
+        except ValueError as exc:
+            raise ValueError(f"{ENV_PREFIX}TIMEOUT_SECONDS must be a number (got {raw_timeout!r})") from exc
+        if timeout <= 0:
+            raise ValueError(f"{ENV_PREFIX}TIMEOUT_SECONDS must be positive (got {timeout})")
+
     return Settings(
         server_name=server_name,
         log_level=raw_level,  # type: ignore[arg-type]  # validated against LOG_LEVELS above
         freecad_executable=freecad_executable or None,
+        freecad_timeout_seconds=timeout,
     )

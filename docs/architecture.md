@@ -69,6 +69,51 @@ concerns and must not leak into each other:
    configuration format, and Taiga-S1's real interface are verified before being
    relied upon — never invented.
 
+## FreeCAD bridge (Milestone 2)
+
+`freecad_bridge/` talks to a real FreeCAD installation through a **one-shot child
+process**, chosen because it is local-only and needs no persistent service:
+
+```
+MCP tool  ->  FreeCadBridge.run(op, params)
+                 |  writes request.json, sets FREECAD_MCP_REQUEST / _RESPONSE
+                 v
+             freecadcmd.exe  runner.py     (FreeCAD's own Python 3.11)
+                 |  dispatches op -> writes response.json
+                 v
+             FreeCadBridge  ->  parsed result  ->  MCP tool result
+```
+
+Key properties:
+
+- **Local only.** A child process on this machine; no sockets, no network, no
+  remote code execution surface.
+- **Explicit operations.** `runner.py` holds the complete set of allowed
+  operations (`OPERATIONS`). The bridge cannot run arbitrary Python inside
+  FreeCAD; it sends `{"op": "...", "params": {...}}` only.
+- **Bounded.** Every operation has a timeout (default 60 s, `FREECAD_MCP_TIMEOUT_SECONDS`);
+  the child is killed on expiry.
+- **No FreeCAD imports in the parent.** Only the child (`runner.py`) imports
+  `FreeCAD`/`Part`, and it does so *lazily inside handlers*, so its dispatch and
+  envelope logic stay unit-testable on the host interpreter.
+- **Structured errors.** `FreeCadNotFoundError`, `FreeCadTimeoutError`,
+  `FreeCadExecutionError`, `FreeCadResponseError`, `FreeCadOperationError` let the
+  MCP layer return a useful result instead of a traceback.
+
+Discovery (`discovery.py`) resolves the console executable in order: explicit
+setting → `FREECAD_MCP_FREECAD_EXECUTABLE` → `PATH` → conventional install
+locations → (Windows) Uninstall registry entries. An explicit setting is
+authoritative: a wrong path reports "not found" rather than silently using a
+different FreeCAD.
+
+FreeCAD quirk worth remembering: it runs a script file with `__name__` set to the
+*module name*, not `"__main__"`, so the runner keys off the request environment
+variable rather than the usual entry guard.
+
+Deferred: a long-lived FreeCAD process with an in-memory document is not needed
+for version diagnostics. It will be reconsidered if document state must persist
+across calls without saving to disk.
+
 ## Environment facts (recorded during Milestone 0)
 
 - Development OS: Windows 11 Enterprise, AMD64.
