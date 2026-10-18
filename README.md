@@ -30,7 +30,7 @@ Incremental development. Current progress:
 | Milestone | Description | Status |
 | --------- | ----------- | ------ |
 | 0 | Environment inspection and project initialization | Done |
-| 1 | Minimal MCP server with a diagnostic tool | Planned |
+| 1 | Minimal MCP server with a diagnostic tool | Done |
 | 2 | FreeCAD bridge (connection + version diagnostics) | Planned |
 | 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Planned |
 | 4 | Configurable tank and tubular coil | Planned |
@@ -38,8 +38,9 @@ Incremental development. Current progress:
 | 6 | Comparison framework (Method A vs Method B) | Planned |
 | 7 | Documentation and release preparation | Planned |
 
-The MCP server and tooling are **not implemented yet**; Milestone 0 only
-establishes a reproducible project skeleton.
+The MCP server and its diagnostic tool are implemented and tested. FreeCAD
+modeling tools are not implemented yet; they arrive in the bridge and modeling
+milestones.
 
 ## Requirements
 
@@ -55,6 +56,7 @@ establishes a reproducible project skeleton.
 # Install uv if missing: https://docs.astral.sh/uv/getting-started/installation/
 uv sync            # create the environment and install (locked) dependencies
 uv run pytest      # run the test suite
+uv run freecad-mcp # run the MCP server over stdio
 ```
 
 See [`docs/development.md`](docs/development.md) for environment setup, FreeCAD
@@ -66,13 +68,16 @@ principles.
 
 ```
 src/freecad_mcp/        # the Python package
-    __init__.py
+    __init__.py         # version
+    server.py           # MCP server construction + stdio entry point
+    config.py           # environment-based settings
+    tools/              # MCP tool definitions (diagnostics so far)
 docs/                   # architecture and development notes
 tests/                  # tests that do not require FreeCAD
 ```
 
-Directories for `server`, `tools`, `freecad_bridge`, `validation`, and
-`integrations` are added only as the milestones that need them land.
+Directories for `freecad_bridge`, `validation`, and `integrations` are added only
+as the milestones that need them land.
 
 ## License
 

@@ -18,7 +18,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
-dependencies = []
+dependencies = [
+    "mcp>=2.3.0",
+]
+
+[project.scripts]
+freecad-mcp = "freecad_mcp.server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

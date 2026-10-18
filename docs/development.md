@@ -73,7 +73,7 @@ after its acceptance criteria are met, and the next one starts only after
 explicit approval.
 
 - [x] M0 — Environment and project initialization
-- [ ] M1 — Minimal MCP server (`server.py`, `config.py`, one diagnostic tool, tests)
+- [x] M1 — Minimal MCP server (`server.py`, `config.py`, one diagnostic tool, tests)
 - [ ] M2 — FreeCAD bridge (connection + version diagnostics)
 - [ ] M3 — Direct modeling tools (box, cylinder, inspect, modify, validate, STEP export)
 - [ ] M4 — Tank and tubular coil
@@ -81,10 +81,122 @@ explicit approval.
 - [ ] M6 — Comparison framework
 - [ ] M7 — Documentation and release preparation
 
-## Planned next step (M1)
+## Running and inspecting the server
 
-Implement the smallest MCP server using the official `mcp` Python SDK: verify the
-installed SDK version and its real API, add `config.py`, register one harmless
-diagnostic tool with a typed schema, add tests for the FreeCAD-independent logic,
-and document how to launch the server and wire it into OpenCode's MCP
-configuration (using the current, verified config format).
+The server speaks MCP over **stdio** and is launched as a normal subprocess:
+
+```bash
+uv run freecad-mcp          # console script defined in pyproject.toml
+uv run python -m freecad_mcp  # equivalent module form
+```
+
+Either command blocks, reading MCP messages on stdin and writing responses on
+stdout. Anything the server logs goes to stderr, so it never corrupts the
+protocol stream.
+
+### Inspecting it
+
+The test suite talks to the real server through the official SDK client
+(`tests/test_server.py` in-process, `tests/test_stdio_launch.py` over stdio):
+
+```bash
+uv run pytest -q
+```
+
+To poke at it by hand, the SDK ships an in-process client:
+
+```python
+import asyncio
+from mcp import Client, StdioServerParameters
+
+async def main() -> None:
+    params = StdioServerParameters(command="uv", args=["run", "freecad-mcp"])
+    async with Client(params) as client:  # default mode="auto"
+        print([t.name for t in (await client.list_tools()).tools])
+        print((await client.call_tool("server_info", {"include_environment": True})).structured_content)
+
+asyncio.run(main())
+```
+
+The official **MCP Inspector** is also available, but it is an optional extra and
+needs Node.js/`npx`:
+
+```bash
+uv run --with "mcp[cli]" mcp dev src/freecad_mcp/server.py:create_server
+```
+
+(That extra and Node.js are *not* project dependencies; the checks above need
+neither.)
+
+## Configuration
+
+Settings come from environment variables, all prefixed `FREECAD_MCP_`, each with
+a safe default. Nothing machine-specific is committed.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FREECAD_MCP_SERVER_NAME` | `freecad-mcp` | Name advertised to MCP clients. |
+| `FREECAD_MCP_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. |
+| `FREECAD_MCP_FREECAD_EXECUTABLE` | unset (auto-discover) | Override the FreeCAD console executable; consumed by the bridge from Milestone 2. |
+
+Invalid values fail fast at startup (for example, an unknown log level).
+
+## Using it from OpenCode
+
+OpenCode V2 configures local MCP servers under `mcp.servers.<name>` with
+`type: "local"` (verified against the V2 docs — see
+<https://opencode.ai/v2/docs/mcp-servers>). Because the server is defined by this
+repository, point OpenCode at it; `uv` starts the process and resolves the
+environment for you:
+
+```jsonc title="opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "freecad": {
+        "type": "local",
+        "command": ["uv", "run", "--directory", "/absolute/path/to/freecad-mcp", "freecad-mcp"]
+      }
+    }
+  }
+}
+```
+
+If OpenCode runs from this repository (the workspace), the working directory
+already resolves and the simpler form works:
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "freecad": { "type": "local", "command": ["uv", "run", "freecad-mcp"] }
+    }
+  }
+}
+```
+
+Or add it with the CLI (default is project-local; add `--global` for every project):
+
+```bash
+opencode mcp add freecad -- uv run freecad-mcp
+opencode mcp list
+```
+
+Notes:
+
+- OpenCode's default `protocol` is `legacy` (classic `initialize` handshake).
+  This server answers `legacy` and also supports the modern `2026-07-28`
+  revision, so no `protocol` override is required.
+- Pass environment variables with the `environment` field or repeated `--env`
+  flags, e.g. `FREECAD_MCP_LOG_LEVEL=DEBUG`. Do not embed secrets or absolute
+  machine paths in tracked configuration.
+
+## Planned next step (M2)
+
+Implement the FreeCAD bridge: verify the installed FreeCAD 1.1.4 console
+(`E:\Softwares\FreeCAD\bin\freecadcmd.exe`) and its embedded Python, choose a
+local-only mechanism (for example a FreeCAD-side script driven by the console
+interpreter), and add connection + version diagnostics with timeouts and
+structured errors. Distributions without FreeCAD must still run the server
+skeleton and report the bridge as unavailable rather than failing to install.
