@@ -24,6 +24,13 @@ DEFAULT_SERVER_NAME = "freecad-mcp"
 #: Default per-operation timeout for the FreeCAD bridge, in seconds.
 DEFAULT_FREECAD_TIMEOUT_SECONDS = 60.0
 
+#: Default controlled workspace directory (relative to the server working
+#: directory) in which all FreeCAD documents are stored.
+DEFAULT_WORKSPACE = "freecad-mcp-workspace"
+
+#: Environment variable / setting name for the controlled workspace directory.
+WORKSPACE_ENV = "FREECAD_MCP_WORKSPACE"
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -43,6 +50,7 @@ class Settings:
     log_level: LogLevel = "INFO"
     freecad_executable: str | None = None
     freecad_timeout_seconds: float = DEFAULT_FREECAD_TIMEOUT_SECONDS
+    workspace: str = DEFAULT_WORKSPACE
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -68,6 +76,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     raw_executable = env.get(f"{ENV_PREFIX}FREECAD_EXECUTABLE")
     freecad_executable = raw_executable.strip() if raw_executable else None
 
+    raw_workspace = env.get(f"{ENV_PREFIX}{WORKSPACE_ENV}")
+    workspace = raw_workspace.strip() if raw_workspace else DEFAULT_WORKSPACE
+
     timeout = DEFAULT_FREECAD_TIMEOUT_SECONDS
     raw_timeout = env.get(f"{ENV_PREFIX}TIMEOUT_SECONDS")
     if raw_timeout and raw_timeout.strip():
@@ -83,4 +94,5 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         log_level=raw_level,  # type: ignore[arg-type]  # validated against LOG_LEVELS above
         freecad_executable=freecad_executable or None,
         freecad_timeout_seconds=timeout,
+        workspace=workspace,
     )

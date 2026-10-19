@@ -54,3 +54,12 @@ class FreeCadOperationError(FreeCadBridgeError):
     def __init__(self, message: str, *, error_type: str = "Error") -> None:
         super().__init__(message)
         self.error_type = error_type
+
+
+class FreeCadLockError(FreeCadBridgeError):
+    """Could not acquire or release a cross-process document lock.
+
+    Raised only when ownership cannot be determined safely or the lock is held
+    by a process that may still be alive. Callers must fail safely and never
+    reclaim a lock whose owner might still be running.
+    """
