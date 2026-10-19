@@ -34,6 +34,8 @@ OP_INSPECT_OBJECT = "inspect_object"
 OP_VALIDATE = "validate"
 OP_SAVE_DOCUMENT = "save_document"
 OP_EXPORT_STEP = "export_step"
+OP_TANK = "tank"
+OP_TUBULAR_COIL = "tubular_coil"
 
 REQUEST_ENV = "FREECAD_MCP_REQUEST"
 RESPONSE_ENV = "FREECAD_MCP_RESPONSE"
@@ -763,6 +765,182 @@ def _op_export_step(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# New operation handlers for Milestone 4
+# ---------------------------------------------------------------------------
+
+def _op_tank(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a rectangular tank (Part::Box) in the document."""
+    from . import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or "Tank1"
+    length = float(params.get("length") or 20.0)
+    width = float(params.get("width") or 15.0)
+    height = float(params.get("height") or 10.0)
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "tank", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "tank", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") != "acquired" and lock_status.get("status") != "reacquired":
+        return {"ok": False, "op": "tank", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    try:
+        import FreeCAD as _FC
+        import Part as _Part
+        doc = _FC.openDocument(normalized) if _FC.Document.exists(normalized) else _FC.newDocument(normalized)
+        obj_name = object_name
+        counter = 0
+        while doc.getObject(obj_name) is not None:
+            counter += 1
+            obj_name = f"{object_name}_{counter}"
+        box = doc.addObject("Part::Box", obj_name)
+        box.Length = length
+        box.Width = width
+        box.Height = height
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(tmp_path)
+        atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_saved_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "tank", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "tank",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "length": length,
+            "width": width,
+            "height": height,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_tubular_coil(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a tubular coil (helix with pipe) in the document."""
+    from . import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or "Coil1"
+    coil_radius = float(params.get("coil_radius") or 10.0)
+    tube_radius = float(params.get("tube_radius") or 2.0)
+    num_turns = int(params.get("num_turns") or 5)
+    pitch = float(params.get("pitch") or 5.0)
+    workspace_str = params.get("workspace") or ""
+
+    # Validate parameters
+    if coil_radius <= 0:
+        return {"ok": False, "op": "tubular_coil", "error": "coil_radius must be positive"}
+    if tube_radius <= 0:
+        return {"ok": False, "op": "tubular_coil", "error": "tube_radius must be positive"}
+    if num_turns <= 0:
+        return {"ok": False, "op": "tubular_coil", "error": "num_turns must be positive"}
+    if pitch <= 0:
+        return {"ok": False, "op": "tubular_coil", "error": "pitch must be positive"}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "tubular_coil", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "tubular_coil", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") != "acquired" and lock_status.get("status") != "reacquired":
+        return {"ok": False, "op": "tubular_coil", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    try:
+        import FreeCAD as _FC
+        import Part as _Part
+        doc = _FC.openDocument(normalized) if _FC.Document.exists(normalized) else _FC.newDocument(normalized)
+
+        # Create a helix path for the coil
+        helix = _Part.Helix(radius=coil_radius, pitch=pitch, turns=num_turns)
+        path_wire = helix.toShape()
+
+        # Create a pipe (tube) along the helix path
+        coil_shape = _Part.makePipe(path_wire, tube_radius)
+
+        obj_name = object_name
+        counter = 0
+        while doc.getObject(obj_name) is not None:
+            counter += 1
+            obj_name = f"{object_name}_{counter}"
+        coil_obj = doc.addObject("Part::Feature", obj_name)
+        coil_obj.Shape = coil_shape
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(tmp_path)
+        atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_saved_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "tubular_coil", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "tubular_coil",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "coil_radius": coil_radius,
+            "tube_radius": tube_radius,
+            "num_turns": num_turns,
+            "pitch": pitch,
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -777,7 +955,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_VALIDATE: _op_validate,
     OP_SAVE_DOCUMENT: _op_save_document,
     OP_EXPORT_STEP: _op_export_step,
-
+    OP_TANK: _op_tank,
+    OP_TUBULAR_COIL: _op_tubular_coil,
 }
 
 def handle_request(request: Mapping[str, Any]) -> dict[str, Any]:

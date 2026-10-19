@@ -178,6 +178,42 @@ class ExportStepParams(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Tank and tubular coil input schemas
+# ---------------------------------------------------------------------------
+
+class TankParams(BaseModel):
+    """Parameters for creating a tank (rectangular box)."""
+
+    document_id: str = Field(description="Existing document to add the tank to.")
+    object_name: str = Field(default="Tank1", description="Name for the new Tank object.")
+    length: float = Field(default=20.0, description="Length in millimetres (must be positive).")
+    width: float = Field(default=15.0, description="Width in millimetres (must be positive).")
+    height: float = Field(default=10.0, description="Height in millimetres (must be positive).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class TubularCoilParams(BaseModel):
+    """Parameters for creating a tubular coil (helix with pipe)."""
+
+    document_id: str = Field(description="Existing document to add the coil to.")
+    object_name: str = Field(default="Coil1", description="Name for the new Coil object.")
+    coil_radius: float = Field(
+        default=10.0, description="Radius of the coil center path in millimetres (must be positive)."
+    )
+    tube_radius: float = Field(
+        default=2.0, description="Radius of the tube in millímetros (must be positive)."
+    )
+    num_turns: int = Field(default=5, description="Number of coil turns (must be positive).")
+    pitch: float = Field(
+        default=5.0, description="Pitch (height per turn) in millimetres (must be positive)."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+# ---------------------------------------------------------------------------
 # Bridge helper
 # ---------------------------------------------------------------------------
 
@@ -248,7 +284,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "create_document", bridge_params)
 
@@ -286,7 +322,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "length": params.length,
             "width": params.width,
             "height": params.height,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "create_box", bridge_params)
 
@@ -325,7 +361,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "object_name": params.object_name,
             "radius": params.radius,
             "height": params.height,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "create_cylinder", bridge_params)
 
@@ -374,7 +410,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "object_name": params.object_name,
             "property": params.property_name,
             "value": params.value,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "set_parameter", bridge_params)
 
@@ -408,7 +444,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         return _run_bridge_op(bridge, "recompute", bridge_params)
 
@@ -429,7 +465,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "list_objects", bridge_params)
 
@@ -473,7 +509,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
             "object_name": params.object_name,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "inspect_object", bridge_params)
 
@@ -508,7 +544,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "validate", bridge_params)
 
@@ -549,7 +585,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "save_document", bridge_params)
 
@@ -583,7 +619,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "document_id": params.document_id,
             "object_names": params.object_names,
             "step_path": params.step_path,
-            "workspace": params.workspace,
+            "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "export_step", bridge_params)
 
@@ -593,6 +629,95 @@ def _register_tools(server: Any, settings: Settings) -> None:
             exported_count=result.get("exported_count", 0),
             success=result.get("success", True),
         )
+
+
+# ------------------------------------------------------------------
+    # tank
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="tank",
+        title="Create tank",
+        description=(
+            "Add a rectangular Part::Box (tank) to an existing document. "
+            "Parameters *length*, *width*, *height* must be positive numbers "
+            "(millimetres). The document is locked exclusively during the "
+            "operation."
+        ),
+        structured_output=True,
+    )
+    def tank_tool(params: TankParams) -> ObjectInfo:
+        """Create a tank and return its info."""
+        # Manual positive check
+        if params.length <= 0 or params.width <= 0 or params.height <= 0:
+            raise ValueError("length, width, height must be positive")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "length": params.length,
+            "width": params.width,
+            "height": params.height,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "tank", bridge_params)
+
+        info = ObjectInfo(
+            name=params.object_name,
+            type=result.get("type", "Part::Box"),
+            shape_type=result.get("shape_type"),
+            volume=result.get("volume"),
+            length=result.get("length"),
+            width=result.get("width"),
+            height=result.get("height"),
+        )
+        return info
+
+    # ------------------------------------------------------------------
+    # tubular_coil
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="tubular_coil",
+        title="Create tubular coil",
+        description=(
+            "Add a tubular helix coil to an existing document using a "
+            "Part::Helix and pipe. Parameters *coil_radius*, *tube_radius*, "
+            "*num_turns*, *pitch* must be positive numbers (millimetres). "
+            "The document is locked exclusively during the operation."
+        ),
+        structured_output=True,
+    )
+    def tubular_coil_tool(params: TubularCoilParams) -> ObjectInfo:
+        """Create a tubular coil and return its info."""
+        if params.coil_radius <= 0:
+            raise ValueError("coil_radius must be positive")
+        if params.tube_radius <= 0:
+            raise ValueError("tube_radius must be positive")
+        if params.num_turns <= 0:
+            raise ValueError("num_turns must be positive")
+        if params.pitch <= 0:
+            raise ValueError("pitch must be positive")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "coil_radius": params.coil_radius,
+            "tube_radius": params.tube_radius,
+            "num_turns": params.num_turns,
+            "pitch": params.pitch,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "tubular_coil", bridge_params)
+
+        info = ObjectInfo(
+            name=params.object_name,
+            type=result.get("type", "Part::Feature"),
+            shape_type=result.get("shape_type"),
+            volume=result.get("volume"),
+            radius=result.get("radius"),
+        )
+        return info
 
 
 # ---------------------------------------------------------------------------

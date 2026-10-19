@@ -32,15 +32,19 @@ Incremental development. Current progress:
 | 0 | Environment inspection and project initialization | Done |
 | 1 | Minimal MCP server with a diagnostic tool | Done |
 | 2 | FreeCAD bridge (connection + version diagnostics) | Done |
-| 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Planned |
-| 4 | Configurable tank and tubular coil | Planned |
+| 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Done |
+| 4 | Configurable tank and tubular coil | Done |
 | 5 | Taiga-S1 investigation and optional adapter | Planned |
 | 6 | Comparison framework (Method A vs Method B) | Planned |
 | 7 | Documentation and release preparation | Planned |
 
 The MCP server, its diagnostic tool, and the local FreeCAD bridge (connection and
-version diagnostics) are implemented and tested. FreeCAD modeling tools are not
-implemented yet; they arrive in the modeling milestone.
+version diagnostics) are implemented and tested. Milestone 3 adds direct
+modeling tools (create_box, create_cylinder, set_parameter, recompute,
+list_objects, inspect_object, validate_document, save_document, export_step),
+and Milestone 4 adds tank and tubular coil geometry creation using Part::Box,
+Part::Cylinder, Part::Helix and Part::Pipe primitives through the persistent
+parametric modeling system.
 
 ## Requirements
 
