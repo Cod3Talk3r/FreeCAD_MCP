@@ -75,9 +75,9 @@ explicit approval.
 - [x] M0 — Environment and project initialization
 - [x] M1 — Minimal MCP server (`server.py`, `config.py`, one diagnostic tool, tests)
 - [x] M2 — FreeCAD bridge (connection + version diagnostics)
-- [ ] M3 — Direct modeling tools (box, cylinder, inspect, modify, validate, STEP export)
-- [ ] M4 — Tank and tubular coil
-- [ ] M5 — Taiga-S1 investigation and adapter
+- [x] M3 — Direct modeling tools (box, cylinder, inspect, modify, validate, STEP export)
+- [x] M4 — Tank and tubular coil
+- [x] M5 — Taiga-S1 investigation and optional adapter contract
 - [ ] M6 — Comparison framework
 - [ ] M7 — Documentation and release preparation
 
@@ -176,6 +176,35 @@ The bridge launches `freecadcmd` with `freecad_bridge/runner.py` and exchanges a
 JSON envelope per operation. It is local-only (no sockets), performs only the
 fixed operations listed in `runner.OPERATIONS`, and kills the child on timeout.
 
+## Optional Taiga-S1 adapter (M5)
+
+The verified investigation and its limitations are recorded in
+[`taiga-s1.md`](taiga-s1.md). In short: Taiga-S1 is real and MIT-licensed, but
+it needs Torch, a live FreeCAD state, and a command execution loop. This project
+therefore ships only a contract and an import-safe adapter.
+
+```python
+from freecad_mcp.integrations.taiga import TaigaBackend
+
+backend = TaigaBackend()
+status = backend.status()          # structured; safe when Taiga is absent
+plan = backend.plan("a plate")     # RUNTIME_CONTEXT_REQUIRED; never invents steps
+```
+
+`backend.score_actions(state, goal, actions)` calls the verified
+`Policy.score` API when `freecad_s1` and Torch are installed in the server's
+environment. It only ranks candidate commands; it never executes them.
+
+Taiga and Torch are **not** project dependencies, and `uv sync` does not install
+them. The tests use a fake `freecad_s1` module and run without either package:
+
+```bash
+uv run pytest tests/test_integrations.py tests/test_taiga_adapter.py -q
+```
+
+Do not add Taiga's worker/RPC or GUI socket runtime without an explicit
+milestone decision. A PartDesign command layer does not exist in the bridge yet.
+
 ## Using it from OpenCode
 
 OpenCode V2 configures local MCP servers under `mcp.servers.<name>` with
@@ -227,11 +256,10 @@ Notes:
   flags, e.g. `FREECAD_MCP_LOG_LEVEL=DEBUG`. Do not embed secrets or absolute
   machine paths in tracked configuration.
 
-## Planned next step (M3)
+## Planned next step (M6)
 
-Implement the first explicit modeling tools on top of the bridge: create a
-document, add a box and a cylinder with validated dimensions, inspect objects
-(name/type/dimensions), modify a parameter, recompute, validate geometry, and
-export a selection to STEP. Each operation is added to `runner.OPERATIONS` and
-exposed as a typed MCP tool; a test creates real geometry and checks the STEP
-export. Bounded, validated inputs only — never arbitrary Python in FreeCAD.
+The next milestone is the comparison framework (Method A vs Method B). It must
+not assume a working Taiga execution path: M5 provides only availability
+reporting and next-action scoring. A Method B build path still needs a verified
+PartDesign execution boundary, plus state snapshot and action enumeration,
+before a fair comparison can be designed.

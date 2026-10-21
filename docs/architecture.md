@@ -49,8 +49,8 @@ concerns and must not leak into each other:
 | `src/freecad_mcp/tools/` | MCP tool definitions and typed input validation. |
 | `src/freecad_mcp/freecad_bridge/` | Communication with the FreeCAD application. |
 | `src/freecad_mcp/validation/` | Geometry and model correctness checks. |
-| `src/freecad_mcp/integrations/base.py` | Minimal interface for optional planning/generation backends. |
-| `src/freecad_mcp/integrations/taiga/` | Optional Taiga adapter (only after verifying its interface). |
+| `src/freecad_mcp/integrations/base.py` | Dependency-free contract for optional planning backends. |
+| `src/freecad_mcp/integrations/taiga/` | Optional Taiga-S1 adapter (availability and scoring only; no execution). |
 
 ## Design principles
 
@@ -113,6 +113,38 @@ variable rather than the usual entry guard.
 Deferred: a long-lived FreeCAD process with an in-memory document is not needed
 for version diagnostics. It will be reconsidered if document state must persist
 across calls without saving to disk.
+
+## Optional integrations (Milestone 5)
+
+`integrations/base.py` defines a small, dependency-free contract for optional
+backends:
+
+- `IntegrationStatus` — available or unavailable, with a structured reason;
+- `PlanStep` — an explicit, declarative step (data, never an executed command);
+- `PlanningResult` — either a non-empty generated plan or a structured
+  unavailable result (an empty "success" is rejected);
+- `PlanningBackend` — `status()` plus `plan(goal)`.
+
+The base module imports only the standard library. Importing the core package,
+`integrations`, or `integrations.taiga` must not import FreeCAD, Torch, or
+Taiga; the adapter's optional dependencies are loaded only when it is used.
+
+`integrations/taiga/` implements the adapter against the verified upstream API
+(see [`taiga-s1.md`](taiga-s1.md)):
+
+- `status()` reports missing Taiga, missing Torch, unsupported Python, or an
+  available installation.
+- `score_actions()` calls Taiga's `Policy.score` for a supplied JSON state,
+  goal, and valid action list. It returns typed probabilities and never
+  executes a command.
+- `plan()` returns `RUNTIME_CONTEXT_REQUIRED`. Taiga scores one next command
+  from a live state and needs an execution loop to build a multi-step plan, so
+  M5 deliberately does not fabricate one.
+
+This is not a PartDesign execution layer. The bridge still exposes only its
+fixed operations, and Taiga's worker/RPC and GUI socket runtime are not adopted.
+A Method B build path remains deferred until a PartDesign boundary is designed
+and verified against real FreeCAD.
 
 ## Environment facts (recorded during Milestone 0)
 

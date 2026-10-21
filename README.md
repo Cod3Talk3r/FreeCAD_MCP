@@ -34,7 +34,7 @@ Incremental development. Current progress:
 | 2 | FreeCAD bridge (connection + version diagnostics) | Done |
 | 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Done |
 | 4 | Configurable tank and tubular coil | Done |
-| 5 | Taiga-S1 investigation and optional adapter | Planned |
+| 5 | Taiga-S1 investigation and optional adapter contract | Done |
 | 6 | Comparison framework (Method A vs Method B) | Planned |
 | 7 | Documentation and release preparation | Planned |
 
@@ -45,6 +45,12 @@ list_objects, inspect_object, validate_document, save_document, export_step),
 and Milestone 4 adds tank and tubular coil geometry creation using Part::Box,
 Part::Cylinder, Part::Helix and Part::Pipe primitives through the persistent
 parametric modeling system.
+
+Milestone 5 records the verified Taiga-S1 investigation and adds an optional,
+import-safe adapter contract. The adapter can report availability and score
+candidate commands against a supplied state, but it does not generate plans or
+execute model-produced commands; Taiga-driven geometry remains deferred. See
+[`docs/taiga-s1.md`](docs/taiga-s1.md).
 
 ## Requirements
 
@@ -78,12 +84,13 @@ src/freecad_mcp/        # the Python package
     tools/              # MCP tool definitions (diagnostics + freecad_status)
     freecad_bridge/     # local child-process bridge to FreeCAD
         runner.py       # runs *inside* FreeCAD; fixed, explicit operations
+    integrations/       # optional backend contract + Taiga-S1 adapter
 docs/                   # architecture and development notes
 tests/                  # FreeCAD-independent tests + FreeCAD-gated integration tests
 ```
 
-Directories for `validation` and `integrations` are added only as the milestones
-that need them land.
+The optional `integrations/` package exists as of Milestone 5; `validation/`
+will be added when the milestone that needs it lands.
 
 ## License
 
