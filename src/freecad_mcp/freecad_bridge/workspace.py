@@ -151,6 +151,11 @@ class Workspace:
 
     root: Path
 
+    def __post_init__(self) -> None:
+        """Coerce a string root to :class:`Path` so path helpers always work."""
+        if not isinstance(self.root, Path):
+            object.__setattr__(self, "root", Path(self.root))
+
     # ------------------------------------------------------------------
     # Path helpers
     # ------------------------------------------------------------------
@@ -438,8 +443,9 @@ def atomic_save(target_path: Path, write_content) -> Path:
         RuntimeError: If the atomic replace fails.
     """
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    # Generate a unique temp name using PID + timestamp to avoid collisions
-    tmp_name = f".fcstd.tmp_{os.getpid()}_{int(time.time() * 1000)}"
+    # Generate a unique temp name using PID + timestamp to avoid collisions.
+    # Keep a .fcstd suffix: FreeCAD's saveAs appends .FCStd to names without it.
+    tmp_name = f".fcstd.tmp_{os.getpid()}_{int(time.time() * 1000)}.fcstd"
     tmp_path = target_path.parent / tmp_name
 
     try:

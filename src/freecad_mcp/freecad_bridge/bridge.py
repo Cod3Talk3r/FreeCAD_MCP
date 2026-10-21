@@ -124,16 +124,23 @@ class FreeCadBridge:
             except (OSError, ValueError) as exc:
                 raise FreeCadResponseError(f"Could not parse FreeCAD response for {op!r}: {exc}") from exc
 
-        if not isinstance(envelope, dict) or "ok" not in envelope:
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("ok"), bool):
             raise FreeCadResponseError(f"Unexpected FreeCAD response envelope for {op!r}: {envelope!r}")
 
         if not envelope["ok"]:
-            error = envelope.get("error") or {}
-            raise FreeCadOperationError(
-                str(error.get("message", "FreeCAD reported a failure.")),
-                error_type=str(error.get("type", "Error")),
-            )
+            error = envelope.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message", "FreeCAD reported a failure."))
+                error_type = str(error.get("type", "Error"))
+            else:
+                message = str(error or "FreeCAD reported a failure.")
+                error_type = "Error"
+            raise FreeCadOperationError(message, error_type=error_type)
 
+        if "result" not in envelope:
+            raise FreeCadResponseError(
+                f"Successful FreeCAD response for {op!r} has no 'result': {envelope!r}"
+            )
         result = envelope.get("result")
         return result if isinstance(result, dict) else {"value": result}
 

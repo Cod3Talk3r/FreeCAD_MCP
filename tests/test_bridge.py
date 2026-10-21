@@ -69,6 +69,33 @@ def test_error_envelope_becomes_operation_error(tmp_path: Path) -> None:
     assert "boom happened" in str(excinfo.value)
 
 
+def test_string_error_envelope_becomes_operation_error(tmp_path: Path) -> None:
+    runner = _write_envelope_runner(
+        tmp_path, '{"ok": false, "op": "ping", "error": "boom happened"}'
+    )
+    bridge = FreeCadBridge(sys.executable, runner_path=runner)
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.ping()
+    assert excinfo.value.error_type == "Error"
+    assert "boom happened" in str(excinfo.value)
+
+
+def test_success_envelope_without_result_is_response_error(tmp_path: Path) -> None:
+    runner = _write_envelope_runner(tmp_path, '{"ok": true, "op": "ping"}')
+    bridge = FreeCadBridge(sys.executable, runner_path=runner)
+    with pytest.raises(FreeCadResponseError):
+        bridge.ping()
+
+
+def test_non_boolean_ok_is_response_error(tmp_path: Path) -> None:
+    runner = _write_envelope_runner(
+        tmp_path, '{"ok": "false", "op": "ping", "error": "boom"}'
+    )
+    bridge = FreeCadBridge(sys.executable, runner_path=runner)
+    with pytest.raises(FreeCadResponseError):
+        bridge.ping()
+
+
 def test_missing_response_becomes_execution_error(tmp_path: Path) -> None:
     runner = _write_runner(tmp_path, "import sys; sys.exit(3)")
     bridge = FreeCadBridge(sys.executable, runner_path=runner)

@@ -234,12 +234,25 @@ def _run_bridge_op(
     try:
         result = bridge.run(op, params, timeout=timeout)
         if isinstance(result, dict) and "ok" in result:
+            # Backward compatibility for a bridge that returns a handler envelope.
+            if not isinstance(result["ok"], bool):
+                raise FreeCadOperationError(
+                    f"Bridge returned a non-boolean 'ok': {result!r}",
+                    error_type="BridgeError",
+                )
             if result["ok"]:
-                return result.get("result", {})
-            raise FreeCadOperationError(
-                result.get("error", {}).get("message", "FreeCAD operation failed"),
-                error_type=result.get("error", {}).get("type", "Error"),
-            )
+                payload = result.get("result", {})
+                return payload if isinstance(payload, dict) else {"value": payload}
+            error = result.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message", "FreeCAD operation failed"))
+                error_type = str(error.get("type", "Error"))
+            else:
+                message = str(error or "FreeCAD operation failed")
+                error_type = "Error"
+            raise FreeCadOperationError(message, error_type=error_type)
+        if isinstance(result, dict):
+            return result
         raise FreeCadOperationError(
             f"Unexpected bridge response format: {result!r}",
             error_type="BridgeError",

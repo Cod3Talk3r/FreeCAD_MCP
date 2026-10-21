@@ -20,7 +20,20 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+
+# When this module is executed as ``__main__`` (e.g. via ``freecadcmd.exe runner.py``),
+# Python sets __package__ to None, which breaks imports.  Set the package and
+# ensure the package root is on sys.path.
+_PACKAGE_ROOT = Path(__file__).parent.parent.parent
+if __package__ is None or __package__ == "":
+    __package__ = "freecad_mcp.freecad_bridge"
+    _pkg_dir = str(_PACKAGE_ROOT)
+    if _pkg_dir not in sys.path:
+        sys.path.insert(0, _pkg_dir)
 
 OP_GET_VERSION = "get_version"
 OP_PING = "ping"
@@ -42,6 +55,31 @@ RESPONSE_ENV = "FREECAD_MCP_RESPONSE"
 
 #: Exit code the runner returns when it could not even load/write its envelope.
 EXIT_ENVELOPE_ERROR = 2
+
+
+def _open_or_create_document(_FC: Any, wks: Any, document_id: str) -> Any:
+    """Open the workspace document if it exists, otherwise create a new one.
+
+    A missing ``.fcstd`` file is the *only* condition that creates a document.
+    If the file exists but FreeCAD cannot open it, the error propagates to the
+    handler's error reporting instead of silently replacing the document.
+    """
+    fcstd_path = wks.document_path(document_id)
+    if fcstd_path.is_file():
+        return _FC.openDocument(str(fcstd_path))
+    return _FC.newDocument(document_id)
+
+
+def _open_existing_document(_FC: Any, wks: Any, document_id: str) -> Any:
+    """Open an existing workspace document; never create one.
+
+    Raises ``FileNotFoundError`` when the saved document is absent so callers
+    report a clear error instead of creating an empty replacement.
+    """
+    fcstd_path = wks.document_path(document_id)
+    if not fcstd_path.is_file():
+        raise FileNotFoundError(f"document '{document_id}' not found at {fcstd_path}")
+    return _FC.openDocument(str(fcstd_path))
 
 
 def _op_ping(params: dict[str, Any]) -> dict[str, Any]:
@@ -80,7 +118,7 @@ def _op_get_version(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_create_document(params: dict[str, Any]) -> dict[str, Any]:
     """Create a new FreeCAD document and save it atomically."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     workspace_str = params.get("workspace") or ""
@@ -107,17 +145,14 @@ def _op_create_document(params: dict[str, Any]) -> dict[str, Any]:
     try:
         import FreeCAD as _FC
         import Part as _Part
-        if _FC.Document.exists(normalized):
-            doc = _FC.openDocument(normalized)
-        else:
-            doc = _FC.newDocument(normalized)
+        doc = _open_or_create_document(_FC, wks, normalized)
         doc.recompute()
         fcstd_path = wks.document_path(normalized)
 
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
+            doc.saveAs(str(tmp_path))
 
-        atomic_save(fcstd_path, _write_tmp)
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         # Write meta: revision = 1 on first successful save
         meta = {"revision": 1, "created_at": meta_before.get("created_at"), "document_id": normalized}
@@ -135,7 +170,7 @@ def _op_create_document(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
     """Create a Part::Box in the current document."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_name = params.get("object_name") or "Box1"
@@ -166,7 +201,7 @@ def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized) if _FC.Document.exists(normalized) else _FC.newDocument(normalized)
+        doc = _open_or_create_document(_FC, wks, normalized)
         obj_name = object_name
         counter = 0
         while doc.getObject(obj_name) is not None:
@@ -180,8 +215,8 @@ def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
 
         fcstd_path = wks.document_path(normalized)
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
-        atomic_save(fcstd_path, _write_tmp)
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         # Increment revision after successful save
         meta = ws_mod.read_meta(wks.meta_path(normalized))
@@ -212,7 +247,7 @@ def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
     """Create a Part::Cylinder in the current document."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_name = params.get("object_name") or "Cyl1"
@@ -242,7 +277,7 @@ def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized) if _FC.Document.exists(normalized) else _FC.newDocument(normalized)
+        doc = _open_or_create_document(_FC, wks, normalized)
         obj_name = object_name
         counter = 0
         while doc.getObject(obj_name) is not None:
@@ -255,8 +290,8 @@ def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
 
         fcstd_path = wks.document_path(normalized)
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
-        atomic_save(fcstd_path, _write_tmp)
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         # Increment revision
         meta = ws_mod.read_meta(wks.meta_path(normalized))
@@ -286,7 +321,7 @@ def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_set_parameter(params: dict[str, Any]) -> dict[str, Any]:
     """Set a whitelisted parameter on an existing object."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_name = params.get("object_name") or ""
@@ -321,7 +356,7 @@ def _op_set_parameter(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
         obj = doc.getObject(object_name)
         if obj is None:
             ws_mod.release_lock(lock_path, pid)
@@ -348,8 +383,8 @@ def _op_set_parameter(params: dict[str, Any]) -> dict[str, Any]:
 
         fcstd_path = wks.document_path(normalized)
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
-        atomic_save(fcstd_path, _write_tmp)
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         # Increment revision
         meta = ws_mod.read_meta(wks.meta_path(normalized))
@@ -379,7 +414,7 @@ def _op_set_parameter(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_recompute(params: dict[str, Any]) -> dict[str, Any]:
     """Recompute the active document."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     workspace_str = params.get("workspace") or ""
@@ -404,7 +439,7 @@ def _op_recompute(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
         doc.recompute()
         meta_before = ws_mod.read_meta(wks.meta_path(normalized))
     except Exception as exc:
@@ -420,7 +455,7 @@ def _op_recompute(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:
     """List all objects in a document with name, type, and basic geometry."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     workspace_str = params.get("workspace") or ""
@@ -445,7 +480,7 @@ def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
         objects = []
         for obj in doc.Objects:
             obj_info = {"name": obj.Name, "type": obj.TypeId}
@@ -489,7 +524,7 @@ def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
     """Inspect a single object by name, returning full details."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_name = params.get("object_name") or ""
@@ -515,7 +550,7 @@ def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
         obj = doc.getObject(object_name)
         if obj is None:
             ws_mod.release_lock(lock_path, pid)
@@ -557,7 +592,7 @@ def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_validate(params: dict[str, Any]) -> dict[str, Any]:
     """Validate geometry of all objects in a document."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     workspace_str = params.get("workspace") or ""
@@ -582,7 +617,7 @@ def _op_validate(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
         results = []
         for obj in doc.Objects:
             obj_result = {"name": obj.Name, "type": obj.TypeId, "valid": True, "errors": []}
@@ -631,7 +666,7 @@ def _op_validate(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_save_document(params: dict[str, Any]) -> dict[str, Any]:
     """Explicitly save the current document atomically."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     workspace_str = params.get("workspace") or ""
@@ -656,13 +691,13 @@ def _op_save_document(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
         meta_before = ws_mod.read_meta(wks.meta_path(normalized))
 
         fcstd_path = wks.document_path(normalized)
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
-        atomic_save(fcstd_path, _write_tmp)
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         # Increment revision after successful save
         meta = ws_mod.read_meta(wks.meta_path(normalized))
@@ -686,7 +721,7 @@ def _op_save_document(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_export_step(params: dict[str, Any]) -> dict[str, Any]:
     """Export selected objects to STEP format."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_names = params.get("object_names") or []
@@ -714,7 +749,7 @@ def _op_export_step(params: dict[str, Any]) -> dict[str, Any]:
     try:
         import FreeCAD as _FC
         import Part as _Part
-        doc = _FC.openDocument(normalized)
+        doc = _open_existing_document(_FC, wks, normalized)
 
         objects_to_export = []
         if object_names:
@@ -771,7 +806,7 @@ def _op_export_step(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_tank(params: dict[str, Any]) -> dict[str, Any]:
     """Create a rectangular tank (Part::Box) in the document."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_name = params.get("object_name") or "Tank1"
@@ -803,7 +838,7 @@ def _op_tank(params: dict[str, Any]) -> dict[str, Any]:
     try:
         import FreeCAD as _FC
         import Part as _Part
-        doc = _FC.openDocument(normalized) if _FC.Document.exists(normalized) else _FC.newDocument(normalized)
+        doc = _open_or_create_document(_FC, wks, normalized)
         obj_name = object_name
         counter = 0
         while doc.getObject(obj_name) is not None:
@@ -817,8 +852,8 @@ def _op_tank(params: dict[str, Any]) -> dict[str, Any]:
 
         fcstd_path = wks.document_path(normalized)
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
-        atomic_save(fcstd_path, _write_tmp)
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         meta = ws_mod.read_meta(wks.meta_path(normalized))
         meta["revision"] = meta.get("revision", 0) + 1
@@ -848,7 +883,7 @@ def _op_tank(params: dict[str, Any]) -> dict[str, Any]:
 
 def _op_tubular_coil(params: dict[str, Any]) -> dict[str, Any]:
     """Create a tubular coil (helix with pipe) in the document."""
-    from . import workspace as ws_mod
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
 
     document_id = params.get("document_id") or ""
     object_name = params.get("object_name") or "Coil1"
@@ -891,14 +926,20 @@ def _op_tubular_coil(params: dict[str, Any]) -> dict[str, Any]:
     try:
         import FreeCAD as _FC
         import Part as _Part
-        doc = _FC.openDocument(normalized) if _FC.Document.exists(normalized) else _FC.newDocument(normalized)
+        doc = _open_or_create_document(_FC, wks, normalized)
 
-        # Create a helix path for the coil
-        helix = _Part.Helix(radius=coil_radius, pitch=pitch, turns=num_turns)
-        path_wire = helix.toShape()
+        # Create a helix path for the coil.  FreeCAD 1.1.x uses
+        # ``Part.makeHelix(pitch, height, radius)``; there is no ``Part.Helix``.
+        helix = _Part.makeHelix(pitch, pitch * num_turns, coil_radius)
 
-        # Create a pipe (tube) along the helix path
-        coil_shape = _Part.makePipe(path_wire, tube_radius)
+        # Sweep a circular profile along the helix.  The profile lies in the XZ
+        # plane (normal +Y) so it is perpendicular to the helix tangent at the
+        # start point (coil_radius, 0, 0).  ``makePipeShell`` returns a Solid.
+        profile_edge = _Part.makeCircle(
+            tube_radius, _FC.Vector(coil_radius, 0, 0), _FC.Vector(0, 1, 0)
+        )
+        profile_wire = _Part.Wire([profile_edge])
+        coil_shape = helix.makePipeShell([profile_wire], True, True)
 
         obj_name = object_name
         counter = 0
@@ -911,8 +952,8 @@ def _op_tubular_coil(params: dict[str, Any]) -> dict[str, Any]:
 
         fcstd_path = wks.document_path(normalized)
         def _write_tmp(tmp_path: str) -> None:
-            doc.saveAs(tmp_path)
-        atomic_save(fcstd_path, _write_tmp)
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
 
         meta = ws_mod.read_meta(wks.meta_path(normalized))
         meta["revision"] = meta.get("revision", 0) + 1
@@ -959,6 +1000,39 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_TUBULAR_COIL: _op_tubular_coil,
 }
 
+def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:
+    """Return a canonical response envelope for a handler's return value.
+
+    Handlers for newer operations build their own envelope (``{"ok": ..., "result": ...}``)
+    while older handlers return a bare payload.  A handler's error envelope must
+    pass through unchanged: wrapping it in another success envelope would turn a
+    failure into an outer ``ok: true`` response and hide it from the bridge.
+    """
+    if isinstance(handler_result, dict) and "ok" in handler_result:
+        # ``ok`` is reserved for the response envelope.  Treat any dict that
+        # carries it as an envelope so a malformed ``{"ok": False}`` cannot be
+        # wrapped as an outer success.
+        if not isinstance(handler_result["ok"], bool):
+            return _error_envelope(op, "ResponseError", "Handler returned a non-boolean 'ok'.")
+        envelope = dict(handler_result)
+        envelope.setdefault("op", op)
+        if envelope["ok"]:
+            if "result" not in envelope:
+                return _error_envelope(
+                    op, "ResponseError", "Handler returned a success envelope without 'result'."
+                )
+        else:
+            error = envelope.get("error")
+            if not isinstance(error, dict):
+                envelope["error"] = {
+                    "type": "OperationError",
+                    "message": str(error) if error else "FreeCAD operation failed",
+                }
+        return envelope
+
+    return {"ok": True, "op": op, "result": handler_result}
+
+
 def handle_request(request: Mapping[str, Any]) -> dict[str, Any]:
     """Dispatch a request envelope. Never raises; failures become error envelopes."""
     op = request.get("op")
@@ -974,9 +1048,10 @@ def handle_request(request: Mapping[str, Any]) -> dict[str, Any]:
         return _error_envelope(op, "UnknownOperationError", f"Unknown operation {op!r}. Known: {known}.")
 
     try:
-        return {"ok": True, "op": op, "result": handler(params)}
+        handler_result = handler(params)
     except Exception as exc:  # noqa: BLE001 - report any handler failure to the parent
         return _error_envelope(op, type(exc).__name__, str(exc))
+    return _canonical_envelope(op, handler_result)
 
 
 def _error_envelope(op: str | None, error_type: str, message: str) -> dict[str, Any]:
@@ -1011,9 +1086,16 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__" or REQUEST_ENV in os.environ:
+#: Marks that this process has already dispatched its request.  Handler imports
+#: pull in ``freecad_mcp.freecad_bridge`` (whose ``__init__`` imports ``bridge``
+#: and then this module again), so without this guard the request would be
+#: executed a second time in the same process, duplicating objects/revisions.
+RUNNER_ACTIVE_ENV = "FREECAD_MCP_RUNNER_ACTIVE"
+
+if os.environ.get(RUNNER_ACTIVE_ENV) != "1" and (__name__ == "__main__" or REQUEST_ENV in os.environ):
     # FreeCAD runs a script file with ``__name__`` set to the module name (not
     # "__main__"), so the environment guard is what makes the runner fire when
     # launched as ``freecadcmd runner.py``. No ``sys.exit`` here: FreeCAD owns
     # process teardown, and the parent relies on the response file, not the code.
+    os.environ[RUNNER_ACTIVE_ENV] = "1"
     main()
