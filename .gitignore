@@ -51,6 +51,7 @@ desktop.ini
 *.fcstd.lock
 
 # --- Generated CAD outputs (do not commit build artifacts) ---
+/freecad-mcp-workspace/
 output/
 *.step
 *.stp
