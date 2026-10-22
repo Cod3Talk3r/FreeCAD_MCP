@@ -112,6 +112,9 @@ class CreateBoxParams(BaseModel):
     length: float = Field(default=10.0, description="Length in millimetres.")
     width: float = Field(default=5.0, description="Width in millimetres.")
     height: float = Field(default=3.0, description="Height in millimetres.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class CreateCylinderParams(BaseModel):
@@ -121,6 +124,9 @@ class CreateCylinderParams(BaseModel):
     object_name: str = Field(default="Cyl1", description="Name for the new Cylinder object.")
     radius: float = Field(default=2.0, description="Radius in millimetres.")
     height: float = Field(default=7.0, description="Height in millimetres.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class SetParameterParams(BaseModel):
@@ -130,18 +136,27 @@ class SetParameterParams(BaseModel):
     object_name: str = Field(description="Name of the object to modify.")
     property_name: str = Field(description="Property to change (whitelisted).")
     value: float = Field(description="New value (positive number in mm).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class RecomputeParams(BaseModel):
     """Parameters for recomputing a document."""
 
     document_id: str = Field(description="Document to recompute.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class ListObjectsParams(BaseModel):
     """Parameters for listing objects in a document."""
 
     document_id: str = Field(description="Document to list objects from.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class InspectObjectParams(BaseModel):
@@ -149,18 +164,27 @@ class InspectObjectParams(BaseModel):
 
     document_id: str = Field(description="Document containing the object.")
     object_name: str = Field(description="Name of the object to inspect.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class ValidateDocParams(BaseModel):
     """Parameters for validating a document's geometry."""
 
     document_id: str = Field(description="Document to validate.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class SaveDocumentParams(BaseModel):
     """Parameters for explicitly saving a document."""
 
     document_id: str = Field(description="Document to save.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class ExportStepParams(BaseModel):
@@ -174,6 +198,9 @@ class ExportStepParams(BaseModel):
     step_path: Optional[str] = Field(
         default=None,
         description="Optional absolute path for the STEP file. If omitted, defaults to <workspace>/<doc_id>.step.",
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
 
 
