@@ -94,4 +94,12 @@ will be added when the milestone that needs it lands.
 
 ## License
 
-No license has been selected yet. This must be decided before any public release.
+Copyright (C) 2026 Mohammad Reza Asadi
+
+This project is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**.
+
+You are free to use, study, modify, and redistribute this software under the terms of the license. If you distribute this software or modified versions of it, you must comply with the applicable requirements of the GPL-3.0 license.
+
+See the [LICENSE](LICENSE) file for the full license text.
+
+This project is an independent open-source project and is not affiliated with, endorsed by, or sponsored by the FreeCAD project.
