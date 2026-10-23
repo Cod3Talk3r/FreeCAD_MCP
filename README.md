@@ -92,6 +92,14 @@ tests/                  # FreeCAD-independent tests + FreeCAD-gated integration 
 The optional `integrations/` package exists as of Milestone 5; `validation/`
 will be added when the milestone that needs it lands.
 
+## AI-Assisted Development
+
+OpenCode and ChatGPT were used as AI-assisted development tools throughout this project.
+
+OpenCode assisted with code exploration, implementation, debugging, and testing, while ChatGPT was used for technical discussions, architectural decisions, troubleshooting, documentation, and development guidance.
+
+AI-generated suggestions and code were reviewed and tested as part of the development workflow. The project maintainer remains responsible for the project's code, technical decisions, and releases.
+
 ## License
 
 Copyright (C) 2026 Mohammad Reza Asadi
