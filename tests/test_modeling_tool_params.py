@@ -35,6 +35,10 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
     (modeling.ValidateDocParams, {"document_id": "doc"}),
     (modeling.SaveDocumentParams, {"document_id": "doc"}),
     (modeling.ExportStepParams, {"document_id": "doc"}),
+    (
+        modeling.BooleanCutParams,
+        {"document_id": "doc", "base_object": "Base", "tool_object": "Tool"},
+    ),
     (modeling.TankParams, {"document_id": "doc"}),
     (modeling.TubularCoilParams, {"document_id": "doc"}),
 )
