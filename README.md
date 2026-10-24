@@ -76,7 +76,7 @@ principles.
 
 ## Repository layout
 
-```
+```bash
 src/freecad_mcp/        # the Python package
     __init__.py         # version
     server.py           # MCP server construction + stdio entry point
