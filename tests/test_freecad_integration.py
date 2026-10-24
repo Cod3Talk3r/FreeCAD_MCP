@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 from freecad_mcp.config import Settings
-from freecad_mcp.freecad_bridge import FreeCadBridge, FreeCadOperationError, find_freecad_executable
+from freecad_mcp.freecad_bridge import (
+    FreeCadBridge,
+    FreeCadOperationError,
+    find_freecad_executable,
+)
 from freecad_mcp.tools.freecad import collect_freecad_status
 
 _DISCOVERED = find_freecad_executable()
@@ -54,7 +58,9 @@ def test_real_freecad_tank_and_coil_shapes_and_reopen(tmp_path: Path) -> None:
     bridge = FreeCadBridge.from_settings(_settings())
     workspace = str(tmp_path)
 
-    created = bridge.run("create_document", {"document_id": "itank", "workspace": workspace})
+    created = bridge.run(
+        "create_document", {"document_id": "itank", "workspace": workspace}
+    )
     assert Path(created["saved_path"]).is_file()
 
     tank = bridge.run(
@@ -70,7 +76,8 @@ def test_real_freecad_tank_and_coil_shapes_and_reopen(tmp_path: Path) -> None:
     assert tank["object_name"] == "Tank1"
 
     tank_info = bridge.run(
-        "inspect_object", {"document_id": "itank", "workspace": workspace, "object_name": "Tank1"}
+        "inspect_object",
+        {"document_id": "itank", "workspace": workspace, "object_name": "Tank1"},
     )["info"]
     assert tank_info["type"] == "Part::Box"
     assert tank_info["shape_type"] == "Solid"
@@ -80,15 +87,21 @@ def test_real_freecad_tank_and_coil_shapes_and_reopen(tmp_path: Path) -> None:
     assert tank_info["Width"] == pytest.approx(15.0)
     assert tank_info["Height"] == pytest.approx(10.0)
 
-    tank_validate = bridge.run("validate", {"document_id": "itank", "workspace": workspace})
+    tank_validate = bridge.run(
+        "validate", {"document_id": "itank", "workspace": workspace}
+    )
     assert tank_validate["all_valid"] is True
 
-    tank_reopened = bridge.run("list_objects", {"document_id": "itank", "workspace": workspace})["objects"]
+    tank_reopened = bridge.run(
+        "list_objects", {"document_id": "itank", "workspace": workspace}
+    )["objects"]
     assert [obj["name"] for obj in tank_reopened] == ["Tank1"]
     assert tank_reopened[0]["shape_type"] == "Solid"
     assert tank_reopened[0]["volume"] == pytest.approx(3000.0)
 
-    created = bridge.run("create_document", {"document_id": "icoil", "workspace": workspace})
+    created = bridge.run(
+        "create_document", {"document_id": "icoil", "workspace": workspace}
+    )
     assert Path(created["saved_path"]).is_file()
 
     coil_radius, tube_radius, num_turns, pitch = 10.0, 2.0, 5, 5.0
@@ -106,21 +119,29 @@ def test_real_freecad_tank_and_coil_shapes_and_reopen(tmp_path: Path) -> None:
     assert coil["object_name"] == "Coil1"
 
     coil_info = bridge.run(
-        "inspect_object", {"document_id": "icoil", "workspace": workspace, "object_name": "Coil1"}
+        "inspect_object",
+        {"document_id": "icoil", "workspace": workspace, "object_name": "Coil1"},
     )["info"]
     assert coil_info["type"] == "Part::Feature"
     assert coil_info["shape_type"] == "Solid"
     assert coil_info["shape_valid"] is True
-    expected_volume = math.pi * tube_radius**2 * num_turns * math.sqrt(
-        (2 * math.pi * coil_radius) ** 2 + pitch**2
+    expected_volume = (
+        math.pi
+        * tube_radius**2
+        * num_turns
+        * math.sqrt((2 * math.pi * coil_radius) ** 2 + pitch**2)
     )
     assert coil_info["volume"] > 0
     assert coil_info["volume"] == pytest.approx(expected_volume, rel=0.02)
 
-    coil_validate = bridge.run("validate", {"document_id": "icoil", "workspace": workspace})
+    coil_validate = bridge.run(
+        "validate", {"document_id": "icoil", "workspace": workspace}
+    )
     assert coil_validate["all_valid"] is True
 
-    coil_reopened = bridge.run("list_objects", {"document_id": "icoil", "workspace": workspace})["objects"]
+    coil_reopened = bridge.run(
+        "list_objects", {"document_id": "icoil", "workspace": workspace}
+    )["objects"]
     assert [obj["name"] for obj in coil_reopened] == ["Coil1"]
     assert coil_reopened[0]["shape_type"] == "Solid"
     assert coil_reopened[0]["volume"] == pytest.approx(expected_volume, rel=0.02)
@@ -128,7 +149,9 @@ def test_real_freecad_tank_and_coil_shapes_and_reopen(tmp_path: Path) -> None:
 
 @requires_freecad
 @pytest.mark.parametrize("op", ["create_document", "tank"])
-def test_real_freecad_corrupt_existing_document_is_not_replaced(op: str, tmp_path: Path) -> None:
+def test_real_freecad_corrupt_existing_document_is_not_replaced(
+    op: str, tmp_path: Path
+) -> None:
     """An existing but unopenable .fcstd must be reported, not overwritten."""
     bridge = FreeCadBridge.from_settings(_settings())
     corrupt = tmp_path / "brokendoc.fcstd"
@@ -141,3 +164,133 @@ def test_real_freecad_corrupt_existing_document_is_not_replaced(op: str, tmp_pat
     assert excinfo.value.error_type == "OperationError"
     assert "Invalid project file" in str(excinfo.value)
     assert corrupt.read_bytes() == original
+
+
+@requires_freecad
+def test_real_freecad_boolean_cut_hollow_cylinder(tmp_path: Path) -> None:
+    """Cut a concentric inner cylinder from an outer one; verify a hollow solid.
+
+    Each ``bridge.run`` launches a fresh FreeCAD process, so the final
+    ``list_objects`` call proves the saved document reopens with the cut result
+    and the unchanged source objects.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    created = bridge.run(
+        "create_document", {"document_id": "ihollow", "workspace": workspace}
+    )
+    assert Path(created["saved_path"]).is_file()
+
+    bridge.run(
+        "create_cylinder",
+        {
+            "document_id": "ihollow",
+            "workspace": workspace,
+            "object_name": "OuterCyl",
+            "radius": 2.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "create_cylinder",
+        {
+            "document_id": "ihollow",
+            "workspace": workspace,
+            "object_name": "InnerCyl",
+            "radius": 1.0,
+            "height": 10.0,
+        },
+    )
+
+    cut = bridge.run(
+        "boolean_cut",
+        {
+            "document_id": "ihollow",
+            "workspace": workspace,
+            "base_object": "OuterCyl",
+            "tool_object": "InnerCyl",
+            "result_name": "HollowCylinder",
+        },
+    )
+    expected_volume = math.pi * (2.0**2 - 1.0**2) * 10.0
+
+    assert cut["object_name"] == "HollowCylinder"
+    assert cut["base_object"] == "OuterCyl"
+    assert cut["tool_object"] == "InnerCyl"
+    assert cut["shape_type"] == "Solid"
+    assert cut["volume"] == pytest.approx(expected_volume, rel=1e-6)
+    assert cut["length"] == pytest.approx(4.0, rel=1e-6)
+    assert cut["width"] == pytest.approx(4.0, rel=1e-6)
+    assert cut["height"] == pytest.approx(10.0, rel=1e-6)
+
+    validated = bridge.run(
+        "validate", {"document_id": "ihollow", "workspace": workspace}
+    )
+    assert validated["all_valid"] is True
+    hollow_validated = next(
+        obj for obj in validated["objects"] if obj["name"] == "HollowCylinder"
+    )
+    assert hollow_validated["valid"] is True
+    assert hollow_validated["shape_type"] == "Solid"
+
+    reopened = bridge.run(
+        "list_objects", {"document_id": "ihollow", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in reopened]
+    assert names == ["OuterCyl", "InnerCyl", "HollowCylinder"]
+
+    hollow = next(obj for obj in reopened if obj["name"] == "HollowCylinder")
+    assert hollow["shape_type"] == "Solid"
+    assert hollow["volume"] == pytest.approx(expected_volume, rel=1e-6)
+
+    # Source objects remain unchanged.
+    outer = next(obj for obj in reopened if obj["name"] == "OuterCyl")
+    inner = next(obj for obj in reopened if obj["name"] == "InnerCyl")
+    assert outer["volume"] == pytest.approx(math.pi * 2.0**2 * 10.0, rel=1e-6)
+    assert inner["volume"] == pytest.approx(math.pi * 1.0**2 * 10.0, rel=1e-6)
+
+
+@requires_freecad
+def test_real_freecad_boolean_cut_error_cases(tmp_path: Path) -> None:
+    """Missing operands, identical names and empty results become structured errors."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "icuterr", "workspace": workspace})
+    for name, radius in (("A", 2.0), ("B", 1.0), ("B2", 1.0)):
+        bridge.run(
+            "create_cylinder",
+            {
+                "document_id": "icuterr",
+                "workspace": workspace,
+                "object_name": name,
+                "radius": radius,
+                "height": 10.0,
+            },
+        )
+
+    def _cut(base: str, tool: str) -> None:
+        bridge.run(
+            "boolean_cut",
+            {
+                "document_id": "icuterr",
+                "workspace": workspace,
+                "base_object": base,
+                "tool_object": tool,
+            },
+        )
+
+    with pytest.raises(FreeCadOperationError) as missing:
+        _cut("A", "Missing")
+    assert "not found" in str(missing.value)
+
+    with pytest.raises(FreeCadOperationError) as same:
+        _cut("A", "A")
+    assert "different" in str(same.value).lower()
+
+    # B and B2 are identical, coincident solids: subtracting one from the other
+    # yields an empty shape, which must be rejected rather than saved.
+    with pytest.raises(FreeCadOperationError) as empty:
+        _cut("B", "B2")
+    assert "empty" in str(empty.value).lower()

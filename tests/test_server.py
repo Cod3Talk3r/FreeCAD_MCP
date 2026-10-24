@@ -41,6 +41,19 @@ def test_server_exposes_server_info_tool() -> None:
     assert tool.output_schema is not None
 
 
+def test_server_exposes_boolean_cut_tool() -> None:
+    result = asyncio.run(_list_tools())
+
+    tools = {tool.name: tool for tool in result.tools}
+    assert "boolean_cut" in tools
+
+    tool = tools["boolean_cut"]
+    assert tool.description
+    assert tool.input_schema["type"] == "object"
+    assert "params" in tool.input_schema.get("properties", {})
+    assert tool.output_schema is not None
+
+
 def test_server_info_returns_core_payload() -> None:
     result = asyncio.run(_call_server_info(False))
 

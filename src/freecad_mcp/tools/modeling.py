@@ -86,6 +86,21 @@ class StepExportResult(BaseModel):
     success: bool = Field(description="Whether the export completed without error.")
 
 
+class BooleanCutResult(BaseModel):
+    """Result of boolean_cut."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the new Boolean-cut result object.")
+    base_object: str = Field(description="Name of the object the cut was applied to.")
+    tool_object: str = Field(description="Name of the object subtracted from the base.")
+    type: str = Field(description="FreeCAD TypeId of the result object.")
+    shape_type: str = Field(description="Shape.ShapeType of the resulting shape.")
+    volume: float = Field(description="Volume of the resulting shape in mm^3.")
+    length: Optional[float] = Field(default=None, description="Bounding-box length in mm.")
+    width: Optional[float] = Field(default=None, description="Bounding-box width in mm.")
+    height: Optional[float] = Field(default=None, description="Bounding-box height in mm.")
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -198,6 +213,28 @@ class ExportStepParams(BaseModel):
     step_path: Optional[str] = Field(
         default=None,
         description="Optional absolute path for the STEP file. If omitted, defaults to <workspace>/<doc_id>.step.",
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class BooleanCutParams(BaseModel):
+    """Parameters for subtracting one Part shape from another."""
+
+    document_id: str = Field(description="Existing document containing both objects.")
+    base_object: str = Field(
+        description="Name of the object to retain after subtraction."
+    )
+    tool_object: str = Field(
+        description="Name of the object to subtract from the base object."
+    )
+    result_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional name for the resulting object (default 'Cut1'). An "
+            "existing name is suffixed rather than overwritten."
+        ),
     )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
@@ -668,6 +705,53 @@ def _register_tools(server: Any, settings: Settings) -> None:
             step_path=result.get("step_path", ""),
             exported_count=result.get("exported_count", 0),
             success=result.get("success", True),
+        )
+
+    # ------------------------------------------------------------------
+    # boolean_cut
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="boolean_cut",
+        title="Boolean cut",
+        description=(
+            "Subtract one existing Part shape from another using FreeCAD's "
+            "native Part Boolean cut.  *base_object* is retained and "
+            "*tool_object* is subtracted from it.  The operation creates a "
+            "separate result object (named *result_name*, default 'Cut1') and "
+            "leaves both source objects unchanged.  Both objects must exist in "
+            "*document_id* and have valid Solid shapes; identical names, "
+            "invalid/empty shapes and empty cut results are reported as "
+            "structured errors.  The document is locked exclusively during the "
+            "operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def boolean_cut_tool(params: BooleanCutParams) -> BooleanCutResult:
+        """Subtract *tool_object* from *base_object* and return result info."""
+        if params.base_object == params.tool_object:
+            raise ValueError("base_object and tool_object must be different")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "base_object": params.base_object,
+            "tool_object": params.tool_object,
+            "result_name": params.result_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "boolean_cut", bridge_params)
+
+        return BooleanCutResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", ""),
+            base_object=result.get("base_object", params.base_object),
+            tool_object=result.get("tool_object", params.tool_object),
+            type=result.get("type", "Part::Feature"),
+            shape_type=result.get("shape_type", ""),
+            volume=result.get("volume", 0.0),
+            length=result.get("length"),
+            width=result.get("width"),
+            height=result.get("height"),
         )
 
 

@@ -41,7 +41,8 @@ Incremental development. Current progress:
 The MCP server, its diagnostic tool, and the local FreeCAD bridge (connection and
 version diagnostics) are implemented and tested. Milestone 3 adds direct
 modeling tools (create_box, create_cylinder, set_parameter, recompute,
-list_objects, inspect_object, validate_document, save_document, export_step),
+list_objects, inspect_object, validate_document, save_document, export_step,
+boolean_cut),
 and Milestone 4 adds tank and tubular coil geometry creation using Part::Box,
 Part::Cylinder, Part::Helix and Part::Pipe primitives through the persistent
 parametric modeling system.
