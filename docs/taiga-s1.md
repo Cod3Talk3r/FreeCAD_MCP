@@ -1,12 +1,13 @@
-# Taiga-S1 investigation (Milestone 5)
+# Taiga-S1 integration (Milestones 5–6)
 
 This note records what was verified about **Taiga-S1**, how it relates to this
-project, and the deliberately limited adapter implemented in Milestone 5.
+project, and the isolated runtime integrated in Milestone 6.
 
-**Decision:** adopt Taiga-S1 behind an optional, import-safe adapter for
-availability reporting and next-action scoring. **Do not** adopt its runtime,
-sockets, or command execution in this milestone. A full Method B execution
-path remains deferred until the missing PartDesign layer is designed.
+**Decision:** adopt Taiga-S1 behind an optional, import-safe adapter and a
+one-shot subprocess runtime for availability reporting and next-action scoring.
+**Do not** adopt its persistent worker, sockets, or command execution. A full
+Method B execution path remains deferred until the missing PartDesign layer is
+designed and verified against real FreeCAD.
 
 ## Upstream sources
 
@@ -41,7 +42,7 @@ The verified Python API is:
 from freecad_s1.model.net import from_pretrained
 from freecad_s1.rollout import Policy
 
-model = from_pretrained("shhivv/taiga-s1")
+model = from_pretrained("path/to/local/taiga-s1")
 policy = Policy(model, device="cpu")
 probabilities = policy.score(state, goal, actions)
 ```
@@ -56,56 +57,58 @@ Crucially, this API scores **one step**. It does not return a multi-step plan.
 Producing a plan requires applying the chosen command to FreeCAD, reading the
 new state, and repeating.
 
-## Runtime requirements and architecture
+## Upstream runtime versus this integration
 
-Taiga-S1 is not just a model package. The upstream runtime:
+Upstream Taiga-S1 ships a larger runtime:
 
-- locates a FreeCAD Python interpreter through `FREECAD_PYTHON` and `FREECAD_LIB`;
-- starts a FreeCAD worker process (`python -m freecad_s1.runtime.worker`) and
+- it locates a FreeCAD Python interpreter through `FREECAD_PYTHON` and
+  `FREECAD_LIB`;
+- it starts a FreeCAD worker process (`python -m freecad_s1.runtime.worker`) and
   exchanges line-delimited JSON over stdin/stdout, prefixed with `@@S1 `;
-- snapshots the live document tree, selection, sketch state, and shape;
-- enumerates the currently valid actions;
-- executes commands and fills their task dialogs from the goal;
-- for GUI demos, also uses a local socket server inside FreeCAD.
+- it snapshots the live document tree, selection, sketch state, and shape;
+- it enumerates the currently valid actions;
+- it executes commands and fills their task dialogs from the goal;
+- for GUI demos, it also uses a local socket server inside FreeCAD.
 
-The torch process does not import FreeCAD; FreeCAD runs in a separate worker.
+This project does **not** adopt that runtime. Instead it uses only the verified
+library API above, executed in a single isolated child process per request. The
+FreeCAD bridge and Taiga runtime remain separate; neither is a persistent
+service and neither uses sockets.
 
-## Compatibility with this project
-
-The current bridge is intentionally a fixed-operation, one-shot child process:
+## Implemented architecture (Milestone 6)
 
 ```
-freecad_mcp MCP tool
-  -> FreeCadBridge.run(op, params)
-  -> freecadcmd.exe runner.py
-  -> explicit operation from runner.OPERATIONS
+MCP tool (taiga_status / taiga_score_actions)
+  -> TaigaBackend (integrations/taiga/adapter.py)
+  -> TaigaRuntime (integrations/taiga/runtime.py)
+       |  writes request.json, sets FREECAD_MCP_TAIGA_REQUEST / _RESPONSE
+       v
+     configured Taiga Python + integrations/taiga/runner.py
+       |  lazily imports freecad_s1 and torch, writes response.json
+       v
+     TaigaRuntime -> validated result -> typed MCP result
 ```
 
-Its verified operations are document creation, `Part::Box`,
-`Part::Cylinder`, parameter updates, recompute, object listing/inspection,
-validation, document saving, STEP export, and the M4 tank/coil helpers. It has
-**no PartDesign command vocabulary** (`PartDesign_Pad`, `PartDesign_Pocket`,
-`PartDesign_Fillet`, sketches, patterns, and so on).
+Key properties:
 
-Therefore:
-
-- Taiga-S1 cannot be driven through the existing bridge unchanged.
-- Translating Taiga commands into bridge operations would require a new
-  PartDesign layer, which is out of scope for Milestone 5.
-- Adopting Taiga's worker/RPC or GUI socket runtime would add a second
-  execution architecture and a much larger dependency surface. That is also
-  out of scope and would conflict with the current local-only, one-shot bridge.
-- The default environment must not install Taiga or Torch. Method A works
-  without them.
-- Because Taiga requires Python >=3.11, the adapter reports an incompatible
-  status on Python 3.10. The project's default development environment is
-  Python 3.14; Torch wheel availability for that interpreter was not verified
-  here, and the adapter never installs Torch itself.
-
-## Implemented adapter (actual capabilities)
-
-`src/freecad_mcp/integrations/` contains a dependency-free contract and an
-optional Taiga adapter.
+- **One request / one response per invocation.** Temporary files carry both
+  envelopes; there are no sockets, HTTP servers, or persistent workers.
+- **Explicit interpreter only.** The parent process never falls back to
+  `sys.executable`, the project interpreter, or FreeCAD's Python.
+- **Parent import isolation.** Importing the MCP server, its tools, or
+  `integrations.taiga` never imports `freecad_s1` or `torch`. Those imports live
+  only inside `runner.py`, which executes in the child.
+- **Strict local-only models.** Before `from_pretrained`, the runner requires a
+  directory containing `config.json` (with a `config` object) and
+  `model.safetensors`. A Hugging Face repository id is rejected; nothing is
+  downloaded.
+- **Bounded.** Each operation has a timeout (default 120 s,
+  `FREECAD_MCP_TAIGA_TIMEOUT_SECONDS`); the child is killed on expiry.
+- **Structured results.** Timeouts, crashes, malformed responses, structured
+  child errors, and invalid input all map to `UnavailableReason` values instead
+  of raw tracebacks.
+- **Scores only.** `taiga_score_actions` ranks supplied candidate actions. It
+  never executes a command and never fabricates a plan.
 
 ### `integrations/base.py`
 
@@ -117,62 +120,144 @@ optional Taiga adapter.
   unavailable result; an empty "successful" plan is rejected.
 - `PlanningBackend` — a small abstract contract with `status()` and `plan()`.
 
+`UnavailableReason` includes `NOT_INSTALLED`, `MISSING_DEPENDENCY`,
+`INCOMPATIBLE`, `INVALID_REQUEST`, `RUNTIME_CONTEXT_REQUIRED`, plus the M6
+additions `TIMEOUT` and `RUNTIME_ERROR`.
+
 The module imports only the standard library. It never imports FreeCAD, Torch,
 or Taiga.
 
+### `integrations/taiga/runner.py`
+
+Standalone child script with two operations:
+
+- `status` — checks importability of `freecad_s1`, the verified API modules, and
+  `torch`/`safetensors`; reports distribution and Python versions; validates a
+  configured local model **without loading weights**.
+- `score_actions` — validates state, goal, actions, model directory, and device,
+  then calls `from_pretrained`, `Policy(model, device=...)`, and
+  `Policy.score(state, goal, actions)`. The returned mapping must contain
+  exactly the requested actions with finite probabilities in `[0, 1]`.
+
+The runner writes one JSON envelope to a file and sends diagnostics only to
+stderr. Its error types are `NotInstalled`, `MissingDependency`, `Incompatible`,
+`InvalidRequest`, and `RuntimeError`.
+
+### `integrations/taiga/runtime.py`
+
+Parent-side client. It validates the explicit interpreter and runner paths,
+serializes one request, executes `subprocess.run([...])` with the configured
+timeout, reads the response, and decodes the envelope. It raises typed errors
+for missing configuration, missing files, timeouts, non-zero exits, missing or
+invalid responses, malformed envelopes, and structured child failures. Helper
+functions map those errors to `UnavailableReason`.
+
 ### `integrations/taiga/adapter.py`
 
-`TaigaBackend` provides:
+`TaigaBackend` preserves the M5 public contract:
 
-1. **Availability detection** — imports `freecad_s1` only when `status()` is
-   called, checks that Torch is installed with `find_spec` (without loading
-   it), and reports the upstream package version when metadata is available.
-2. **Structured unavailability** — missing Taiga, missing Torch, unsupported
-   Python, incompatible APIs, and invalid requests all return typed results.
-   Method A is never broken by an absent optional dependency.
-3. **`score_actions(...)`** — the verified `Policy.score` operation. It
-   converts the supplied JSON state/goal with `State.from_json` /
-   `Goal.from_json`, calls the model, and returns typed `ActionScore` values.
-   It does **not** execute any command.
-4. **Deferred `plan(...)`** — returns
-   `UnavailableReason.RUNTIME_CONTEXT_REQUIRED` with an explanation. It never
-   fabricates a plan or claims that one was generated.
+1. **`status()` / `status_report()`** — use the isolated runtime. The report adds
+   the configured interpreter, Python/Torch versions, and local-model validation
+   state. Status never loads weights.
+2. **`score_actions(...)`** — validates input in the parent, then delegates to
+   the child. Returns typed `ActionScore` values or a structured unavailable
+   result. It does **not** execute any command.
+3. **`plan(...)`** — returns `UnavailableReason.RUNTIME_CONTEXT_REQUIRED` when
+   the runtime is available. It never fabricates a plan or claims that one was
+   generated.
 
-Milestone 5 registers no Taiga MCP tool: the adapter is a library component
-for tests and future milestones, not a replacement for Method A's tools.
+## Configuration
 
-Loading the model through a Hugging Face repository id may download weights on
-first use; pass a local directory to `TaigaBackend(model=...)` to avoid that.
-`score_actions` only works when the MCP server itself runs in an environment
-where `freecad_s1` and Torch are importable. Those packages are not project
-dependencies and are not installed by `uv sync`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FREECAD_MCP_TAIGA_PYTHON` | unset | Explicit Python interpreter containing `freecad_s1` and its dependencies. No fallback. |
+| `FREECAD_MCP_TAIGA_TIMEOUT_SECONDS` | `120` | Per-operation timeout in seconds; must be positive. |
+| `FREECAD_MCP_TAIGA_MODEL` | unset | Local model directory containing `config.json` and `model.safetensors`. Required for scoring. |
+| `FREECAD_MCP_TAIGA_DEVICE` | `cpu` | Device string passed to Taiga's model loader. |
 
-## What is deferred
+Taiga and Torch are **not** project dependencies, and `uv sync` does not install
+them. Set `FREECAD_MCP_TAIGA_PYTHON` to a separate environment where they are
+installed. Model weights must be obtained separately and pointed at with a
+local directory; this project never downloads them.
 
-The following are explicitly **not** implemented:
+## MCP tools
+
+- **`taiga_status`** — reports runtime availability, installed versions,
+  configured interpreter/model, and local-model validation. It never loads
+  weights or touches the network. When Taiga is absent it returns
+  `available=false` with an actionable reason.
+- **`taiga_score_actions`** — accepts JSON `state`, JSON `goal`, and a non-empty
+  list of distinct action ids, then returns validated action/probability pairs.
+  It requires a configured local model and never executes any action.
+
+Both tools remain usable when Taiga is not installed. Method A is unaffected.
+
+## What is out of scope
+
+The following remain **not implemented**:
 
 - a PartDesign command layer in `freecad_bridge/runner.py`;
 - Taiga's worker/RPC client or GUI socket server;
-- snapshotting the live FreeCAD state in a form Taiga accepts;
+- live FreeCAD state capture in a form Taiga accepts;
 - enumerating valid actions from the bridge;
 - applying model-produced commands and recomputing;
-- end-to-end Method B builds and Method A/Method B comparison.
+- end-to-end Method B builds and Method A/Method B comparison;
+- converting scores into a fabricated multi-step plan.
 
-Milestone 6 (comparison framework) should not assume these exist. A later
-milestone must first define the PartDesign execution boundary and verify it
-against real FreeCAD.
+M7 (comparison framework) must not assume these exist. A later milestone must
+first define the PartDesign execution boundary and verify it against real
+FreeCAD.
+
+## Milestone 7 skeleton (`integrations/taiga/workflow.py`)
+
+`run_iterative_modeling` scores actions through `TaigaBackend`, selects the
+highest-probability action, and terminates on `Done` before anything is
+executed. It is a **guarded skeleton**, not a working Method B pipeline:
+
+- not registered as an MCP tool, so no client can reach it;
+- live state comes only from a caller-supplied `state_provider`; without one
+  the run returns `runtime_context_required` instead of inventing a state;
+- execution comes only from a caller-supplied `executor`; without one the
+  selected action is reported and not executed;
+- no Taiga action id is translated into a FreeCAD operation (in particular,
+  `PartDesign_Pad` is *not* treated as `create_box`);
+- fresh state is captured after each successful operation through the same
+  provider;
+- `success` is `True` only when Taiga selects `Done`; hitting
+  `max_iterations` is reported as not-success.
+
+It has never been run against real Taiga-S1 weights or FreeCAD. Its tests use
+injected fakes and prove loop mechanics only.
 
 ## Verification in this repository
 
-Tests use a fake `freecad_s1` package, so they run without Taiga or Torch:
+The default test suite needs no Taiga, Torch, model weights, or network:
 
-- the base contract with a fake backend;
-- import isolation in a fresh interpreter where `torch` and `freecad_s1` are
-  blocked;
-- missing Taiga, missing Torch, and unsupported Python statuses;
-- deferred planning even when Taiga appears available;
-- scoring through the verified API shape, including policy caching and
-  structured failures for malformed or incompatible results.
+- `tests/test_taiga_runner.py` executes the real runner against a fake
+  `freecad_s1` package, covering status, local model validation, successful
+  scoring, malformed upstream results, and missing dependencies.
+- `tests/test_taiga_runtime.py` uses fake runner scripts to cover timeouts,
+  non-zero exits, missing responses, invalid JSON, malformed envelopes, and
+  structured child errors.
+- `tests/test_taiga_adapter.py` covers the public contract, score validation,
+  error mapping, `plan()` deferral, and fresh-interpreter import isolation with
+  `torch` and `freecad_s1` blocked.
+- `tests/test_taiga_workflow.py` covers the M7 loop with an injected runtime,
+  state provider, and executor: `Done` termination without execution, fresh
+  state capture, partial/malformed score envelopes, timeout mapping, and
+  iteration caps. It does not exercise real Taiga or FreeCAD.
+- `tests/test_server.py` checks tool registration and structured
+  unavailable behaviour.
+- `tests/test_config.py` covers the Taiga settings and invalid values.
 
-No test claims that a real Taiga model built geometry. Real FreeCAD
-integration tests continue to exercise Method A only.
+`tests/test_taiga_integration.py` is an **optional real-runtime** test. It skips
+unless all of the following hold:
+
+- `FREECAD_MCP_TAIGA_PYTHON` points at an existing interpreter;
+- `FREECAD_MCP_TAIGA_MODEL` points at an existing local model directory;
+- for the scoring test only, `FREECAD_MCP_TAIGA_TEST_STATE`,
+  `FREECAD_MCP_TAIGA_TEST_GOAL`, and `FREECAD_MCP_TAIGA_TEST_ACTIONS` provide
+  schema-valid JSON.
+
+It never downloads or installs anything. No test claims real compatibility
+unless that opt-in test actually runs and passes.

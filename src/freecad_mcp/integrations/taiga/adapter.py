@@ -1,13 +1,12 @@
 """Optional, import-safe Taiga-S1 adapter.
 
 Taiga-S1 is an external research project that scores the next FreeCAD
-PartDesign command for a live modeling state. This adapter deliberately does
-not adopt Taiga's runtime, sockets, or command execution:
+PartDesign command for a live modeling state. This adapter runs Taiga in an
+isolated child process and deliberately does not adopt Taiga's persistent
+worker, sockets, or command execution:
 
 * importing this module never imports ``freecad_s1`` or ``torch``;
-* :meth:`TaigaBackend.plan` reports that a runtime context is required,
-  because Taiga cannot produce a multi-step plan without a live FreeCAD state
-  and an execution loop;
+* :meth:`TaigaBackend.plan` reports that a runtime context is required;
 * :meth:`TaigaBackend.score_actions` exposes the one operation that the
   verified upstream API supports without executing commands: ranking a list
   of currently valid actions for a supplied state and goal.
@@ -17,14 +16,9 @@ No model-produced command is ever executed here.
 
 from __future__ import annotations
 
-import importlib
 import math
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as distribution_version
-from importlib.util import find_spec
 from typing import Any
 
 from ..base import (
@@ -33,18 +27,32 @@ from ..base import (
     PlanningResult,
     UnavailableReason,
 )
+from .runtime import (
+    DEFAULT_DEVICE,
+    DEFAULT_TIMEOUT_SECONDS,
+    TaigaRuntime,
+    TaigaRuntimeError,
+    unavailable_detail,
+    unavailable_reason_for,
+)
 
 __all__ = [
     "ActionScore",
     "ActionScoringResult",
+    "DEFAULT_DEVICE",
+    "DEFAULT_TIMEOUT_SECONDS",
     "TaigaBackend",
+    "TaigaStatusReport",
 ]
 
-#: Verified against the upstream Taiga-S1/Biome-S1 API in docs/taiga-s1.md.
-DEFAULT_MODEL = "shhivv/taiga-s1"
-DEFAULT_DEVICE = "cpu"
+#: There is no remote default: scoring requires an explicit local model
+#: directory so the application never downloads weights implicitly.
+DEFAULT_MODEL: str | None = None
 
-_MIN_PYTHON = (3, 11)
+_MODEL_ENV_HINT = (
+    "Configure FREECAD_MCP_TAIGA_MODEL with a local directory containing "
+    "config.json and model.safetensors."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,14 +119,37 @@ class ActionScoringResult:
         return cls(backend=backend, scored=False, reason=reason, detail=detail)
 
 
+@dataclass(frozen=True, slots=True)
+class TaigaStatusReport:
+    """Detailed status for the MCP ``taiga_status`` tool.
+
+    ``status`` keeps the existing integration contract; the remaining fields
+    add actionable runtime and local-model information without loading weights.
+    """
+
+    status: IntegrationStatus
+    python: str | None
+    model: str | None
+    python_version: str | None = None
+    torch_version: str | None = None
+    model_available: bool | None = None
+    model_error: str | None = None
+
+
 class TaigaBackend(PlanningBackend):
-    """Optional Taiga-S1 backend.
+    """Optional Taiga-S1 backend backed by an isolated subprocess.
 
     Args:
-        model: Hugging Face repository id or local directory accepted by the
-            verified ``from_pretrained`` API.
+        python: Python executable of the environment containing Taiga-S1 and
+            its dependencies. ``None`` reports a structured not-configured
+            status instead of falling back to the server's interpreter.
+        model: Local model directory containing ``config.json`` and
+            ``model.safetensors``. Required for scoring.
         device: Device string passed to Taiga's model loader (``"cpu"`` by
             default).
+        timeout: Maximum seconds for one child-process operation.
+        runtime: Optional pre-built runtime, primarily for tests.
+        runner_path: Optional override for the standalone runner script.
     """
 
     name = "taiga-s1"
@@ -126,62 +157,82 @@ class TaigaBackend(PlanningBackend):
     def __init__(
         self,
         *,
-        model: str = DEFAULT_MODEL,
+        python: str | None = None,
+        model: str | None = None,
         device: str = DEFAULT_DEVICE,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        runtime: TaigaRuntime | None = None,
+        runner_path: str | None = None,
     ) -> None:
-        self.model = model
-        self.device = device
-        self._policy: Any | None = None
+        self.python = python.strip() if python and python.strip() else None
+        self.model = model.strip() if model and model.strip() else None
+        self.device = (device or DEFAULT_DEVICE).strip() or DEFAULT_DEVICE
+        self.timeout = float(timeout)
+        self._runtime = runtime
+        self._runner_path = runner_path
 
     def status(self) -> IntegrationStatus:
-        """Check for an importable Taiga package and its Torch dependency.
+        """Check the isolated Taiga runtime without loading model weights."""
+        return self.status_report().status
 
-        This method imports only ``freecad_s1`` itself (whose upstream
-        ``__init__`` is empty); Torch is checked with ``find_spec`` so status
-        checks do not load a multi-hundred-megabyte library.
-        """
-        if tuple(sys.version_info[:2]) < _MIN_PYTHON:
-            return IntegrationStatus.unavailable(
-                self.name,
-                UnavailableReason.INCOMPATIBLE,
-                detail="Taiga-S1 requires Python >= 3.11.",
-            )
+    def status_report(self) -> TaigaStatusReport:
+        """Return detailed runtime and local-model status."""
+        python_version: str | None = None
+        torch_version: str | None = None
+        model_available: bool | None = None
+        model_error: str | None = None
 
         try:
-            module = importlib.import_module("freecad_s1")
-        except ImportError:
-            return IntegrationStatus.unavailable(
-                self.name,
-                UnavailableReason.NOT_INSTALLED,
-                detail=(
-                    "The 'freecad_s1' package is not importable. Install Taiga-S1 "
-                    "from its upstream repository in an isolated Python >= 3.11 "
-                    "environment; it is not a default dependency of this project."
+            runtime = self._get_runtime()
+            raw = runtime.status(model=self.model)
+        except TaigaRuntimeError as exc:
+            return TaigaStatusReport(
+                status=IntegrationStatus.unavailable(
+                    self.name,
+                    unavailable_reason_for(exc),
+                    detail=unavailable_detail(exc),
                 ),
-            )
-        except Exception as exc:  # noqa: BLE001 - status must stay structured
-            return IntegrationStatus.unavailable(
-                self.name,
-                UnavailableReason.INCOMPATIBLE,
-                detail=f"Importing 'freecad_s1' failed ({type(exc).__name__}): {exc}",
+                python=self.python,
+                model=self.model,
             )
 
-        version = getattr(module, "__version__", None)
-        if not isinstance(version, str) or not version:
-            try:
-                version = distribution_version("taiga-s1")
-            except PackageNotFoundError:
-                version = None
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("available"), bool):
+            return TaigaStatusReport(
+                status=IntegrationStatus.unavailable(
+                    self.name,
+                    UnavailableReason.INCOMPATIBLE,
+                    detail="Taiga returned a malformed status result.",
+                ),
+                python=self.python,
+                model=self.model,
+            )
 
-        if find_spec("torch") is None:
-            return IntegrationStatus.unavailable(
+        version = _optional_text(raw.get("version"))
+        python_version = _optional_text(raw.get("python_version"))
+        torch_version = _optional_text(raw.get("torch_version"))
+        if isinstance(raw.get("model_available"), bool):
+            model_available = bool(raw["model_available"])
+        model_error = _optional_text(raw.get("model_error"))
+
+        if raw["available"]:
+            status = IntegrationStatus.available(self.name, version=version)
+        else:
+            status = IntegrationStatus.unavailable(
                 self.name,
-                UnavailableReason.MISSING_DEPENDENCY,
-                detail="Taiga-S1 requires PyTorch, which is not installed.",
+                _reason_from_value(raw.get("reason")),
+                detail=_optional_text(raw.get("detail")) or "",
                 version=version,
             )
 
-        return IntegrationStatus.available(self.name, version=version)
+        return TaigaStatusReport(
+            status=status,
+            python=self.python,
+            model=self.model,
+            python_version=python_version,
+            torch_version=torch_version,
+            model_available=model_available,
+            model_error=model_error,
+        )
 
     def plan(self, goal: str) -> PlanningResult:
         """Return a structured result instead of inventing a plan.
@@ -226,62 +277,68 @@ class TaigaBackend(PlanningBackend):
 
         Returns:
             A ranked :class:`ActionScoringResult`, or a structured unavailable
-            result when Taiga, Torch, or the expected API is absent.
+            result when Taiga, its dependencies, the model, or the expected API
+            is absent.
 
-        This method only calls ``Policy.score``. It never executes a command.
+        This method only calls ``Policy.score`` in an isolated child process.
+        It never executes a command.
         """
-        status = self.status()
-        if not status.is_available:
-            return ActionScoringResult.unavailable(
-                self.name,
-                status.reason or UnavailableReason.INCOMPATIBLE,
-                detail=status.detail,
-            )
-
         action_list = _validate_actions(actions)
-        if action_list is None or not action_list:
+        if action_list is None:
             return ActionScoringResult.unavailable(
                 self.name,
                 UnavailableReason.INVALID_REQUEST,
                 detail="actions must be a non-empty sequence of distinct, non-empty action ids.",
             )
 
-        try:
-            from freecad_s1.model.net import from_pretrained
-            from freecad_s1.rollout import Policy
-            from freecad_s1.schema import Goal, State
-        except ImportError as exc:
-            reason = (
-                UnavailableReason.MISSING_DEPENDENCY
-                if getattr(exc, "name", "") == "torch"
-                else UnavailableReason.INCOMPATIBLE
-            )
+        if not isinstance(state, Mapping) or not isinstance(goal, Mapping):
             return ActionScoringResult.unavailable(
                 self.name,
-                reason,
-                detail=f"Taiga-S1's verified API is not importable: {exc}",
+                UnavailableReason.INVALID_REQUEST,
+                detail="state and goal must be JSON objects.",
+            )
+
+        if not self.model:
+            return ActionScoringResult.unavailable(
+                self.name,
+                UnavailableReason.NOT_INSTALLED,
+                detail=f"No local Taiga model is configured. {_MODEL_ENV_HINT}",
             )
 
         try:
-            policy = self._get_policy(from_pretrained, Policy)
-            parsed_state = State.from_json(dict(state))
-            parsed_goal = Goal.from_json(dict(goal))
-            raw_scores = policy.score(parsed_state, parsed_goal, action_list)
-        except Exception as exc:  # noqa: BLE001 - the adapter must not crash Method A
+            runtime = self._get_runtime()
+            raw = runtime.score_actions(
+                dict(state),
+                dict(goal),
+                action_list,
+                model=self.model,
+                device=self.device,
+            )
+        except TaigaRuntimeError as exc:
+            return ActionScoringResult.unavailable(
+                self.name,
+                unavailable_reason_for(exc),
+                detail=unavailable_detail(exc),
+            )
+
+        if not isinstance(raw, Mapping):
             return ActionScoringResult.unavailable(
                 self.name,
                 UnavailableReason.INCOMPATIBLE,
-                detail=f"Taiga-S1 scoring failed ({type(exc).__name__}): {exc}",
+                detail="Taiga returned a malformed scoring result.",
             )
 
-        return _parse_scores(self.name, action_list, raw_scores)
+        return _parse_scores(self.name, action_list, raw.get("scores"))
 
-    def _get_policy(self, from_pretrained: Any, policy_cls: Any) -> Any:
-        """Load and cache the model policy on first use."""
-        if self._policy is None:
-            model = from_pretrained(self.model, device=self.device)
-            self._policy = policy_cls(model, device=self.device)
-        return self._policy
+    def _get_runtime(self) -> TaigaRuntime:
+        """Build and cache the subprocess runtime on first use."""
+        if self._runtime is None:
+            self._runtime = TaigaRuntime(
+                self.python,
+                timeout=self.timeout,
+                runner_path=self._runner_path,
+            )
+        return self._runtime
 
 
 def _validate_actions(actions: Sequence[str]) -> list[str] | None:
@@ -300,7 +357,7 @@ def _validate_actions(actions: Sequence[str]) -> list[str] | None:
             return None
         action_list.append(action)
 
-    if len(set(action_list)) != len(action_list):
+    if not action_list or len(set(action_list)) != len(action_list):
         return None
     return action_list
 
@@ -310,36 +367,74 @@ def _parse_scores(
     actions: list[str],
     raw_scores: Any,
 ) -> ActionScoringResult:
-    """Validate the upstream mapping and convert it to typed scores."""
-    if not isinstance(raw_scores, Mapping):
+    """Validate the child's score payload and convert it to typed scores."""
+    if not isinstance(raw_scores, Sequence) or isinstance(raw_scores, (str, bytes)):
         return ActionScoringResult.unavailable(
             backend,
             UnavailableReason.INCOMPATIBLE,
-            detail="Taiga-S1 returned a non-mapping score result.",
+            detail="Taiga-S1 returned a non-list score result.",
         )
 
     expected = set(actions)
-    if set(raw_scores) != expected:
-        missing = sorted(expected - set(raw_scores))
-        extra = sorted(set(raw_scores) - expected)
-        return ActionScoringResult.unavailable(
-            backend,
-            UnavailableReason.INCOMPATIBLE,
-            detail=(
-                "Taiga-S1 returned scores that do not match the requested actions "
-                f"(missing={missing}, extra={extra})."
-            ),
-        )
-
+    seen: set[str] = set()
     scores: list[ActionScore] = []
-    for action, probability in raw_scores.items():
+    for item in raw_scores:
+        if not isinstance(item, Mapping):
+            return ActionScoringResult.unavailable(
+                backend,
+                UnavailableReason.INCOMPATIBLE,
+                detail="Taiga-S1 returned a score entry that is not an object.",
+            )
+        action = item.get("action")
+        probability = item.get("probability")
+        if not isinstance(action, str) or action not in expected:
+            return ActionScoringResult.unavailable(
+                backend,
+                UnavailableReason.INCOMPATIBLE,
+                detail=f"Taiga-S1 returned an unexpected action id: {action!r}",
+            )
+        if action in seen:
+            return ActionScoringResult.unavailable(
+                backend,
+                UnavailableReason.INCOMPATIBLE,
+                detail=f"Taiga-S1 returned a duplicate score for {action!r}.",
+            )
+        seen.add(action)
+
+        if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+            return ActionScoringResult.unavailable(
+                backend,
+                UnavailableReason.INCOMPATIBLE,
+                detail=f"Taiga-S1 returned a non-numeric probability for {action!r}.",
+            )
         try:
-            scores.append(ActionScore(action=str(action), probability=float(probability)))
-        except (TypeError, ValueError) as exc:
+            scores.append(ActionScore(action=action, probability=float(probability)))
+        except ValueError as exc:
             return ActionScoringResult.unavailable(
                 backend,
                 UnavailableReason.INCOMPATIBLE,
                 detail=f"Taiga-S1 returned an invalid score: {exc}",
             )
 
+    missing = sorted(expected - seen)
+    if missing:
+        return ActionScoringResult.unavailable(
+            backend,
+            UnavailableReason.INCOMPATIBLE,
+            detail=f"Taiga-S1 did not score the requested actions: {missing}.",
+        )
+
     return ActionScoringResult.scored_actions(backend, tuple(scores))
+
+
+def _optional_text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _reason_from_value(value: Any) -> UnavailableReason:
+    if isinstance(value, str):
+        try:
+            return UnavailableReason(value)
+        except ValueError:
+            pass
+    return UnavailableReason.INCOMPATIBLE

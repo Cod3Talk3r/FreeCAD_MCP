@@ -45,6 +45,12 @@ class UnavailableReason(str, Enum):
     INVALID_REQUEST = "invalid_request"
     """The caller supplied input the backend cannot use."""
 
+    TIMEOUT = "timeout"
+    """The backend's isolated runtime did not finish within the allotted time."""
+
+    RUNTIME_ERROR = "runtime_error"
+    """The backend's isolated runtime failed to start, crashed, or replied badly."""
+
 
 @dataclass(frozen=True, slots=True)
 class IntegrationStatus:

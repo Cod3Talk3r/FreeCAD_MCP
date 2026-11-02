@@ -27,6 +27,11 @@ async def _call_server_info(include_environment: bool) -> Any:
         return await client.call_tool("server_info", {"include_environment": include_environment})
 
 
+async def _call_tool(settings: Settings, name: str, arguments: dict[str, Any]) -> Any:
+    async with Client(create_server(settings)) as client:
+        return await client.call_tool(name, arguments)
+
+
 def test_server_exposes_server_info_tool() -> None:
     result = asyncio.run(_list_tools())
 
@@ -76,3 +81,90 @@ def test_environment_details_are_opt_in() -> None:
     assert environment is not None
     assert environment["python_version"]
     assert environment["executable"]
+
+
+def test_server_exposes_taiga_runtime_tools() -> None:
+    result = asyncio.run(_list_tools())
+
+    tools = {tool.name: tool for tool in result.tools}
+    assert "taiga_status" in tools
+    assert "taiga_score_actions" in tools
+
+    status_tool = tools["taiga_status"]
+    assert status_tool.description
+    assert status_tool.input_schema["type"] == "object"
+    assert status_tool.output_schema is not None
+
+    score_tool = tools["taiga_score_actions"]
+    assert score_tool.description
+    assert score_tool.input_schema["type"] == "object"
+    assert "params" in score_tool.input_schema.get("properties", {})
+    assert score_tool.output_schema is not None
+
+
+def test_taiga_status_is_usable_without_configuration() -> None:
+    result = asyncio.run(_call_tool(Settings(), "taiga_status", {}))
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["available"] is False
+    assert payload["reason"] == "not_installed"
+    assert "FREECAD_MCP_TAIGA_PYTHON" in payload["detail"]
+    assert payload["python"] is None
+
+
+def test_taiga_status_reports_missing_configured_interpreter(tmp_path) -> None:
+    settings = Settings(taiga_python=str(tmp_path / "missing-python.exe"))
+
+    result = asyncio.run(_call_tool(settings, "taiga_status", {}))
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["available"] is False
+    assert payload["reason"] == "not_installed"
+    assert "interpreter not found" in payload["detail"].lower()
+
+
+def test_taiga_score_actions_is_usable_without_model() -> None:
+    result = asyncio.run(
+        _call_tool(
+            Settings(),
+            "taiga_score_actions",
+            {
+                "params": {
+                    "state": {"doc_open": False},
+                    "goal": {"features": []},
+                    "actions": ["Std_New"],
+                }
+            },
+        )
+    )
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["backend"] == "taiga-s1"
+    assert payload["scored"] is False
+    assert payload["scores"] == []
+    assert payload["reason"] == "not_installed"
+    assert "FREECAD_MCP_TAIGA_MODEL" in payload["detail"]
+
+
+def test_taiga_score_actions_validates_empty_actions() -> None:
+    result = asyncio.run(
+        _call_tool(
+            Settings(),
+            "taiga_score_actions",
+            {
+                "params": {
+                    "state": {},
+                    "goal": {},
+                    "actions": [],
+                }
+            },
+        )
+    )
+
+    assert result.is_error is True

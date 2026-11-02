@@ -50,7 +50,7 @@ concerns and must not leak into each other:
 | `src/freecad_mcp/freecad_bridge/` | Communication with the FreeCAD application. |
 | `src/freecad_mcp/validation/` | Geometry and model correctness checks. |
 | `src/freecad_mcp/integrations/base.py` | Dependency-free contract for optional planning backends. |
-| `src/freecad_mcp/integrations/taiga/` | Optional Taiga-S1 adapter (availability and scoring only; no execution). |
+| `src/freecad_mcp/integrations/taiga/` | Optional Taiga-S1 adapter, isolated subprocess runtime, and child runner (availability and scoring only; no execution). |
 
 ## Design principles
 
@@ -62,9 +62,9 @@ concerns and must not leak into each other:
    globals (`FreeCAD`, `Part`, ...) live behind `freecad_bridge`.
 3. **Local-only bridge.** Any IPC/listener the bridge introduces binds to
    localhost and never exposes unauthenticated remote code execution.
-4. **Optional integration isolation.** `integrations/taiga/` may import Taiga-only
-   dependencies; nothing in the core path may. Uninstalling Taiga must not break
-   Method A.
+4. **Optional integration isolation.** `integrations/taiga/` may use Taiga-only
+   dependencies, but only inside its child runner; nothing in the parent core
+   path may import them. Uninstalling Taiga must not break Method A.
 5. **Evidence over assumption.** FreeCAD APIs, the MCP SDK API, the OpenCode MCP
    configuration format, and Taiga-S1's real interface are verified before being
    relied upon — never invented.
@@ -114,7 +114,7 @@ Deferred: a long-lived FreeCAD process with an in-memory document is not needed
 for version diagnostics. It will be reconsidered if document state must persist
 across calls without saving to disk.
 
-## Optional integrations (Milestone 5)
+## Optional integrations (Milestones 5–6)
 
 `integrations/base.py` defines a small, dependency-free contract for optional
 backends:
@@ -126,25 +126,50 @@ backends:
 - `PlanningBackend` — `status()` plus `plan(goal)`.
 
 The base module imports only the standard library. Importing the core package,
-`integrations`, or `integrations.taiga` must not import FreeCAD, Torch, or
-Taiga; the adapter's optional dependencies are loaded only when it is used.
+`integrations`, `integrations.taiga`, the tools, or the MCP server must not
+import FreeCAD, Torch, or Taiga. The Taiga child runner imports those packages
+only inside its own process.
 
 `integrations/taiga/` implements the adapter against the verified upstream API
-(see [`taiga-s1.md`](taiga-s1.md)):
+(see [`taiga-s1.md`](taiga-s1.md)). It reuses the bridge's one-shot child-process
+pattern instead of Taiga's persistent worker or sockets:
 
-- `status()` reports missing Taiga, missing Torch, unsupported Python, or an
-  available installation.
-- `score_actions()` calls Taiga's `Policy.score` for a supplied JSON state,
-  goal, and valid action list. It returns typed probabilities and never
-  executes a command.
-- `plan()` returns `RUNTIME_CONTEXT_REQUIRED`. Taiga scores one next command
-  from a live state and needs an execution loop to build a multi-step plan, so
-  M5 deliberately does not fabricate one.
+```
+taiga_status / taiga_score_actions
+  -> TaigaBackend
+  -> TaigaRuntime.run(op, params)
+       |  writes request.json, sets FREECAD_MCP_TAIGA_REQUEST / _RESPONSE
+       v
+     configured Taiga Python  runner.py
+       |  lazily imports freecad_s1 / torch -> writes response.json
+       v
+     TaigaRuntime -> validated envelope -> typed MCP result
+```
+
+Key properties:
+
+- **Explicit interpreter.** `FREECAD_MCP_TAIGA_PYTHON` must point at a Python
+  environment containing Taiga-S1. There is no fallback to the server's or
+  FreeCAD's interpreter.
+- **One request, one response.** Each operation uses a temporary directory and
+  a fresh child process; no sockets, HTTP, or persistent worker.
+- **Strict local models.** Scoring requires a local directory with
+  `config.json` and `model.safetensors`; repository ids are rejected and nothing
+  is downloaded.
+- **Bounded and structured.** A timeout (default 120 s), non-zero exit, missing
+  or malformed response, or child error maps to `UnavailableReason`, including
+  the M6 additions `TIMEOUT` and `RUNTIME_ERROR`.
+- **Status without weights.** `taiga_status` checks importability and local model
+  files but never loads weights or contacts the network.
+- **Scores, not plans.** `taiga_score_actions` ranks supplied actions and never
+  executes a command. `plan()` returns `RUNTIME_CONTEXT_REQUIRED` because a
+  multi-step plan needs a live state/execution loop.
 
 This is not a PartDesign execution layer. The bridge still exposes only its
 fixed operations, and Taiga's worker/RPC and GUI socket runtime are not adopted.
-A Method B build path remains deferred until a PartDesign boundary is designed
-and verified against real FreeCAD.
+Live state capture, action enumeration, action execution, and a Method B build
+path remain deferred until a PartDesign boundary is designed and verified
+against real FreeCAD.
 
 ## Environment facts (recorded during Milestone 0)
 

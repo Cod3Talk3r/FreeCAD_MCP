@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from freecad_mcp.freecad_bridge.discovery import (
@@ -14,6 +15,8 @@ from freecad_mcp.freecad_bridge.discovery import (
 def _fake_executable(directory: Path) -> Path:
     path = directory / executable_names()[0]
     path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(path.stat().st_mode | 0o111)
     return path
 
 

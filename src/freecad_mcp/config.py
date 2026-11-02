@@ -31,6 +31,13 @@ DEFAULT_WORKSPACE = "freecad-mcp-workspace"
 #: Environment variable / setting name for the controlled workspace directory.
 WORKSPACE_ENV = "FREECAD_MCP_WORKSPACE"
 
+#: Default per-operation timeout for the isolated Taiga-S1 runtime, in seconds.
+#: The first call may include a Torch import and model load.
+DEFAULT_TAIGA_TIMEOUT_SECONDS = 120.0
+
+#: Default device passed to Taiga's model loader.
+DEFAULT_TAIGA_DEVICE = "cpu"
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -44,6 +51,13 @@ class Settings:
             Kept as an override only; no machine-specific path is ever hard-coded.
         freecad_timeout_seconds: Maximum time to wait for one FreeCAD operation
             before it is aborted.
+        taiga_python: Optional path to the Python interpreter that contains
+            Taiga-S1 and its dependencies. ``None`` means Taiga is not
+            configured; the server never falls back to another interpreter.
+        taiga_timeout_seconds: Maximum time for one isolated Taiga operation.
+        taiga_model: Optional local model directory for Taiga-S1. Scoring
+            requires it; the server never downloads a model implicitly.
+        taiga_device: Device string passed to Taiga's model loader.
     """
 
     server_name: str = DEFAULT_SERVER_NAME
@@ -51,6 +65,10 @@ class Settings:
     freecad_executable: str | None = None
     freecad_timeout_seconds: float = DEFAULT_FREECAD_TIMEOUT_SECONDS
     workspace: str = DEFAULT_WORKSPACE
+    taiga_python: str | None = None
+    taiga_timeout_seconds: float = DEFAULT_TAIGA_TIMEOUT_SECONDS
+    taiga_model: str | None = None
+    taiga_device: str = DEFAULT_TAIGA_DEVICE
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -89,10 +107,37 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         if timeout <= 0:
             raise ValueError(f"{ENV_PREFIX}TIMEOUT_SECONDS must be positive (got {timeout})")
 
+    raw_taiga_python = env.get(f"{ENV_PREFIX}TAIGA_PYTHON")
+    taiga_python = raw_taiga_python.strip() if raw_taiga_python else None
+
+    raw_taiga_model = env.get(f"{ENV_PREFIX}TAIGA_MODEL")
+    taiga_model = raw_taiga_model.strip() if raw_taiga_model else None
+
+    taiga_timeout = DEFAULT_TAIGA_TIMEOUT_SECONDS
+    raw_taiga_timeout = env.get(f"{ENV_PREFIX}TAIGA_TIMEOUT_SECONDS")
+    if raw_taiga_timeout and raw_taiga_timeout.strip():
+        try:
+            taiga_timeout = float(raw_taiga_timeout)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ENV_PREFIX}TAIGA_TIMEOUT_SECONDS must be a number (got {raw_taiga_timeout!r})"
+            ) from exc
+        if taiga_timeout <= 0:
+            raise ValueError(
+                f"{ENV_PREFIX}TAIGA_TIMEOUT_SECONDS must be positive (got {taiga_timeout})"
+            )
+
+    raw_taiga_device = env.get(f"{ENV_PREFIX}TAIGA_DEVICE")
+    taiga_device = raw_taiga_device.strip() if raw_taiga_device else DEFAULT_TAIGA_DEVICE
+
     return Settings(
         server_name=server_name,
         log_level=raw_level,  # type: ignore[arg-type]  # validated against LOG_LEVELS above
         freecad_executable=freecad_executable or None,
         freecad_timeout_seconds=timeout,
         workspace=workspace,
+        taiga_python=taiga_python or None,
+        taiga_timeout_seconds=taiga_timeout,
+        taiga_model=taiga_model or None,
+        taiga_device=taiga_device or DEFAULT_TAIGA_DEVICE,
     )

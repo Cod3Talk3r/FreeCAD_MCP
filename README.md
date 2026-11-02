@@ -35,8 +35,9 @@ Incremental development. Current progress:
 | 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Done |
 | 4 | Configurable tank and tubular coil | Done |
 | 5 | Taiga-S1 investigation and optional adapter contract | Done |
-| 6 | Comparison framework (Method A vs Method B) | Planned |
-| 7 | Documentation and release preparation | Planned |
+| 6 | Taiga-S1 isolated runtime integration | Done |
+| 7 | Method A vs Method B comparison framework | Planned |
+| 8 | Documentation and release preparation | Planned |
 
 The MCP server, its diagnostic tool, and the local FreeCAD bridge (connection and
 version diagnostics) are implemented and tested. Milestone 3 adds direct
@@ -48,9 +49,18 @@ Part::Cylinder, Part::Helix and Part::Pipe primitives through the persistent
 parametric modeling system.
 
 Milestone 5 records the verified Taiga-S1 investigation and adds an optional,
-import-safe adapter contract. The adapter can report availability and score
+import-safe adapter contract. The adapter reports availability and scores
 candidate commands against a supplied state, but it does not generate plans or
-execute model-produced commands; Taiga-driven geometry remains deferred. See
+execute model-produced commands.
+
+Milestone 6 adds an isolated, one-shot Taiga-S1 subprocess runtime. Taiga and
+PyTorch are imported only inside a child process running in an explicitly
+configured interpreter, and models are loaded only from a validated local
+directory. Two MCP tools are available: `taiga_status` and
+`taiga_score_actions`. Neither loads weights during status nor executes any
+action. When Taiga is absent, both return structured unavailable results and
+Method A is unaffected. Live FreeCAD state capture, action enumeration, and
+action execution remain out of scope. See
 [`docs/taiga-s1.md`](docs/taiga-s1.md).
 
 ## Requirements
@@ -75,6 +85,24 @@ discovery, and the development workflow, and
 [`docs/architecture.md`](docs/architecture.md) for the module layout and design
 principles.
 
+## Optional Taiga-S1 runtime
+
+The Taiga tools are optional and off by default. Taiga, PyTorch, and model
+weights are not project dependencies. To enable scoring in a separate
+environment, configure:
+
+- `FREECAD_MCP_TAIGA_PYTHON` — explicit interpreter containing Taiga-S1;
+- `FREECAD_MCP_TAIGA_MODEL` — local directory with `config.json` and
+  `model.safetensors`;
+- `FREECAD_MCP_TAIGA_TIMEOUT_SECONDS` — default `120`;
+- `FREECAD_MCP_TAIGA_DEVICE` — default `cpu`.
+
+The server never falls back to another interpreter and never downloads a model.
+`taiga_status` checks availability without loading weights; `taiga_score_actions`
+scores supplied action ids without executing them. Both return structured
+unavailable results when Taiga is not configured. See
+[`docs/taiga-s1.md`](docs/taiga-s1.md).
+
 ## Repository layout
 
 ```bash
@@ -82,10 +110,11 @@ src/freecad_mcp/        # the Python package
     __init__.py         # version
     server.py           # MCP server construction + stdio entry point
     config.py           # environment-based settings
-    tools/              # MCP tool definitions (diagnostics + freecad_status)
+    tools/              # MCP tool definitions (diagnostics, FreeCAD, modeling, Taiga)
     freecad_bridge/     # local child-process bridge to FreeCAD
         runner.py       # runs *inside* FreeCAD; fixed, explicit operations
-    integrations/       # optional backend contract + Taiga-S1 adapter
+    integrations/       # optional backend contract + Taiga-S1 adapter/runtime
+        taiga/runner.py # standalone Taiga child runner; lazily imports Taiga/Torch
 docs/                   # architecture and development notes
 tests/                  # FreeCAD-independent tests + FreeCAD-gated integration tests
 ```

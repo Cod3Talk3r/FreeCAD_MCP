@@ -78,8 +78,10 @@ explicit approval.
 - [x] M3 — Direct modeling tools (box, cylinder, inspect, modify, validate, STEP export)
 - [x] M4 — Tank and tubular coil
 - [x] M5 — Taiga-S1 investigation and optional adapter contract
-- [ ] M6 — Comparison framework
-- [ ] M7 — Documentation and release preparation
+- [x] M6 — Taiga-S1 isolated runtime integration
+- [ ] M7 — Method A vs Method B comparison framework (only a guarded loop
+  skeleton exists; no execution boundary, no comparison harness)
+- [ ] M8 — Documentation and release preparation
 
 ## Running and inspecting the server
 
@@ -139,8 +141,13 @@ a safe default. Nothing machine-specific is committed.
 | `FREECAD_MCP_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. |
 | `FREECAD_MCP_FREECAD_EXECUTABLE` | unset (auto-discover) | Override the FreeCAD console executable; an explicit value is authoritative. |
 | `FREECAD_MCP_TIMEOUT_SECONDS` | `60` | Per-operation timeout for the FreeCAD bridge, in seconds. |
+| `FREECAD_MCP_TAIGA_PYTHON` | unset | Explicit Python interpreter containing Taiga-S1 and its dependencies; no fallback. |
+| `FREECAD_MCP_TAIGA_TIMEOUT_SECONDS` | `120` | Per-operation timeout for the isolated Taiga runtime, in seconds. |
+| `FREECAD_MCP_TAIGA_MODEL` | unset | Local Taiga model directory; required for scoring. Never downloaded implicitly. |
+| `FREECAD_MCP_TAIGA_DEVICE` | `cpu` | Device passed to Taiga's model loader. |
 
-Invalid values fail fast at startup (for example, an unknown log level).
+Invalid values fail fast at startup (for example, an unknown log level or a
+non-positive timeout).
 
 ## FreeCAD bridge
 
@@ -176,34 +183,91 @@ The bridge launches `freecadcmd` with `freecad_bridge/runner.py` and exchanges a
 JSON envelope per operation. It is local-only (no sockets), performs only the
 fixed operations listed in `runner.OPERATIONS`, and kills the child on timeout.
 
-## Optional Taiga-S1 adapter (M5)
+## Optional Taiga-S1 runtime (M6)
 
 The verified investigation and its limitations are recorded in
-[`taiga-s1.md`](taiga-s1.md). In short: Taiga-S1 is real and MIT-licensed, but
-it needs Torch, a live FreeCAD state, and a command execution loop. This project
-therefore ships only a contract and an import-safe adapter.
+[`taiga-s1.md`](taiga-s1.md). Taiga-S1 is real and MIT-licensed, but it needs
+Torch, a live FreeCAD state, and a command execution loop. This project ships an
+import-safe adapter and an isolated one-shot subprocess runtime for status and
+next-action scoring only.
+
+Taiga and Torch are **not** project dependencies, and `uv sync` does not install
+them or any model weights. Create a separate environment for them and point the
+server at it explicitly:
+
+```bash
+# Example only; do not add these to the project's dependency files.
+# python -m venv C:\taiga-env
+# C:\taiga-env\Scripts\python -m pip install taiga-s1
+
+$env:FREECAD_MCP_TAIGA_PYTHON = "C:\taiga-env\Scripts\python.exe"
+$env:FREECAD_MCP_TAIGA_MODEL = "C:\models\taiga-s1"
+$env:FREECAD_MCP_TAIGA_DEVICE = "cpu"
+$env:FREECAD_MCP_TAIGA_TIMEOUT_SECONDS = "120"
+uv run freecad-mcp
+```
+
+The project never falls back to its own interpreter or FreeCAD's Python. A blank
+or missing `FREECAD_MCP_TAIGA_PYTHON` makes `taiga_status` report
+`not_installed` while the server keeps running.
+
+The adapter API is unchanged:
 
 ```python
 from freecad_mcp.integrations.taiga import TaigaBackend
 
-backend = TaigaBackend()
-status = backend.status()          # structured; safe when Taiga is absent
+backend = TaigaBackend(
+    python="C:/taiga-env/Scripts/python.exe",
+    model="C:/models/taiga-s1",
+)
+report = backend.status_report()   # never loads weights
+status = backend.status()
 plan = backend.plan("a plate")     # RUNTIME_CONTEXT_REQUIRED; never invents steps
+result = backend.score_actions(state, goal, actions)  # scores only; no execution
 ```
 
-`backend.score_actions(state, goal, actions)` calls the verified
-`Policy.score` API when `freecad_s1` and Torch are installed in the server's
-environment. It only ranks candidate commands; it never executes them.
+Each `status_report()` or `score_actions()` call launches the configured
+interpreter with `integrations/taiga/runner.py` and exchanges one JSON request
+and response through a temporary directory. No sockets, HTTP servers, or
+persistent workers are used. The parent never imports `freecad_s1` or `torch`.
 
-Taiga and Torch are **not** project dependencies, and `uv sync` does not install
-them. The tests use a fake `freecad_s1` module and run without either package:
+Scoring requires a local model directory containing `config.json` (with a
+`config` object) and `model.safetensors`. Repository ids are rejected, so no
+implicit Hugging Face download can occur.
+
+The two MCP tools are:
+
+- `taiga_status` — runtime availability, versions, configured interpreter/model,
+  and local-model validation. Never loads weights.
+- `taiga_score_actions` — validated action/probability pairs for supplied JSON
+  state, goal, and distinct action ids. Never executes an action.
+
+Both return structured unavailable results when Taiga is not configured.
+
+### Taiga tests
+
+The normal suite needs no Taiga, Torch, weights, or network:
 
 ```bash
-uv run pytest tests/test_integrations.py tests/test_taiga_adapter.py -q
+uv run pytest tests/test_taiga_runner.py tests/test_taiga_runtime.py \
+  tests/test_taiga_adapter.py tests/test_taiga_workflow.py \
+  tests/test_config.py tests/test_server.py -q
 ```
 
+The runner and runtime tests use fake scripts and a fake `freecad_s1` package.
+Adapter tests inject a fake runtime, and an import-isolation test runs a fresh
+interpreter with `torch` and `freecad_s1` blocked.
+
+`tests/test_taiga_integration.py` is the optional real-runtime test. It skips
+unless `FREECAD_MCP_TAIGA_PYTHON` and `FREECAD_MCP_TAIGA_MODEL` point at an
+existing interpreter and local model directory. To exercise real scoring as
+well, provide schema-valid JSON in `FREECAD_MCP_TAIGA_TEST_STATE`,
+`FREECAD_MCP_TAIGA_TEST_GOAL`, and `FREECAD_MCP_TAIGA_TEST_ACTIONS`. It never
+downloads or installs anything.
+
 Do not add Taiga's worker/RPC or GUI socket runtime without an explicit
-milestone decision. A PartDesign command layer does not exist in the bridge yet.
+milestone decision. A PartDesign command layer, live state capture, action
+enumeration, and action execution do not exist in the bridge yet.
 
 ## Using it from OpenCode
 
@@ -256,10 +320,78 @@ Notes:
   flags, e.g. `FREECAD_MCP_LOG_LEVEL=DEBUG`. Do not embed secrets or absolute
   machine paths in tracked configuration.
 
-## Planned next step (M6)
+## Milestone 7 status: guarded loop skeleton only
 
-The next milestone is the comparison framework (Method A vs Method B). It must
-not assume a working Taiga execution path: M5 provides only availability
-reporting and next-action scoring. A Method B build path still needs a verified
-PartDesign execution boundary, plus state snapshot and action enumeration,
-before a fair comparison can be designed.
+`src/freecad_mcp/integrations/taiga/workflow.py` provides
+`run_iterative_modeling(goal_description, *, model, python, state_provider,
+          executor, max_iterations, ...)`. Read the following carefully — this
+is **not** a working Method B pipeline.
+
+What it actually does:
+
+- **Scores actions.** Scoring goes through the existing
+  `TaigaBackend.score_actions`, so the validated local-model loading, timeout
+  handling, and `UnavailableReason` mapping are shared with the MCP tools
+  rather than re-implemented.
+- **Selects the highest-probability action** from Taiga's reply.
+- **Terminates on `Done`.** `Done` is handled *before* the executor is
+  consulted, so it never executes a modeling operation.
+- **Refuses to invent anything.** Without a caller-supplied `state_provider`
+  the run stops with `runtime_context_required`; without a caller-supplied
+  `executor` the selected action is not executed and the run stops the same
+  way. There is no built-in state capture and no built-in execution path.
+- **Captures fresh state after each successful operation**, through the
+  caller's `state_provider`, and feeds it to the next scoring step.
+- **Never translates action ids into FreeCAD operations.** There is no
+  `PartDesign_Pad → create_box` style mapping, because no such equivalence has
+  been verified. Choosing the concrete operation is the executor's job.
+
+What it explicitly does **not** do:
+
+- it is not registered as an MCP tool, so no client can reach it;
+- it does not capture live FreeCAD state (no `State` snapshot exists);
+- it does not execute any FreeCAD operation (no PartDesign command layer);
+- it does not validate resulting geometry (that is the bridge's `validate`
+  operation, which this loop never calls);
+- it has not been run against real Taiga-S1, Torch, weights, or FreeCAD.
+
+Consequently `WorkflowResult.success` is `True` only when Taiga selects
+`Done`. Reaching `max_iterations` is reported as not-success, and a run with
+injected fakes proves loop mechanics only — never real modeling.
+
+Mock-only coverage lives in `tests/test_taiga_workflow.py` (state/executor
+boundaries, `Done` termination, fresh-state capture, malformed and partial
+score envelopes, timeout mapping, iteration caps). No Taiga, Torch, weights,
+network, or FreeCAD is needed:
+
+```bash
+uv run pytest tests/test_taiga_workflow.py -q
+```
+
+Before a comparison framework can be built, a verified PartDesign execution
+boundary and live state capture are required (see
+[`taiga-s1.md`](taiga-s1.md)).
+
+### Planned comparison framework (not implemented)
+
+- **Method A:** the LLM selects MCP modeling tools directly
+  (`create_box`, `tank`, `tubular_coil`, ...).
+- **Method B:** the LLM supplies a structured goal, and an iterative MCP–Taiga
+  loop selects and executes one action at a time.
+
+Neither method has been run end to end. Method B additionally depends on the
+PartDesign execution boundary and live state capture that do not exist, so the
+two cannot be compared fairly today. **Method A is currently the only path that
+actually models anything.**
+
+Metrics a future benchmark should record:
+- Successful completion (goal achieved).
+- Geometric correctness (valid shapes, non-zero volume).
+- Number of executed operations.
+- Failed operations (timeouts, invalid actions, runtime errors).
+- Elapsed time per workflow.
+
+Do not add Taiga's worker/RPC or GUI socket runtime without an explicit
+milestone decision. A PartDesign command layer, live state capture, action
+enumeration, and action execution remain unimplemented and are the prerequisite
+for a Method B comparison.
