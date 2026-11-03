@@ -1,4 +1,3 @@
-
 ---
 name: project-memory
 description: Create, maintain, retrieve and update persistent shared project memory for coding agents. Use when starting work on an existing project, completing significant changes, recording architectural decisions, switching agents or preparing project handoffs.
@@ -66,6 +65,7 @@ After completing a meaningful task:
 ### CURRENT_STATE.md
 
 Update:
+
 - Current implementation status.
 - Completed work.
 - Remaining work.
@@ -83,6 +83,7 @@ Update only when architecture, module responsibilities, interfaces or dependenci
 Record significant technical decisions.
 
 For each decision include:
+
 - Date.
 - Decision.
 - Reason.
@@ -94,6 +95,7 @@ Do not record trivial implementation details.
 ### TESTING.md
 
 Record:
+
 - Important test commands.
 - Relevant test results.
 - Environment requirements.
@@ -128,12 +130,14 @@ Maintain a concise index describing the purpose of each memory file and when it 
 All agents must use the same PROJECT_MEMORY directory.
 
 Before updating a memory file:
+
 1. Inspect the current Git status.
 2. Read the latest version of the target file.
 3. Check for changes made by other agents.
 4. Merge new information instead of blindly replacing content.
 
 When possible:
+
 - Keep changes small.
 - Append dated decisions instead of rewriting historical records.
 - Avoid simultaneous modifications to the same memory file.

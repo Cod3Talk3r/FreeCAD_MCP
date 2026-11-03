@@ -1,4 +1,3 @@
-
 ---
 name: token-saver
 description: Reduce unnecessary token consumption during coding, repository exploration, debugging, testing and agent workflows. Use during software development tasks to minimize context and tool output without sacrificing correctness.
@@ -81,6 +80,7 @@ Your objective is to minimize unnecessary API token consumption while maintainin
 Keep the final response concise.
 
 Report:
+
 1. What changed.
 2. Tests and verification results.
 3. Remaining issues.

@@ -20,3 +20,6 @@ Significant decisions with rationale. Keep concise; source code wins on conflict
   format, and Taiga-S1 interfaces verified before reliance; nothing invented.
 
 Add new dated decisions here; do not record trivial implementation details.
+
+- **D6 — Taiga Worker execution via Expert (2026-11-02):** Use Expert-driven execution (no PyTorch/weights) for initial integration. Policy is optional. Windows FreeCAD 1.1.4 compatible when configured with `FREECAD_PYTHON`/`FREECAD_LIB` pointing to Windows paths. Rationale: avoids heavy deps, verified working.
+- **D7 — Method A/B separation (2026-11-02):** Preserve two distinct approaches sharing infrastructure. Method B uses Goal JSON + Taiga Worker creating/saving its own document, MCP inspects artifact separately (avoid concurrent control). Rationale: verified execution pattern, clear separation of concerns.
