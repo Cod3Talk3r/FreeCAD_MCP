@@ -1225,10 +1225,22 @@ def _error_envelope(op: str | None, error_type: str, message: str) -> dict[str, 
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Read the request file, dispatch, and write the response file."""
-    del argv  # the runner takes no arguments; paths come from the environment
-    request_path = os.environ.get(REQUEST_ENV)
-    response_path = os.environ.get(RESPONSE_ENV)
+    """Read the request file, dispatch, and write the response file.
+
+    Paths may be supplied via ``--request``/``--response`` arguments (preferred,
+    since FreeCAD does not reliably preserve custom environment variables) or
+    via the ``FREECAD_MCP_REQUEST``/``FREECAD_MCP_RESPONSE`` environment
+    variables for backward compatibility.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--request", dest="request_path", default=None)
+    parser.add_argument("--response", dest="response_path", default=None)
+    args, _ = parser.parse_known_args(argv)
+
+    request_path = args.request_path or os.environ.get(REQUEST_ENV)
+    response_path = args.response_path or os.environ.get(RESPONSE_ENV)
     if not request_path or not response_path:
         print(f"{REQUEST_ENV} and {RESPONSE_ENV} must be set.", file=sys.stderr)
         return EXIT_ENVELOPE_ERROR
@@ -1258,7 +1270,12 @@ def main(argv: list[str] | None = None) -> int:
 #: executed a second time in the same process, duplicating objects/revisions.
 RUNNER_ACTIVE_ENV = "FREECAD_MCP_RUNNER_ACTIVE"
 
-if os.environ.get(RUNNER_ACTIVE_ENV) != "1" and (__name__ == "__main__" or REQUEST_ENV in os.environ):
+if os.environ.get(RUNNER_ACTIVE_ENV) != "1" and (
+    __name__ == "__main__"
+    or REQUEST_ENV in os.environ
+    or "--request" in sys.argv
+    or "--response" in sys.argv
+):
     # FreeCAD runs a script file with ``__name__`` set to the module name (not
     # "__main__"), so the environment guard is what makes the runner fire when
     # launched as ``freecadcmd runner.py``. No ``sys.exit`` here: FreeCAD owns

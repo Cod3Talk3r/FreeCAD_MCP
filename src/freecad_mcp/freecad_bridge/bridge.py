@@ -28,7 +28,7 @@ from .errors import (
     FreeCadResponseError,
     FreeCadTimeoutError,
 )
-from .runner import OP_GET_VERSION, OP_PING, REQUEST_ENV, RESPONSE_ENV
+from .runner import OP_GET_VERSION, OP_PING
 
 #: Trim captured streams before embedding them in error messages.
 _STREAM_TAIL = 4000
@@ -92,12 +92,19 @@ class FreeCadBridge:
             request_path.write_text(json.dumps(request), encoding="utf-8")
 
             env = dict(os.environ)
-            env[REQUEST_ENV] = str(request_path)
-            env[RESPONSE_ENV] = str(response_path)
+            env["FREECAD_MCP_REQUEST"] = str(request_path)
+            env["FREECAD_MCP_RESPONSE"] = str(response_path)
 
             try:
                 completed = subprocess.run(  # noqa: S603 - explicit argv, no shell
-                    [str(self.executable), str(self.runner_path)],
+                    [
+                        str(self.executable),
+                        str(self.runner_path),
+                        "--request",
+                        str(request_path),
+                        "--response",
+                        str(response_path),
+                    ],
                     env=env,
                     capture_output=True,
                     encoding="utf-8",
