@@ -6,6 +6,7 @@ import pytest
 
 from freecad_mcp.config import (
     DEFAULT_SERVER_NAME,
+    DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS,
     DEFAULT_TAIGA_DEVICE,
     DEFAULT_TAIGA_TIMEOUT_SECONDS,
     ENV_PREFIX,
@@ -97,3 +98,30 @@ def test_blank_executable_becomes_none() -> None:
 def test_invalid_log_level_raises() -> None:
     with pytest.raises(ValueError, match="LOG_LEVEL"):
         load_settings({f"{ENV_PREFIX}LOG_LEVEL": "LOUD"})
+
+
+def test_taiga_build_timeout_default_is_safe() -> None:
+    assert load_settings({}).taiga_build_timeout_seconds == DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
+
+
+def test_taiga_build_timeout_is_read_from_environment() -> None:
+    settings = load_settings({f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS": "90.5"})
+    assert settings.taiga_build_timeout_seconds == 90.5
+
+
+def test_blank_taiga_build_timeout_falls_back_to_default() -> None:
+    assert (
+        load_settings({f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS": "   "}).taiga_build_timeout_seconds
+        == DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "-0.5"])
+def test_non_positive_taiga_build_timeout_raises(value: str) -> None:
+    with pytest.raises(ValueError, match="TAIGA_BUILD_TIMEOUT_SECONDS must be positive"):
+        load_settings({f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS": value})
+
+
+def test_non_numeric_taiga_build_timeout_raises() -> None:
+    with pytest.raises(ValueError, match="TAIGA_BUILD_TIMEOUT_SECONDS must be a number"):
+        load_settings({f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS": "soon"})

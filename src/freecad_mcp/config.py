@@ -34,6 +34,7 @@ WORKSPACE_ENV = "FREECAD_MCP_WORKSPACE"
 #: Default per-operation timeout for the isolated Taiga-S1 runtime, in seconds.
 #: The first call may include a Torch import and model load.
 DEFAULT_TAIGA_TIMEOUT_SECONDS = 120.0
+DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS = 120.0
 
 #: Default device passed to Taiga's model loader.
 DEFAULT_TAIGA_DEVICE = "cpu"
@@ -67,6 +68,7 @@ class Settings:
     workspace: str = DEFAULT_WORKSPACE
     taiga_python: str | None = None
     taiga_timeout_seconds: float = DEFAULT_TAIGA_TIMEOUT_SECONDS
+    taiga_build_timeout_seconds: float = DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
     taiga_model: str | None = None
     taiga_device: str = DEFAULT_TAIGA_DEVICE
 
@@ -130,6 +132,20 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     raw_taiga_device = env.get(f"{ENV_PREFIX}TAIGA_DEVICE")
     taiga_device = raw_taiga_device.strip() if raw_taiga_device else DEFAULT_TAIGA_DEVICE
 
+    taiga_build_timeout = DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
+    raw_taiga_build_timeout = env.get(f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS")
+    if raw_taiga_build_timeout and raw_taiga_build_timeout.strip():
+        try:
+            taiga_build_timeout = float(raw_taiga_build_timeout)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS must be a number (got {raw_taiga_build_timeout!r})"
+            ) from exc
+        if taiga_build_timeout <= 0:
+            raise ValueError(
+                f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS must be positive (got {taiga_build_timeout})"
+            )
+
     return Settings(
         server_name=server_name,
         log_level=raw_level,  # type: ignore[arg-type]  # validated against LOG_LEVELS above
@@ -140,4 +156,5 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         taiga_timeout_seconds=taiga_timeout,
         taiga_model=taiga_model or None,
         taiga_device=taiga_device or DEFAULT_TAIGA_DEVICE,
+        taiga_build_timeout_seconds=taiga_build_timeout,
     )
