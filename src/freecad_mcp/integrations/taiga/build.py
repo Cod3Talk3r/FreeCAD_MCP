@@ -70,7 +70,14 @@ class BuildRuntime:
         validated = validate_goal(goal)
         return BuildRequest(goal=validated, timeout=self._timeout)
 
-    def run(self, goal: Any, *, timeout: float | None = None) -> BuildResult:
+    def run(
+        self,
+        goal: Any,
+        *,
+        timeout: float | None = None,
+        document_id: str | None = None,
+        workspace: str | None = None,
+    ) -> BuildResult:
         try:
             request = self.prepare_request(goal)
         except InvalidGoalError as exc:
@@ -88,7 +95,12 @@ class BuildRuntime:
         if effective_timeout <= 0:
             return BuildResult(ok=False, status="invalid_timeout", error="timeout must be positive", error_type="ValueError")
 
-        payload = {"op": "build", "params": {"goal": request.goal}}
+        params: dict[str, Any] = {"goal": request.goal}
+        if document_id is not None:
+            params["document_id"] = document_id
+        if workspace is not None:
+            params["workspace"] = workspace
+        payload = {"op": "build", "params": params}
 
         try:
             response = self._child_runner(payload, effective_timeout)

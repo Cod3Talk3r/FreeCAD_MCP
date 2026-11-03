@@ -39,6 +39,12 @@ DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS = 120.0
 #: Default device passed to Taiga's model loader.
 DEFAULT_TAIGA_DEVICE = "cpu"
 
+#: Default location of the Taiga-S1 source repository.  The FreeCAD child
+#: process needs ``freecad_s1`` importable; this is the repository root that
+#: contains the ``freecad_s1`` package.  ``None`` means Taiga build is not
+#: configured; the server never falls back to another location.
+DEFAULT_TAIGA_SOURCE: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -59,6 +65,10 @@ class Settings:
         taiga_model: Optional local model directory for Taiga-S1. Scoring
             requires it; the server never downloads a model implicitly.
         taiga_device: Device string passed to Taiga's model loader.
+        taiga_source: Optional path to the Taiga-S1 source repository root
+            (the directory that contains the ``freecad_s1`` package).  The
+            FreeCAD child process needs this importable.  ``None`` means Taiga
+            build is not configured.
     """
 
     server_name: str = DEFAULT_SERVER_NAME
@@ -71,6 +81,7 @@ class Settings:
     taiga_build_timeout_seconds: float = DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
     taiga_model: str | None = None
     taiga_device: str = DEFAULT_TAIGA_DEVICE
+    taiga_source: str | None = DEFAULT_TAIGA_SOURCE
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -132,6 +143,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     raw_taiga_device = env.get(f"{ENV_PREFIX}TAIGA_DEVICE")
     taiga_device = raw_taiga_device.strip() if raw_taiga_device else DEFAULT_TAIGA_DEVICE
 
+    raw_taiga_source = env.get(f"{ENV_PREFIX}TAIGA_SOURCE")
+    taiga_source = raw_taiga_source.strip() if raw_taiga_source else DEFAULT_TAIGA_SOURCE
+    if not taiga_source:
+        taiga_source = None
+
     taiga_build_timeout = DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
     raw_taiga_build_timeout = env.get(f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS")
     if raw_taiga_build_timeout and raw_taiga_build_timeout.strip():
@@ -157,4 +173,5 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         taiga_model=taiga_model or None,
         taiga_device=taiga_device or DEFAULT_TAIGA_DEVICE,
         taiga_build_timeout_seconds=taiga_build_timeout,
+        taiga_source=taiga_source,
     )

@@ -21,6 +21,11 @@ def _is_windows_path(path: str | Path) -> bool:
     return len(text) >= 3 and text[1] == ":" and text[2] in ("\\", "/")
 
 
+def is_windows_path(path: str | Path) -> bool:
+    """Return True if *path* is a native Windows drive path (e.g. ``C:\\dir``)."""
+    return _is_windows_path(path)
+
+
 def _run_wslpath(arg: str, path: str) -> str:
     try:
         completed = subprocess.run(
@@ -68,4 +73,4 @@ def for_target(path: str | Path, target: str) -> str:
     raise PathTranslationError(f"Unknown translation target: {target!r}")
 
 
-__all__ = ["PathTranslationError", "to_windows", "to_linux", "for_target"]
+__all__ = ["PathTranslationError", "is_windows_path", "to_windows", "to_linux", "for_target"]

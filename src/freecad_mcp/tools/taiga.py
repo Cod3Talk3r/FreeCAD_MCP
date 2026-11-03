@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 
 from ..config import Settings
 from ..integrations.taiga import TaigaBackend
+from ..integrations.taiga.build import BuildResult, BuildRuntime
+from ..integrations.taiga.child import TaigaChildRunner
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server.mcpserver import MCPServer
@@ -145,6 +147,134 @@ def score_actions(
     )
 
 
+class TaigaBuildParams(BaseModel):
+    """Parameters for building a Taiga goal."""
+
+    goal: dict[str, Any] = Field(
+        description=(
+            "Taiga Goal document: an ordered list of feature intents "
+            '{"kind": "...", "params": {...}} plus optional "level", "scale", '
+            "and \"target\"."
+        ),
+    )
+    document_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional workspace document identifier. If omitted, one is derived "
+            "deterministically from the goal."
+        ),
+    )
+    workspace: str | None = Field(
+        default=None,
+        description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE.",
+    )
+
+
+class TaigaBuildResult(BaseModel):
+    """Structured result of the ``taiga_build`` tool."""
+
+    ok: bool = Field(description="True only when the build reached Done and IoU >= 0.99.")
+    status: str = Field(
+        description=(
+            "Build outcome: completed, invalid_goal, feasibility_failure, "
+            "execution_failure, timeout, taiga_unavailable, child_process_failure, "
+            "invalid_response, geometry_mismatch."
+        )
+    )
+    document_id: str | None = Field(default=None, description="Workspace document identifier.")
+    saved_path: str | None = Field(default=None, description="Path to the saved FCStd artifact.")
+    artifact_written: bool = Field(default=False, description="Whether the FCStd artifact was written.")
+    metadata_written: bool = Field(default=False, description="Whether the metadata side-car was written.")
+    iou: float = Field(default=0.0, description="Volumetric IoU of the built solid against the target.")
+    match: bool = Field(default=False, description="True when IoU >= 0.99.")
+    steps: int = Field(default=0, description="Expert steps taken during execution.")
+    budget: int = Field(default=0, description="Step budget (2 * expert plan length + 6).")
+    done: bool = Field(default=False, description="Whether the Expert reached Done.")
+    feasible: bool = Field(default=False, description="Whether the goal passed feasibility.")
+    validation_ok: bool | None = Field(
+        default=None, description="Whether in-child post-save validation passed."
+    )
+    validation_errors: list[str] = Field(
+        default_factory=list, description="Post-save validation errors, if any."
+    )
+    error: str | None = Field(default=None, description="Failure message, if any.")
+    error_type: str | None = Field(default=None, description="Structured failure type, if any.")
+
+
+def _make_child_runner(settings: Settings) -> TaigaChildRunner | None:
+    """Build the isolated FreeCAD child runner, or None when not configured."""
+    if not settings.freecad_executable:
+        return None
+    if not settings.taiga_source:
+        return None
+    return TaigaChildRunner(
+        settings.freecad_executable,
+        taiga_source=settings.taiga_source,
+        timeout=settings.taiga_build_timeout_seconds,
+    )
+
+
+def taiga_build(
+    settings: Settings,
+    goal: dict[str, Any],
+    *,
+    document_id: str | None = None,
+    workspace: str | None = None,
+) -> TaigaBuildResult:
+    """Build a Taiga goal through an isolated FreeCAD child process. Never raises."""
+    runner = _make_child_runner(settings)
+    if runner is None:
+        missing = []
+        if not settings.freecad_executable:
+            missing.append("FREECAD_MCP_FREECAD_EXECUTABLE")
+        if not settings.taiga_source:
+            missing.append("FREECAD_MCP_TAIGA_SOURCE")
+        return TaigaBuildResult(
+            ok=False,
+            status="taiga_unavailable",
+            error=(
+                "Taiga build is not configured: " + ", ".join(missing) + ". "
+                "Set them and point FREECAD_MCP_TAIGA_SOURCE at the Taiga-S1 "
+                "source repository so freecad_s1 is importable by the child."
+            ),
+            error_type="TaigaUnavailableError",
+        )
+
+    runtime = BuildRuntime(child_runner=runner.run, timeout=settings.taiga_build_timeout_seconds)
+    try:
+        build_result = runtime.run(goal, document_id=document_id, workspace=workspace)
+    except Exception as exc:  # noqa: BLE001 - never leak a traceback to the client
+        return TaigaBuildResult(
+            ok=False,
+            status="child_process_failure",
+            error=f"Build runtime failed: {exc}",
+            error_type=type(exc).__name__,
+        )
+    return _to_build_result(build_result, document_id or "")
+
+
+def _to_build_result(build_result: BuildResult, document_id: str) -> TaigaBuildResult:
+    result = build_result.result or {}
+    return TaigaBuildResult(
+        ok=build_result.ok,
+        status=build_result.status,
+        document_id=result.get("document_id") or document_id or None,
+        saved_path=result.get("saved_path"),
+        artifact_written=bool(result.get("artifact_written", False)),
+        metadata_written=bool(result.get("metadata_written", False)),
+        iou=float(result.get("iou", 0.0) or 0.0),
+        match=bool(result.get("match", False)),
+        steps=int(result.get("steps", 0) or 0),
+        budget=int(result.get("budget", 0) or 0),
+        done=bool(result.get("done", False)),
+        feasible=bool(result.get("feasible", False)),
+        validation_ok=result.get("validation_ok"),
+        validation_errors=list(result.get("validation_errors") or []),
+        error=build_result.error,
+        error_type=build_result.error_type,
+    )
+
+
 def register(server: MCPServer, settings: Settings) -> None:
     """Register the optional Taiga-S1 runtime tools on ``server``."""
 
@@ -180,3 +310,21 @@ def register(server: MCPServer, settings: Settings) -> None:
     def taiga_score_actions_tool(params: TaigaScoreParams) -> TaigaScoreResult:
         """Rank candidate actions without executing them."""
         return score_actions(settings, params.state, params.goal, params.actions)
+
+    @server.tool(
+        name="taiga_build",
+        title="Build Taiga-S1 goal",
+        description=(
+            "Build a Taiga-S1 goal in an isolated FreeCAD child process using "
+            "the verified Expert-driven execution pipeline. Runs feasibility, "
+            "execution, atomic save, metadata, and in-child post-save "
+            "validation. Requires FREECAD_MCP_FREECAD_EXECUTABLE and "
+            "FREECAD_MCP_TAIGA_SOURCE. Never imports FreeCAD or Torch in the "
+            "server process. PyTorch, Policy, model weights, and scoring are "
+            "not used."
+        ),
+        structured_output=True,
+    )
+    def taiga_build_tool(params: TaigaBuildParams) -> TaigaBuildResult:
+        """Build a Taiga goal and return the structured result."""
+        return taiga_build(settings, params.goal, document_id=params.document_id, workspace=params.workspace)

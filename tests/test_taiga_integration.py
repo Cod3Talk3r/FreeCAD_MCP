@@ -1,75 +1,83 @@
-"""Optional integration tests against a real Taiga-S1 runtime.
+"""Opt-in real FreeCAD/Taiga integration tests.
 
-These tests are skipped unless both ``FREECAD_MCP_TAIGA_PYTHON`` and
-``FREECAD_MCP_TAIGA_MODEL`` are set to an existing environment and a valid
-local model directory. They never install, download, or modify anything.
+These are skipped unless ``FREECAD_MCP_FREECAD_EXECUTABLE`` and
+``FREECAD_MCP_TAIGA_SOURCE`` are both set.
 
-The scoring test additionally requires a caller-supplied state, goal, and
-action list, because the exact JSON schema belongs to the installed upstream
-version and must not be guessed here:
-
-* ``FREECAD_MCP_TAIGA_TEST_STATE``: JSON object accepted by ``State.from_json``
-* ``FREECAD_MCP_TAIGA_TEST_GOAL``: JSON object accepted by ``Goal.from_json``
-* ``FREECAD_MCP_TAIGA_TEST_ACTIONS``: JSON list of distinct action ids
+FreeCAD and ``freecad_s1`` are intentionally not imported by this parent
+module; they are loaded inside the isolated FreeCAD child process. The child
+process determines whether they are importable, and import or initialization
+failures surface as integration test failures with structured error
+information rather than skips.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 import pytest
 
-from freecad_mcp.integrations.taiga import TaigaBackend
-
-_PYTHON = os.environ.get("FREECAD_MCP_TAIGA_PYTHON", "").strip()
-_MODEL = os.environ.get("FREECAD_MCP_TAIGA_MODEL", "").strip()
-
-pytestmark = pytest.mark.skipif(
-    not (_PYTHON and _MODEL and Path(_PYTHON).is_file() and Path(_MODEL).is_dir()),
-    reason=(
-        "real Taiga-S1 integration test requires FREECAD_MCP_TAIGA_PYTHON "
-        "and FREECAD_MCP_TAIGA_MODEL to point at an installed runtime and "
-        "local model directory"
-    ),
-)
+from freecad_mcp.integrations.taiga.build import BuildRuntime
+from freecad_mcp.integrations.taiga.child import TaigaChildRunner
 
 
-def _backend() -> TaigaBackend:
-    return TaigaBackend(
-        python=_PYTHON,
-        model=_MODEL,
-        device=os.environ.get("FREECAD_MCP_TAIGA_DEVICE", "cpu"),
+def _env_values() -> tuple[str | None, str | None]:
+    return (
+        os.environ.get("FREECAD_MCP_FREECAD_EXECUTABLE"),
+        os.environ.get("FREECAD_MCP_TAIGA_SOURCE"),
     )
 
 
-def test_real_runtime_status_is_available() -> None:
-    report = _backend().status_report()
+def _skip_unless_configured() -> None:
+    freecad_exe, taiga_source = _env_values()
+    if not freecad_exe or not taiga_source:
+        pytest.skip(
+            "Set FREECAD_MCP_FREECAD_EXECUTABLE and FREECAD_MCP_TAIGA_SOURCE "
+            "to run real FreeCAD/Taiga integration tests."
+        )
 
-    assert report.status.is_available is True, report.status.detail
-    assert report.model_available is True, report.model_error
-    assert report.python_version
+
+def test_real_taiga_build_skips_when_environment_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The integration test opts out cleanly when env vars are unset."""
+    monkeypatch.delenv("FREECAD_MCP_FREECAD_EXECUTABLE", raising=False)
+    monkeypatch.delenv("FREECAD_MCP_TAIGA_SOURCE", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        _skip_unless_configured()
 
 
-@pytest.mark.skipif(
-    not (
-        os.environ.get("FREECAD_MCP_TAIGA_TEST_STATE")
-        and os.environ.get("FREECAD_MCP_TAIGA_TEST_GOAL")
-        and os.environ.get("FREECAD_MCP_TAIGA_TEST_ACTIONS")
-    ),
-    reason=(
-        "set FREECAD_MCP_TAIGA_TEST_STATE, FREECAD_MCP_TAIGA_TEST_GOAL, and "
-        "FREECAD_MCP_TAIGA_TEST_ACTIONS to exercise real scoring"
-    ),
-)
-def test_real_runtime_scores_requested_actions() -> None:
-    state = json.loads(os.environ["FREECAD_MCP_TAIGA_TEST_STATE"])
-    goal = json.loads(os.environ["FREECAD_MCP_TAIGA_TEST_GOAL"])
-    actions = json.loads(os.environ["FREECAD_MCP_TAIGA_TEST_ACTIONS"])
+def test_real_taiga_build_end_to_end(tmp_path) -> None:
+    """Build a real Taiga goal in an isolated FreeCAD child process.
 
-    result = _backend().score_actions(state, goal, actions)
+    Skips only when the required environment variables are absent.  When both
+    are set, invalid paths fail the test rather than skipping.  FreeCAD and
+    ``freecad_s1`` are loaded inside the child; import/init failures surface
+    here as failures with structured error information.
+    """
+    freecad_exe, taiga_source = _env_values()
+    _skip_unless_configured()
 
-    assert result.scored is True, result.detail
-    assert {score.action for score in result.scores} == set(actions)
-    assert all(0.0 <= score.probability <= 1.0 for score in result.scores)
+    if not os.path.isfile(freecad_exe):
+        pytest.fail(f"Configured FreeCAD executable does not exist: {freecad_exe}")
+    if not os.path.isdir(taiga_source):
+        pytest.fail(f"Configured Taiga source directory does not exist: {taiga_source}")
+
+    runner = TaigaChildRunner(freecad_exe, taiga_source=taiga_source, timeout=120.0)
+    runtime = BuildRuntime(child_runner=runner.run, timeout=120.0)
+
+    goal = {
+        "features": [
+            {"kind": "base_box", "params": {"w": 40.0, "d": 30.0, "h": 8.0}},
+        ],
+        "scale": 40.0,
+    }
+    result = runtime.run(goal, document_id="taiga_it", workspace=str(tmp_path))
+
+    assert result.ok is True, f"Build failed: {result.error_type}: {result.error}"
+    assert result.status == "completed"
+    assert result.result is not None, "Successful build must include a result payload"
+
+    child_result = result.result
+    assert child_result["match"] is True
+    assert child_result["artifact_written"] is True
+    assert child_result["document_id"] == "taiga_it"
+    assert child_result["saved_path"] is not None
+    assert os.path.isfile(child_result["saved_path"])

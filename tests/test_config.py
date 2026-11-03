@@ -100,6 +100,19 @@ def test_invalid_log_level_raises() -> None:
         load_settings({f"{ENV_PREFIX}LOG_LEVEL": "LOUD"})
 
 
+def test_taiga_source_default_is_none() -> None:
+    assert load_settings({}).taiga_source is None
+
+
+def test_taiga_source_is_read_from_environment() -> None:
+    settings = load_settings({f"{ENV_PREFIX}TAIGA_SOURCE": "  /tmp/taiga-src  "})
+    assert settings.taiga_source == "/tmp/taiga-src"
+
+
+def test_blank_taiga_source_becomes_none() -> None:
+    assert load_settings({f"{ENV_PREFIX}TAIGA_SOURCE": "   "}).taiga_source is None
+
+
 def test_taiga_build_timeout_default_is_safe() -> None:
     assert load_settings({}).taiga_build_timeout_seconds == DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
 
