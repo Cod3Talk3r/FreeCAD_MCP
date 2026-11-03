@@ -69,3 +69,6 @@ output/
 *.log
 tmp/
 scratch/
+
+# --- Agents ---
+kilo.json
