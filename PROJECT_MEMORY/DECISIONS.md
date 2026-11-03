@@ -18,8 +18,31 @@ Significant decisions with rationale. Keep concise; source code wins on conflict
   revision: `84fdd19c487658a59805531fa306fa40e8f72555`.
 - **D5 — Evidence over assumption:** FreeCAD APIs, MCP SDK, OpenCode MCP config
   format, and Taiga-S1 interfaces verified before reliance; nothing invented.
+- **D6 — Taiga Worker execution via Expert (2026-11-02):** Use Expert-driven
+  execution (no PyTorch/weights) for initial integration. Policy is optional.
+  Windows FreeCAD 1.1.4 compatible when configured with `FREECAD_PYTHON`/
+  `FREECAD_LIB` pointing to Windows paths. Rationale: avoids heavy deps,
+  verified working.
+- **D7 — Method A/B separation (2026-11-02):** Preserve two distinct approaches
+  sharing infrastructure. Method B uses Goal JSON + Taiga Worker
+  creating/saving its own document, MCP inspects artifact separately (avoid
+  concurrent control). Rationale: verified execution pattern, clear separation
+  of concerns.
+- **D8 — Taiga build execution via isolated FreeCAD child (2026-11-03):**
+  `taiga_build` tool → `BuildRuntime` → `TaigaChildRunner` → `freecadcmd`.
+  Child runs feasibility + Expert execution loop, atomic save, metadata, and
+  PartDesign-aware post-save validation. Rationale: keeps server process
+  FreeCAD-free; verified against real FreeCAD 1.1.4.
+- **D9 — argv `--pass` transport (2026-11-03):** Request/response paths passed
+  as positional args after `--pass` in `freecadcmd.exe -c "runpy.run_path(...)"
+  --pass <req> <resp>`. Rationale: `freecadcmd.exe` strips custom environment
+  variables (E1) and intercepts `--response` as its internal `--response-file`
+  option; positional args after `--pass` are passed through uninterpreted.
+- **D10 — No Taiga logic in `freecad_bridge/runner.py` (2026-11-03):** runner.py
+  remains Method A only; Taiga execution lives in
+  `freecad_bridge/taiga_runner.py` and `integrations/taiga/child.py`.
+  Rationale: preserve Method A independence; avoid conflating distinct bridges.
 
 Add new dated decisions here; do not record trivial implementation details.
 
-- **D6 — Taiga Worker execution via Expert (2026-11-02):** Use Expert-driven execution (no PyTorch/weights) for initial integration. Policy is optional. Windows FreeCAD 1.1.4 compatible when configured with `FREECAD_PYTHON`/`FREECAD_LIB` pointing to Windows paths. Rationale: avoids heavy deps, verified working.
-- **D7 — Method A/B separation (2026-11-02):** Preserve two distinct approaches sharing infrastructure. Method B uses Goal JSON + Taiga Worker creating/saving its own document, MCP inspects artifact separately (avoid concurrent control). Rationale: verified execution pattern, clear separation of concerns.
+---

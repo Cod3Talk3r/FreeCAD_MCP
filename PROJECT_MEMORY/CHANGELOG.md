@@ -14,15 +14,22 @@
 - M4: tank and tubular coil geometry — done.
 - M5: Taiga-S1 investigation and adapter contract — done.
 - M6: isolated Taiga-S1 runtime (`taiga_status`, `taiga_score_actions`) — done
-  (`396c45a`, HEAD).
-- M7: Method A vs Method B comparison — planned; only a guarded loop skeleton
-  exists.
+  (`396c45a`).
+- M7: Taiga build execution (`taiga_build`) — done
+  (`1949a5b` feat: add real Taiga FreeCAD build execution).
 - M8: documentation and release preparation — planned.
 
 ## Recent commits
 
-- `396c45a` feat: add Taiga-S1 integration foundation (HEAD).
+- `1949a5b` feat: add real Taiga FreeCAD build execution (HEAD).
+- `df225fd` feat: add Taiga goal validation and build runtime.
+- `b2b090a` feat: add cross-platform pathing and bridge transport.
+- `a078b6e` chore: ignore local Kilo configuration.
+- `54461ac` docs: add Taiga planning skill and update project memory.
+- `396c45a` feat: add Taiga-S1 integration foundation.
 - `ae62d24` Merge branch `feat/freecad-mcp`.
 - `3f98a94` feat: add boolean cut modeling tool.
 
 Record meaningful milestones here, not every minor edit.
+
+---

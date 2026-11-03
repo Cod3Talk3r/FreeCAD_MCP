@@ -6,19 +6,24 @@
 - FreeCAD-gated integration tests: `uv run pytest tests/test_freecad_integration.py -v`
   — skips when no FreeCAD console is found; set `FREECAD_MCP_FREECAD_EXECUTABLE` to override.
 - Taiga unit tests (no Taiga/Torch/weights/network needed):
-  `uv run pytest tests/test_taiga_runner.py tests/test_taiga_runtime.py tests/test_taiga_adapter.py tests/test_taiga_workflow.py tests/test_config.py tests/test_server.py -q`
+  `uv run pytest tests/test_taiga_runner.py tests/test_taiga_runtime.py tests/test_taiga_adapter.py tests/test_taiga_workflow.py tests/test_taiga_goal.py tests/test_taiga_build.py tests/test_taiga_build_tool.py tests/test_taiga_child.py tests/test_taiga_diagnostic.py tests/test_config.py tests/test_server.py -q`
 - Guarded-loop skeleton tests: `uv run pytest tests/test_taiga_workflow.py -q`.
+- Real Taiga/FreeCAD integration (opt-in, Windows only):
+  `FREECAD_MCP_FREECAD_EXECUTABLE="E:\Softwares\FreeCAD\bin\freecadcmd.exe" FREECAD_MCP_TAIGA_SOURCE="G:\...\taiga-upstream-copy" uv run pytest tests/test_taiga_integration.py tests/test_taiga_diagnostic.py -q -rs`
 
 ## Verified results
 
-- 2026-11-02 (this environment, Linux): `uv run pytest` → **255 passed, 9 skipped**
-  in ~24 s. Skips: 7 FreeCAD integration tests (console not found) and 2 real-Taiga
+- 2026-11-03 (this environment, Linux): `uv run pytest -q` → **335 passed, 9 skipped**
+  in ~31 s. Skips: FreeCAD integration tests (console not found) and real-Taiga
   integration tests (env not configured).
+- Real Windows integration (FreeCAD 1.1.4, Taiga upstream
+  `84fdd19c`): `tests/test_taiga_integration.py` → **2 passed**.
 
 ## Limitations
 
-- No real FreeCAD instance or real Taiga-S1 / Torch / weights runs have been
-  verified yet; FreeCAD-dependent and real-Taiga tests skip instead of failing
-  when the runtime is absent.
-
+- Real FreeCAD instance and real Taiga-S1 / Torch / weights runs not available
+  in this Linux environment; FreeCAD-dependent and real-Taiga tests skip instead
+  of failing when the runtime is absent.
 - Never record unverified results as successful.
+
+---

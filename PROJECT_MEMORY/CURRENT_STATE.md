@@ -2,16 +2,21 @@
 
 ## Latest verified state
 
-- HEAD: `396c45a` — `feat: add Taiga-S1 integration foundation` (branch
+- HEAD: `1949a5b` — `feat: add real Taiga FreeCAD build execution` (branch
   `feat/freecad-mcp`).
-- Full test suite verified locally: `uv run pytest` → **255 passed, 9 skipped**
-  (~24 s, 2026-11-02). The skips are FreeCAD-console-missing (7 tests) and
-  opt-in real-Taiga integration tests (2 tests); no FreeCAD / Taiga runtime was
-  available in this environment.
+- Full test suite verified locally: `uv run pytest -q` → **335 passed, 9 skipped**
+  (~31 s). Skips are FreeCAD-console-missing and opt-in real-Taiga integration
+  tests; no FreeCAD / Taiga runtime was available in this Linux environment.
+- Real Windows integration test (`tests/test_taiga_integration.py`):
+  **2 passed** against FreeCAD 1.1.4 at `E:\Softwares\FreeCAD\bin\freecadcmd.exe`
+  with Taiga source at `G:\Cources\py\Projects\taiga-upstream-copy`.
+- CLI argument transport uses FreeCAD's `--pass` mechanism (positional args
+  after `--pass`) because `freecadcmd.exe` strips custom env vars and
+  intercepts `--response` as its internal `--response-file` option.
 
 ## Implemented
 
-- Milestones 0–6 are code-complete:
+- Milestones 0–7 are code-complete:
   - MCP server skeleton + `server_info` / `freecad_status` diagnostics.
   - FreeCAD bridge via one-shot child process (`freecad_bridge/`).
   - Direct parametric modeling tools: create box/cylinder, set_parameter,
@@ -19,22 +24,46 @@
     tubular coil.
   - Optional Taiga-S1 integration: isolated one-shot subprocess runtime with
     `taiga_status` and `taiga_score_actions`.
-- Exposed MCP tools: `server_info`, `freecad_status`, `create_document`,
-  `create_box`, `create_cylinder`, `set_parameter`, `recompute`, `list_objects`,
-  `inspect_object`, `validate_document`, `save_document`, `export_step`,
-  `boolean_cut`, `tank`, `tubular_coil`, `taiga_status`, `taiga_score_actions`.
+  - **Taiga build execution (`taiga_build`):** real isolated FreeCAD child
+    process runs feasibility + Expert-driven execution loop, atomic FCStd save,
+    metadata side-car, and in-child post-save validation (PartDesign-aware
+    `Body.Tip.Shape` inspection).
+
+## Exposed MCP tools
+
+`server_info`, `freecad_status`, `create_document`, `create_box`,
+`create_cylinder`, `set_parameter`, `recompute`, `list_objects`,
+`inspect_object`, `validate_document`, `save_document`, `export_step`,
+`boolean_cut`, `tank`, `tubular_coil`, `taiga_status`, `taiga_score_actions`,
+`taiga_build`.
+
+## New files (Phase 1–3)
+
+- `src/freecad_mcp/pathing.py` — shared path translation (WSL2↔Windows via
+  `wslpath`, no shell interpolation).
+- `src/freecad_mcp/freecad_bridge/taiga_runner.py` — FreeCAD-side Taiga build
+  runner (child process only; imports FreeCAD/freecad_s1 lazily).
+- `src/freecad_mcp/integrations/taiga/child.py` — parent-side `TaigaChildRunner`
+  (argv-based `--pass` transport, diagnostics, error classification).
+- `src/freecad_mcp/tools/taiga.py` — `taiga_build` MCP tool registration plus
+  `TaigaBuildParams`/`TaigaBuildResult` contracts.
+
+## New config settings
+
+- `FREECAD_MCP_TAIGA_SOURCE` — Taiga-S1 source repository root (child imports
+  `freecad_s1` from here). `None` → Taiga build unavailable.
+- `FREECAD_MCP_TAIGA_BUILD_TIMEOUT_SECONDS` — per-build timeout (default 120s).
 
 ## Outstanding / known limitations
 
-- Milestone 7 (Method A vs Method B comparison) is not implemented; only a
-  guarded `run_iterative_modeling` skeleton exists (loop mechanics with injected
-  fakes only).
 - Milestone 8 (documentation/release preparation) not started.
 - FreeCAD required from Milestone 2 on; developed against FreeCAD 1.1.x on a
   Windows host; system Python cannot import FreeCAD; bridge uses the FreeCAD
   console interpreter.
-- Docs reference `src/freecad_mcp/validation/`, which does not exist yet.
-- No end-to-end FreeCAD or real Taiga-S1 / Torch / weights verification yet.
+- `subprocess.run` timeout does not kill the child on expiry (Python stdlib
+  limitation); orphaned lock files handled by workspace stale-lock detection.
+- Real FreeCAD integration not runnable in this Linux environment; gated behind
+  `FREECAD_MCP_FREECAD_EXECUTABLE` + `FREECAD_MCP_TAIGA_SOURCE`.
 
 ## Task-specific notes
 
@@ -42,53 +71,67 @@
   `.agents/skills/` and `PROJECT_MEMORY/`; root `AGENTS.md` routes agents to them.
 - `gen_traceback.py` is an unrelated untracked file; do not modify or stage it.
 
-## Taiga-S1 integration (verified 2026-11-02)
+## Taiga-S1 integration (verified 2026-11-03)
 
 ### Runtime compatibility (VERIFIED)
-- **Upstream:** `/tmp/taiga-upstream`, pinned commit `84fdd19c487658a59805531fa306fa40e8f72555`
+- **Upstream:** `/mnt/g/tmp_kilo_exp/taiga_src`, pinned commit
+  `84fdd19c487658a59805531fa306fa40e8f72555`
 - **FreeCAD:** 1.1.4 on Windows at `E:\Softwares\FreeCAD`, embedded Python 3.11.14
-- **Launch from WSL2:** Possible when `FREECAD_PYTHON` and `FREECAD_LIB` set to Windows paths; `freecad_s1` must be on PYTHONPATH for FreeCAD Python
-- **Path note:** Taiga's `fcenv.py` has Linux/macOS candidates only; explicit env vars required for Windows
+- **Launch from WSL2:** Possible when `FREECAD_PYTHON` and `FREECAD_LIB` set to
+  Windows paths; `freecad_s1` must be on PYTHONPATH for FreeCAD Python
 
 ### Expert-driven execution (VERIFIED)
-- Goal parsing works without external deps
-- Expert-driven Worker execution works without PyTorch, safetensors, or trained model weights
-- Worker executes Goals via Expert actions; learned Policy is optional and not required
+- Goal parsing works without external deps (`freecad_s1.schema.Goal.from_json`)
+- Expert-driven Worker execution works without PyTorch, safetensors, or trained
+  model weights
+- Worker executes Goals via Expert actions; learned Policy is optional
 
-### Repeated independent Hole verification (VERIFIED)
-Test Goal executed successfully:
-```python
-Goal(
-    features=[
-        GoalFeature("base_box", {"w": 40, "d": 30, "h": 8}),
-        GoalFeature("hole", {"r": 3, "x": -10, "y": 0}),
-        GoalFeature("hole", {"r": 3, "x": 10, "y": 0}),
-    ],
-    scale=40,
-)
-```
-- Both holes executed (two separate `PartDesign_Pocket` operations)
-- Expert reselected `Face+Z` before second Hole
-- Geometry: `iou=1.0`, `match=True`
-- No execution exceptions
-- **Limitation (UNVERIFIED):** Persistent FCStd artifact path/saved status not confirmed
+### Build lifecycle (VERIFIED on Windows)
+- Feasibility session + separate execution session; `build_target` returns
+  detached target shape valid after feasibility session closes
+- `Std_Undo` = failure in feasibility, recovery in execution
+- Empty Expert result (`[]`) = unrecoverable failure; `Done` = completion
+- Step budget: `2 * expert_plan_length + 6`
+- IoU threshold: `>= 0.99` for success
+- Detached target does not leak into execution session
+- Atomic FCStd save (temp `.fcstd` + `os.replace`) while document open
+- Metadata side-car separate from FCStd; `artifact_written=true,
+  metadata_written=false` when metadata fails
+- Lock held through feasibility, execution, save, metadata, post-save validation;
+  released in `finally` on every path
+- In-child post-save validation reopens saved artifact via `FreeCAD.openDocument`
+- PartDesign-aware validation inspects `Body.Tip.Shape` only (not sketches,
+  origin objects, wires)
 
 ### Architecture (VERIFIED decisions)
-- **Method A:** OpenCode/LLM → FreeCAD MCP → direct FreeCAD modeling tools (existing)
-- **Method B:** OpenCode/LLM + Taiga Task Planner Skill → Goal JSON → FreeCAD MCP → Taiga Worker + Expert → FreeCAD
-- Both share workspace/artifact handling/inspection/validation/reporting; engines differ
-- **Method B document lifecycle (PROPOSED):** Taiga Worker creates new document, executes Goal, saves FCStd; MCP opens/inspects that artifact. Avoid concurrent control of same document by Taiga and MCP.
+- **Method A:** OpenCode/LLM → FreeCAD MCP → direct FreeCAD modeling tools
+- **Method B:** OpenCode/LLM + Taiga Task Planner Skill → Goal JSON → FreeCAD
+  MCP → Taiga Worker + Expert → FreeCAD
+- `freecad_bridge/runner.py` remains Method A only; no Taiga execution logic
+- Parent process never imports `FreeCAD` or `freecad_s1`; child imports them
+  lazily
+- Request/response via argv (`--pass` positional args), not env vars
+- FreeCAD child alone owns the document lock
 
 ### Current status (VERIFIED)
-- `taiga_build` **not implemented**. Next: read-only architecture investigation + implementation plan for `taiga_build` based on current FreeCAD_MCP source.
-- Investigation must locate prior test artifact (if exists), inspect Taiga integration and FreeCAD bridge, define `taiga_build` API/validation/error handling/process isolation/artifact lifecycle, preserve A/B experiment, produce file-by-file roadmap.
+- `taiga_build` **implemented and committed** (`1949a5b`).
+- Next: Milestone 8 (documentation/release preparation).
 
-### Phase 0 verification (2026-11-03) — read-only experiments, no implementation
-All run against real FreeCAD 1.1.4 embedded Python (`E:\Softwares\FreeCAD\bin\freecadcmd.exe`, py 3.11.14) and Taiga upstream at `/mnt/g/tmp_kilo_exp/taiga_src`. Scripts outside the repo (`/tmp/kilo/`, `/mnt/g/tmp_kilo_exp/e1_win/`). No repo source modified.
+### Phase 0 verification (2026-11-03) — read-only experiments
+All run against real FreeCAD 1.1.4 embedded Python and Taiga upstream at
+`/mnt/g/tmp_kilo_exp/taiga_src`. No repo source modified during experiments.
 
-- **E1 path/envelope I/O — PASS (workaround):** Windows `G:\`, WSL `/tmp`, and UNC `\\wsl.localhost\Debian\tmp\` all readable/writable from Windows FreeCAD; paths with spaces + non-ASCII OK. **Blocker:** `freecadcmd.exe` strips custom env vars (`FREECAD_MCP_REQUEST/RESPONSE/PYTHONPATH` null) and auto-opens any file argv. **Workaround (verified):** fixed Windows data path + wrapper script computing paths internally; full `create_document→…→export_step` lifecycle works.
-- **E2 build_target detached lifecycle + IoU — PASS:** `build_target` fills `goal.target`, returns detached Compound(1 solid, vol 9147.61) after session close; separate session Expert loop reaches `Done` (23 steps); **IoU = 1.0 ≥ 0.99**. `level`/`scale`/caller-supplied target all work.
-- **E3 atomic save/metadata/locking — PASS:** atomic_save success/overwrite/failure-cleanup OK; meta read/write/missing/malformed OK; locking acquire/reacquire/reclaim-stale/malformed OK (live-owner block not demoable without an alive PID on this host). FreeCAD save→reopen→validate→inspect OK.
-- **E4 post-save validation + Method A/B isolation — PARTIAL/needs adjustment:** current `_op_validate` false-fails PartDesign docs (Body=Compound, Origin=no Shape, sketches=Wire, planes/edges all invalid → `all_valid=false`). Must inspect `Body.Tip.Shape` instead of every object. Method A runner independent of Taiga: PASS (no Taiga in `runner.py`).
+- **E1 path/envelope I/O — PASS:** Windows `G:\`, WSL `/tmp`, and UNC
+  `\\wsl.localhost\Debian\tmp\` all readable/writable. Paths with spaces +
+  non-ASCII OK. `freecadcmd.exe` strips custom env vars. Workaround: argv
+  transport via `--pass`.
+- **E2 build_target detached lifecycle + IoU — PASS:** detached Compound
+  (1 solid, vol 9147.61) valid after session close; Expert reaches `Done`;
+  IoU = 1.0 >= 0.99.
+- **E3 atomic save/metadata/locking — PASS:** atomic_save OK; meta read/write
+  OK; locking acquire/reacquire/reclaim-stale OK.
+- **E4 post-save validation + Method A/B isolation — PASS:** inspect
+  `Body.Tip.Shape` instead of every object; Method A runner independent of
+  Taiga.
 
-Decisions: (1) `taiga_build` ready to begin only after the E1 env-var workaround and E4 PartDesign-aware validation are addressed; (2) torch/model scoring, real Taiga weights, PartDesign-aware validation, persistent FCStd artifact path, live state capture/action execution, and M7 comparison remain out of scope until separately verified.
+---
