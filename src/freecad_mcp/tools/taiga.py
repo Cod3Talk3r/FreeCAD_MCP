@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from ..app.contracts import BuildRequest, BuildResult as ApplicationBuildResult
+from ..app.taiga import TaigaBuildBackend
 from ..config import Settings
 from ..integrations.taiga import TaigaBackend
 from ..integrations.taiga.build import BuildResult, BuildRuntime
@@ -242,7 +244,9 @@ def taiga_build(
 
     runtime = BuildRuntime(child_runner=runner.run, timeout=settings.taiga_build_timeout_seconds)
     try:
-        build_result = runtime.run(goal, document_id=document_id, workspace=workspace)
+        build_result = TaigaBuildBackend(runtime).execute(
+            BuildRequest("build", {"goal": goal, "document_id": document_id, "workspace": workspace})
+        )
     except Exception as exc:  # noqa: BLE001 - never leak a traceback to the client
         return TaigaBuildResult(
             ok=False,
@@ -253,8 +257,8 @@ def taiga_build(
     return _to_build_result(build_result, document_id or "")
 
 
-def _to_build_result(build_result: BuildResult, document_id: str) -> TaigaBuildResult:
-    result = build_result.result or {}
+def _to_build_result(build_result: ApplicationBuildResult, document_id: str) -> TaigaBuildResult:
+    result = build_result.data or {}
     return TaigaBuildResult(
         ok=build_result.ok,
         status=build_result.status,
@@ -270,8 +274,8 @@ def _to_build_result(build_result: BuildResult, document_id: str) -> TaigaBuildR
         feasible=bool(result.get("feasible", False)),
         validation_ok=result.get("validation_ok"),
         validation_errors=list(result.get("validation_errors") or []),
-        error=build_result.error,
-        error_type=build_result.error_type,
+        error=build_result.error.message if build_result.error else None,
+        error_type=build_result.error.error_type if build_result.error else None,
     )
 
 

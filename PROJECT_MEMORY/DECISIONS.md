@@ -42,6 +42,10 @@ Significant decisions with rationale. Keep concise; source code wins on conflict
   remains Method A only; Taiga execution lives in
   `freecad_bridge/taiga_runner.py` and `integrations/taiga/child.py`.
   Rationale: preserve Method A independence; avoid conflating distinct bridges.
+- **D11 — Shared application boundary (2026-11-04):** expose data contracts and
+  backend adapters without MCP, Qt, FreeCAD, or LLM dependencies. Preserve the
+  existing direct and Taiga headless runtimes; active-document execution and its
+  ownership semantics require separate design and verification.
 
 Add new dated decisions here; do not record trivial implementation details.
 

@@ -2,8 +2,11 @@
 
 ## Latest verified state
 
-- HEAD: `1949a5b` — `feat: add real Taiga FreeCAD build execution` (branch
-  `feat/freecad-mcp`).
+- HEAD: `9d33243` — documentation update (branch `feat/freecad-mcp`). Phase 4
+  M1 application-layer changes are uncommitted.
+- Phase 4 M1 introduces shared application contracts and direct/Taiga adapters;
+  MCP schemas and the existing headless execution runtimes remain in place.
+  Active-document execution and the GUI are not implemented.
 - Full test suite verified locally: `uv run pytest -q` → **335 passed, 9 skipped**
   (~31 s). Skips are FreeCAD-console-missing and opt-in real-Taiga integration
   tests; no FreeCAD / Taiga runtime was available in this Linux environment.

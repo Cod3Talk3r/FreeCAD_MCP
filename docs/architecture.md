@@ -17,6 +17,22 @@ added only when a milestone needs them.
 Transport, CAD execution, validation, and optional integrations are separate
 concerns and must not leak into each other:
 
+Phase 4 introduces `freecad_mcp.app`, a standard-library application boundary
+shared by interface adapters. Its request, result, error, and backend status
+contracts do not depend on MCP, Qt, FreeCAD, Taiga, or an LLM. Direct operations
+delegate to the existing bridge; Taiga builds delegate to the existing build
+runtime. The MCP tools retain their public schemas and translate at the boundary.
+The existing optional scoring interface remains separate from build execution.
+
+The current execution adapters are headless. In-process FreeCAD execution,
+active-document ownership, document inspection, and the GUI workbench remain
+future work; the contracts do not imply that either backend can safely operate
+on an already-open document. No HTTP service is required.
+The direct adapter shares the existing MCP input checks; FreeCAD-side validation
+remains authoritative for document and geometry operations. Backend status
+reports availability as unknown until probed. Direct execution preserves existing
+bridge exceptions, while Taiga build failures return structured result data.
+
 ```
         AI agent (e.g. OpenCode)
                  |

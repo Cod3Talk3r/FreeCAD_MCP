@@ -18,6 +18,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from freecad_mcp.app.contracts import BuildRequest
+from freecad_mcp.app.direct import DirectBackend, validate_direct_request
 from freecad_mcp.config import Settings
 from freecad_mcp.freecad_bridge import FreeCadBridge, FreeCadOperationError
 from freecad_mcp.freecad_bridge.workspace import (
@@ -295,38 +297,8 @@ def _run_bridge_op(
     timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Run a bridge operation and return the result dict, raising on failure."""
-    try:
-        result = bridge.run(op, params, timeout=timeout)
-        if isinstance(result, dict) and "ok" in result:
-            # Backward compatibility for a bridge that returns a handler envelope.
-            if not isinstance(result["ok"], bool):
-                raise FreeCadOperationError(
-                    f"Bridge returned a non-boolean 'ok': {result!r}",
-                    error_type="BridgeError",
-                )
-            if result["ok"]:
-                payload = result.get("result", {})
-                return payload if isinstance(payload, dict) else {"value": payload}
-            error = result.get("error")
-            if isinstance(error, dict):
-                message = str(error.get("message", "FreeCAD operation failed"))
-                error_type = str(error.get("type", "Error"))
-            else:
-                message = str(error or "FreeCAD operation failed")
-                error_type = "Error"
-            raise FreeCadOperationError(message, error_type=error_type)
-        if isinstance(result, dict):
-            return result
-        raise FreeCadOperationError(
-            f"Unexpected bridge response format: {result!r}",
-            error_type="BridgeError",
-        )
-    except FreeCadOperationError:
-        raise
-    except Exception as exc:
-        raise FreeCadOperationError(
-            f"Bridge operation {op!r} failed: {exc}", error_type=type(exc).__name__
-        )
+    result = DirectBackend(bridge).execute(BuildRequest(op, params, timeout))
+    return dict(result.data)
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +361,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
     def create_box_tool(params: CreateBoxParams) -> ObjectInfo:
         """Create a box and return its info."""
         # Manual positive-check (Pydantic doesn't enforce it strictly here)
-        if params.length <= 0 or params.width <= 0 or params.height <= 0:
-            raise ValueError("length, width, height must be positive")
+        validate_direct_request("create_box", params.model_dump())
 
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
@@ -429,8 +400,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
     )
     def create_cylinder_tool(params: CreateCylinderParams) -> ObjectInfo:
         """Create a cylinder and return its info."""
-        if params.radius <= 0 or params.height <= 0:
-            raise ValueError("radius and height must be positive")
+        validate_direct_request("create_cylinder", params.model_dump())
 
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
@@ -470,16 +440,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
     )
     def set_parameter_tool(params: SetParameterParams) -> ObjectInfo:
         """Set a parameter and return the object's updated info."""
-        # Whitelist check
-        prop_upper = params.property_name.strip()
-        if prop_upper not in _BOX_PROPS | _CYLINDER_PROPS:
-            raise ValueError(
-                f"Property '{prop_upper}' is not whitelisted. "
-                f"Box: {_BOX_PROPS}; Cylinder: {_CYLINDER_PROPS}"
-            )
-        # Positive check
-        if params.value <= 0:
-            raise ValueError("value must be positive")
+        validate_direct_request("set_parameter", {"property": params.property_name, "value": params.value})
 
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
@@ -728,8 +689,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
     )
     def boolean_cut_tool(params: BooleanCutParams) -> BooleanCutResult:
         """Subtract *tool_object* from *base_object* and return result info."""
-        if params.base_object == params.tool_object:
-            raise ValueError("base_object and tool_object must be different")
+        validate_direct_request("boolean_cut", params.model_dump())
 
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
@@ -772,8 +732,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
     def tank_tool(params: TankParams) -> ObjectInfo:
         """Create a tank and return its info."""
         # Manual positive check
-        if params.length <= 0 or params.width <= 0 or params.height <= 0:
-            raise ValueError("length, width, height must be positive")
+        validate_direct_request("tank", params.model_dump())
 
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
@@ -813,14 +772,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
     )
     def tubular_coil_tool(params: TubularCoilParams) -> ObjectInfo:
         """Create a tubular coil and return its info."""
-        if params.coil_radius <= 0:
-            raise ValueError("coil_radius must be positive")
-        if params.tube_radius <= 0:
-            raise ValueError("tube_radius must be positive")
-        if params.num_turns <= 0:
-            raise ValueError("num_turns must be positive")
-        if params.pitch <= 0:
-            raise ValueError("pitch must be positive")
+        validate_direct_request("tubular_coil", params.model_dump())
 
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {

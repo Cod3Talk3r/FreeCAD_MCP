@@ -13,6 +13,9 @@
 
 ## Verified results
 
+- 2026-11-04 (Linux): `uv run --no-sync pytest -q -rs` → **362 passed, 9 skipped**
+  after Phase 4 M1 application-layer changes. Real FreeCAD/Taiga integration
+  was not configured for this run.
 - 2026-11-03 (this environment, Linux): `uv run pytest -q` → **335 passed, 9 skipped**
   in ~31 s. Skips: FreeCAD integration tests (console not found) and real-Taiga
   integration tests (env not configured).

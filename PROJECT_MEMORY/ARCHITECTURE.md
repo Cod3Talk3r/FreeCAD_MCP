@@ -1,7 +1,8 @@
 # Architecture
 
-Layered design: MCP server (`server.py` + `tools/`) → `freecad_bridge/` →
-FreeCAD; optional `integrations/` behind a dependency-free contract.
+Layered design: MCP server (`server.py` + `tools/`) → shared `app/` contracts
+and backend adapters → existing `freecad_bridge/` or Taiga build runtime →
+FreeCAD. GUI and in-process execution are not implemented.
 
 ## Layers and module responsibilities
 
@@ -11,6 +12,8 @@ FreeCAD; optional `integrations/` behind a dependency-free contract.
   safe defaults; fails fast on invalid values.
 - `src/freecad_mcp/tools/` — MCP tool definitions and typed input validation
   (diagnostics, freecad, modeling, taiga groups; `register_all`).
+- `src/freecad_mcp/app/` — MCP-independent application contracts and direct
+  and Taiga build adapters; execution remains delegated to existing runtimes.
 - `src/freecad_mcp/freecad_bridge/` — communication with the FreeCAD process
   (bridge, discovery, errors, runner, workspace, taiga_runner).
 - `src/freecad_mcp/freecad_bridge/taiga_runner.py` — FreeCAD-side Taiga build
