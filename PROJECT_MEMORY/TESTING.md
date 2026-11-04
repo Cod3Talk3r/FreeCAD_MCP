@@ -13,6 +13,10 @@
 
 ## Verified results
 
+- 2026-11-04 (Linux, Python 3.11.18): `uv run pytest -q -rs` -> **366 passed,
+  9 skipped**. Windows FreeCAD 1.1.4 launched from WSL passed direct ping,
+  version, and a temporary document/tank/reopen diagnostic. Native Windows
+  Python and the full real FreeCAD integration suite remain unverified.
 - 2026-11-04 (Linux): `uv run --no-sync pytest -q -rs` → **362 passed, 9 skipped**
   after Phase 4 M1 application-layer changes. Real FreeCAD/Taiga integration
   was not configured for this run.
@@ -24,9 +28,7 @@
 
 ## Limitations
 
-- Real FreeCAD instance and real Taiga-S1 / Torch / weights runs not available
-  in this Linux environment; FreeCAD-dependent and real-Taiga tests skip instead
-  of failing when the runtime is absent.
+- FreeCAD-dependent and real-Taiga tests skip when their runtime is not configured.
 - Never record unverified results as successful.
 
 ---

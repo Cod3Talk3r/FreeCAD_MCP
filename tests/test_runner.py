@@ -73,6 +73,28 @@ def test_main_requires_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runner.main() == runner.EXIT_ENVELOPE_ERROR
 
 
+@pytest.mark.parametrize("transport", ["pass", "options"])
+def test_main_argument_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str) -> None:
+    request = tmp_path / "request with spaces.json"
+    response = tmp_path / "response with spaces.json"
+    request.write_text(json.dumps({"op": "ping", "params": {"message": "argument"}}), encoding="utf-8")
+    monkeypatch.setenv(runner.REQUEST_ENV, "invalid")
+    monkeypatch.setenv(runner.RESPONSE_ENV, "invalid")
+    argv = (
+        ["--pass", str(request), str(response)]
+        if transport == "pass"
+        else ["--request", str(request), "--response", str(response)]
+    )
+    assert runner.main(argv) == 0
+    assert json.loads(response.read_text(encoding="utf-8"))["result"] == {"message": "argument"}
+
+
+def test_main_incomplete_pass_does_not_fall_back_to_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(runner.REQUEST_ENV, "invalid")
+    monkeypatch.setenv(runner.RESPONSE_ENV, "invalid")
+    assert runner.main(["--pass", "only-one"]) == runner.EXIT_ENVELOPE_ERROR
+
+
 # ---------------------------------------------------------------------------
 # Document open/create semantics (host-level, FreeCAD mocked)
 # ---------------------------------------------------------------------------

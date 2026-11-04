@@ -3,9 +3,8 @@
 This module executes **inside FreeCAD's own Python interpreter**
 (``freecadcmd runner.py``). It is never imported by the MCP server process.
 
-It reads a request envelope (JSON) from the file named by ``FREECAD_MCP_REQUEST``,
-dispatches the named operation to a fixed handler, and writes a response envelope
-(JSON) to the file named by ``FREECAD_MCP_RESPONSE``.
+It reads a request envelope (JSON), dispatches the named operation to a fixed
+handler, and writes a response envelope (JSON) to the supplied response path.
 
 Keeping the operations here - explicit and fixed - is what prevents the bridge
 from becoming a general "run this code inside FreeCAD" interface.
@@ -1227,20 +1226,23 @@ def _error_envelope(op: str | None, error_type: str, message: str) -> dict[str, 
 def main(argv: list[str] | None = None) -> int:
     """Read the request file, dispatch, and write the response file.
 
-    Paths may be supplied via ``--request``/``--response`` arguments (preferred,
-    since FreeCAD does not reliably preserve custom environment variables) or
-    via the ``FREECAD_MCP_REQUEST``/``FREECAD_MCP_RESPONSE`` environment
-    variables for backward compatibility.
+    Paths may be supplied positionally after ``--pass``, via named options,
+    or via the environment variables for backward compatibility.
     """
     import argparse
 
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--request", dest="request_path", default=None)
-    parser.add_argument("--response", dest="response_path", default=None)
-    args, _ = parser.parse_known_args(argv)
-
-    request_path = args.request_path or os.environ.get(REQUEST_ENV)
-    response_path = args.response_path or os.environ.get(RESPONSE_ENV)
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--pass" in argv:
+        paths = argv[argv.index("--pass") + 1:]
+        request_path, response_path = (paths[:2] if len(paths) >= 2 else (None, None))
+    else:
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--request", dest="request_path", default=None)
+        parser.add_argument("--response", dest="response_path", default=None)
+        args, _ = parser.parse_known_args(argv)
+        request_path = args.request_path or os.environ.get(REQUEST_ENV)
+        response_path = args.response_path or os.environ.get(RESPONSE_ENV)
     if not request_path or not response_path:
         print(f"{REQUEST_ENV} and {RESPONSE_ENV} must be set.", file=sys.stderr)
         return EXIT_ENVELOPE_ERROR

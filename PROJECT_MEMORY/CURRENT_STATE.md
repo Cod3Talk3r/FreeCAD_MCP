@@ -2,8 +2,9 @@
 
 ## Latest verified state
 
-- HEAD: `9d33243` — documentation update (branch `feat/freecad-mcp`). Phase 4
-  M1 application-layer changes are uncommitted.
+- HEAD: `38416c4` — shared application backend layer (branch `feat/freecad-mcp`).
+- Python 3.11 development pin and direct FreeCAD transport fixes are uncommitted.
+  The bridge uses `-c` and `--pass`; native Windows integration needs verification.
 - Phase 4 M1 introduces shared application contracts and direct/Taiga adapters;
   MCP schemas and the existing headless execution runtimes remain in place.
   Active-document execution and the GUI are not implemented.

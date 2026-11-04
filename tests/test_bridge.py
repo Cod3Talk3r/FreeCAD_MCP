@@ -6,6 +6,7 @@ These drive the real subprocess + envelope plumbing using the host interpreter
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -22,7 +23,6 @@ from freecad_mcp.freecad_bridge import (
     FreeCadTimeoutError,
     default_runner_path,
 )
-from freecad_mcp.freecad_bridge.runner import RESPONSE_ENV
 
 
 def _write_runner(tmp_path: Path, body: str) -> Path:
@@ -35,8 +35,8 @@ def _write_envelope_runner(tmp_path: Path, envelope: str) -> Path:
     return _write_runner(
         tmp_path,
         f"""
-        import os
-        with open(os.environ[{RESPONSE_ENV!r}], "w", encoding="utf-8") as handle:
+        import sys
+        with open(sys.argv[sys.argv.index('--pass') + 2], "w", encoding="utf-8") as handle:
             handle.write({envelope!r})
         """,
     )
@@ -124,3 +124,26 @@ def test_real_runner_reports_freecad_import_failure(tmp_path: Path) -> None:
     with pytest.raises(FreeCadOperationError) as excinfo:
         bridge.get_version()
     assert excinfo.value.error_type == "ModuleNotFoundError"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="WSL-to-Windows translation")
+def test_windows_target_translates_transport_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from freecad_mcp.freecad_bridge import bridge as bridge_module
+
+    executable = tmp_path / "freecadcmd.exe"
+    executable.touch()
+    runner = _write_envelope_runner(tmp_path, '{"ok": true, "result": {}}')
+    translated = []
+
+    def translate(path: Path, target: str) -> str:
+        translated.append((path, target))
+        return str(path)
+
+    monkeypatch.setattr(bridge_module, "for_target", translate)
+    monkeypatch.setattr(
+        bridge_module.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "")
+    )
+    with pytest.raises(FreeCadExecutionError):
+        FreeCadBridge(executable, runner_path=runner).ping()
+    assert [target for _, target in translated] == ["windows"] * 3
+    assert translated[0][0] == runner.resolve()
