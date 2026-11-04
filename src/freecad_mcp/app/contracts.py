@@ -17,6 +17,7 @@ class BuildRequest:
     operation: str
     parameters: Mapping[str, Any] = field(default_factory=dict)
     timeout: float | None = None
+    document_id: str | None = None
 
 
 @dataclass(frozen=True)

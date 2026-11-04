@@ -13,7 +13,8 @@ FreeCAD. GUI and in-process execution are not implemented.
 - `src/freecad_mcp/tools/` — MCP tool definitions and typed input validation
   (diagnostics, freecad, modeling, taiga groups; `register_all`).
 - `src/freecad_mcp/app/` — MCP-independent application contracts and direct
-  and Taiga build adapters; execution remains delegated to existing runtimes.
+  and Taiga build adapters; **document & model inspection contracts and direct
+  inspection adapter**; execution remains delegated to existing runtimes.
 - `src/freecad_mcp/freecad_bridge/` — communication with the FreeCAD process
   (bridge, discovery, errors, runner, workspace, taiga_runner).
 - `src/freecad_mcp/freecad_bridge/taiga_runner.py` — FreeCAD-side Taiga build

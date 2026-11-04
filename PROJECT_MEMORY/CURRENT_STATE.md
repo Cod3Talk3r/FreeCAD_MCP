@@ -2,18 +2,16 @@
 
 ## Latest verified state
 
-- HEAD: `38416c4` — shared application backend layer (branch `feat/freecad-mcp`).
-- Python 3.11 development pin and direct FreeCAD transport fixes are uncommitted.
-  The bridge uses `-c` and `--pass`; native Windows integration needs verification.
-- Phase 4 M1 introduces shared application contracts and direct/Taiga adapters;
-  MCP schemas and the existing headless execution runtimes remain in place.
-  Active-document execution and the GUI are not implemented.
-- Full test suite verified locally: `uv run pytest -q` → **335 passed, 9 skipped**
-  (~31 s). Skips are FreeCAD-console-missing and opt-in real-Taiga integration
-  tests; no FreeCAD / Taiga runtime was available in this Linux environment.
-- Real Windows integration test (`tests/test_taiga_integration.py`):
-  **2 passed** against FreeCAD 1.1.4 at `E:\Softwares\FreeCAD\bin\freecadcmd.exe`
-  with Taiga source at `G:\Cources\py\Projects\taiga-upstream-copy`.
+- HEAD: `c879c68` — test: cover FreeCAD transport compatibility (branch `feat/freecad-mcp`).
+- Phase 4 M1 (shared application backend layer) and M2 (document & model
+  inspection) are committed.
+- Full test suite verified locally (Python 3.11.18): `uv run pytest -q -rs` →
+  **385 passed, 9 skipped** (~31 s). Skips are FreeCAD-console-missing and
+  opt-in real-Taiga integration tests; no FreeCAD / Taiga runtime available in
+  this Linux environment.
+- Real Windows integration test (`tests/test_taiga_integration.py`): **2 passed**
+  against FreeCAD 1.1.4 at `E:\Softwares\FreeCAD\bin\freecadcmd.exe` with Taiga
+  source at `G:\Cources\py\Projects\taiga-upstream-copy`.
 - CLI argument transport uses FreeCAD's `--pass` mechanism (positional args
   after `--pass`) because `freecadcmd.exe` strips custom env vars and
   intercepts `--response` as its internal `--response-file` option.

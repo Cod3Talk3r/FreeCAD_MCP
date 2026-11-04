@@ -46,6 +46,13 @@ Significant decisions with rationale. Keep concise; source code wins on conflict
   backend adapters without MCP, Qt, FreeCAD, or LLM dependencies. Preserve the
   existing direct and Taiga headless runtimes; active-document execution and its
   ownership semantics require separate design and verification.
+- **D12 — Document & model inspection contracts (2026-11-04):** add
+  `app/inspection.py` with `ShapeInfo`, `ObjectInspection`, `DocumentInspection`,
+  `InspectionRequest`, `InspectionResult` and `InspectionBackend` protocol, plus
+  `DirectInspectionBackend` delegating to `FreeCadBridge`. `document_id` added as
+  an optional first-class field on `BuildRequest`. Inspection reuses existing
+  bridge operations (`list_objects`, `inspect_object`) and never imports
+  FreeCAD in the parent process.
 
 Add new dated decisions here; do not record trivial implementation details.
 

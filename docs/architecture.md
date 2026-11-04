@@ -126,6 +126,37 @@ FreeCAD quirk worth remembering: it runs a script file with `__name__` set to th
 *module name*, not `"__main__"`, so the runner keys off the request environment
 variable rather than the usual entry guard.
 
+## Document & model inspection (Milestone 4 M2)
+
+`src/freecad_mcp/app/inspection.py` defines MCP-independent inspection
+contracts shared by interface adapters:
+
+- **`ShapeInfo`** — geometry and validity of a shape (type, valid, volume,
+  dimensions, counts). All fields optional; unset when unavailable.
+- **`ObjectInspection`** — a single object: name, type, label, plus
+  `has_shape`/`shape_null`/`shape` to distinguish no-Shape, null-Shape,
+  invalid-Shape, and valid-Shape objects without misclassifying sketches,
+  wires, or origin objects as invalid solids.
+- **`DocumentInspection`** — document-level inventory: object list, count,
+  `all_valid`, metadata side-car.
+- **`InspectionRequest` / `InspectionResult`** — typed request/result pair.
+- **`InspectionBackend`** — protocol (`inspect(request)`, `status()`).
+- **`DirectInspectionBackend`** — adapter wrapping `FreeCadBridge`; reuses
+  existing `list_objects`/`inspect_object` bridge operations, reads the
+  metadata side-car directly via `workspace`, and never imports FreeCAD in the
+  parent process.
+
+Key properties:
+
+- **Parent stays FreeCAD-free.** Only `freecad_bridge/runner.py` (inside the
+  FreeCAD child) imports `FreeCAD`/`Part`.
+- **No duplicated inspection logic.** MCP tools remain thin adapters; the
+  shared backend owns the inspection contracts.
+- **PartDesign-aware.** `Body.Tip.Shape` validation remains in the child
+  runner; inspection reports what each object actually exposes.
+- **Deferred:** in-process GUI execution, active-document ownership, and
+  editing/recovery belong to M3/M4.
+
 Deferred: a long-lived FreeCAD process with an in-memory document is not needed
 for version diagnostics. It will be reconsidered if document state must persist
 across calls without saving to disk.
