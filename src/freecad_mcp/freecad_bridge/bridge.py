@@ -20,6 +20,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from freecad_mcp.pathing import for_target, is_windows_path
+
 from .discovery import find_freecad_executable
 from .errors import (
     FreeCadExecutionError,
@@ -84,6 +86,10 @@ class FreeCadBridge:
         """
         request = {"op": op, "params": dict(params or {})}
         effective_timeout = self.timeout if timeout is None else float(timeout)
+        windows_target = os.name != "nt" and (
+            is_windows_path(self.executable) or self.executable.suffix.lower() == ".exe"
+        )
+        target = "windows" if windows_target else "native"
 
         with tempfile.TemporaryDirectory(prefix="freecad-mcp-") as workdir:
             work = Path(workdir)
@@ -94,16 +100,18 @@ class FreeCadBridge:
             env = dict(os.environ)
             env["FREECAD_MCP_REQUEST"] = str(request_path)
             env["FREECAD_MCP_RESPONSE"] = str(response_path)
+            runner_path = for_target(self.runner_path.resolve(), target)
+            runner_code = f"import runpy; runpy.run_path({runner_path!r}, run_name='__main__')"
 
             try:
                 completed = subprocess.run(  # noqa: S603 - explicit argv, no shell
                     [
                         str(self.executable),
-                        str(self.runner_path),
-                        "--request",
-                        str(request_path),
-                        "--response",
-                        str(response_path),
+                        "-c",
+                        runner_code,
+                        "--pass",
+                        for_target(request_path, target),
+                        for_target(response_path, target),
                     ],
                     env=env,
                     capture_output=True,

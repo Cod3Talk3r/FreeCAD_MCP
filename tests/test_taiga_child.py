@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -108,7 +109,7 @@ def test_run_translates_paths_for_windows_freecad_from_linux(
 
     monkeypatch.setattr(child_mod, "is_windows_path", lambda p: True)
     monkeypatch.setattr(child_mod, "for_target", fake_for_target)
-    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr(child_mod, "os", SimpleNamespace(name="posix", environ=child_mod.os.environ))
     _install_fake_runner(monkeypatch, {"ok": True})
 
     runner.run({"op": "build", "params": {"goal": {"features": []}}})
