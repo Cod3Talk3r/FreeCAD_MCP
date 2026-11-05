@@ -585,6 +585,14 @@ def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
                     info[prop] = float(getattr(obj, prop))
                 except Exception:
                     pass
+        if hasattr(obj, "Placement"):
+            try:
+                placement = obj.Placement
+                info["placement_x"] = float(placement.Base.x)
+                info["placement_y"] = float(placement.Base.y)
+                info["placement_z"] = float(placement.Base.z)
+            except Exception:
+                pass
         if hasattr(obj, "Material"):
             info["material"] = obj.Material
         if hasattr(obj, "Color"):

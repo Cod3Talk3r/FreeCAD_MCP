@@ -294,3 +294,84 @@ def test_real_freecad_boolean_cut_error_cases(tmp_path: Path) -> None:
     with pytest.raises(FreeCadOperationError) as empty:
         _cut("B", "B2")
     assert "empty" in str(empty.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_create_box_placement_and_reopen(tmp_path: Path) -> None:
+    """Create a box with placement through Method A, then independently reopen
+    the saved FCStd document and verify dimensions, placement, validity, and
+    solid type from the reopened object.
+
+    Each ``bridge.run`` launches a fresh FreeCAD process that opens the saved
+    document from disk, so ``inspect_object`` and ``list_objects`` constitute
+    independent reopens rather than in-memory checks.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+    document_id = "m7a2_box"
+
+    # Create the workspace document.
+    created = bridge.run(
+        "create_document", {"document_id": document_id, "workspace": workspace}
+    )
+    assert Path(created["saved_path"]).is_file()
+
+    # Execute create_box through the Method A bridge with non-zero placement.
+    box = bridge.run(
+        "create_box",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 50.0,
+            "width": 30.0,
+            "height": 20.0,
+            "x": 100.0,
+            "y": 50.0,
+            "z": 25.0,
+        },
+    )
+    assert box["object_name"] == "Box1"
+    assert box["length"] == pytest.approx(50.0)
+    assert box["width"] == pytest.approx(30.0)
+    assert box["height"] == pytest.approx(20.0)
+    assert box["x"] == pytest.approx(100.0)
+    assert box["y"] == pytest.approx(50.0)
+    assert box["z"] == pytest.approx(25.0)
+
+    # Independently reopen: inspect_object launches a fresh FreeCAD process
+    # that opens the saved document from disk.
+    info = bridge.run(
+        "inspect_object",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "object_name": "Box1",
+        },
+    )["info"]
+    assert info["type"] == "Part::Box"
+    assert info["shape_type"] == "Solid"
+    assert info["shape_valid"] is True
+    assert info["Length"] == pytest.approx(50.0)
+    assert info["Width"] == pytest.approx(30.0)
+    assert info["Height"] == pytest.approx(20.0)
+    assert info["placement_x"] == pytest.approx(100.0)
+    assert info["placement_y"] == pytest.approx(50.0)
+    assert info["placement_z"] == pytest.approx(25.0)
+
+    # Independently reopen again via list_objects (another fresh process).
+    reopened = bridge.run(
+        "list_objects", {"document_id": document_id, "workspace": workspace}
+    )["objects"]
+    assert [obj["name"] for obj in reopened] == ["Box1"]
+    reopened_box = next(obj for obj in reopened if obj["name"] == "Box1")
+    assert reopened_box["shape_type"] == "Solid"
+    assert reopened_box["length"] == pytest.approx(50.0)
+    assert reopened_box["width"] == pytest.approx(30.0)
+    assert reopened_box["height"] == pytest.approx(20.0)
+
+    # Validate the document.
+    validated = bridge.run(
+        "validate", {"document_id": document_id, "workspace": workspace}
+    )
+    assert validated["all_valid"] is True
