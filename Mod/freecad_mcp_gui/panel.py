@@ -6,6 +6,19 @@ can be imported and syntax-checked outside a FreeCAD GUI process.
 
 from __future__ import annotations
 
+import os
+import sys
+
+# The FreeCAD GUI process only has Mod/ on sys.path (set by InitGui.py). Add the
+# repository src/ directory so the shared freecad_mcp package (and its bridge
+# runner) can be imported from the dockable panel.
+_HERE = os.path.dirname(os.path.realpath(__file__))
+_PARENT = os.path.dirname(_HERE)
+_ROOT = os.path.dirname(_PARENT)
+_SRC = os.path.join(_ROOT, "src")
+if os.path.isdir(_SRC) and _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
 
 class MCPGuiPanel:
     """The dockable panel widget for FreeCAD MCP direct modeling."""
@@ -30,9 +43,18 @@ class MCPGuiPanel:
         self._doc_label.setStyleSheet("color: #666;")
         layout.addWidget(self._doc_label)
 
-        layout.addWidget(QtWidgets.QLabel("Object name:"))
+        layout.addWidget(QtWidgets.QLabel("Document ID:"))
         self._name_input = QtWidgets.QLineEdit("Box1")
         layout.addWidget(self._name_input)
+
+        note = QtWidgets.QLabel(
+            "Operates on the FreeCAD MCP workspace document with this ID. "
+            "The document is created or opened and may become FreeCAD's "
+            "active document."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(note)
 
         dims_layout = QtWidgets.QGridLayout()
         self._length_input = QtWidgets.QDoubleSpinBox()
@@ -80,17 +102,11 @@ class MCPGuiPanel:
             self._doc_label.setStyleSheet("color: #000;")
 
     def _on_create_box(self) -> None:
-        import FreeCAD as App
-        import Part
-
-        doc = App.ActiveDocument
-        if doc is None:
-            self._set_status("Error: No active document. Open or create a document first.", error=True)
-            return
-
         name = self._name_input.text().strip()
         if not name:
-            self._set_status("Error: Object name must not be empty.", error=True)
+            self._set_status(
+                "Error: Document ID / object name must not be empty.", error=True
+            )
             return
 
         length = self._length_input.value()
@@ -98,28 +114,50 @@ class MCPGuiPanel:
         height = self._height_input.value()
 
         if length <= 0 or width <= 0 or height <= 0:
-            self._set_status("Error: Length, width, and height must be positive.", error=True)
+            self._set_status(
+                "Error: Length, width, and height must be positive.", error=True
+            )
             return
 
         try:
-            obj_name = name
-            counter = 1
-            while doc.getObject(obj_name) is not None:
-                obj_name = f"{name}_{counter}"
-                counter += 1
+            from freecad_mcp.freecad_bridge.runner import handle_request
 
-            box = doc.addObject("Part::Box", obj_name)
-            box.Length = length
-            box.Width = width
-            box.Height = height
-            box.Label = obj_name
-            doc.recompute()
-
-            self._set_status(
-                f"Created box '{obj_name}' ({length} x {width} x {height}).", error=False
+            response = handle_request(
+                {
+                    "op": "create_box",
+                    "params": {
+                        "document_id": name,
+                        "object_name": name,
+                        "length": length,
+                        "width": width,
+                        "height": height,
+                    },
+                }
             )
-        except Exception as exc:  # noqa: BLE001 - surface FreeCAD errors to user
+        except Exception as exc:  # noqa: BLE001 - surface bridge errors to user
             self._set_status(f"Error creating box: {exc}", error=True)
+            return
+
+        if response.get("ok"):
+            result = response.get("result", {}) if isinstance(response, dict) else {}
+            doc_id = (
+                result.get("document_id", name) if isinstance(result, dict) else name
+            )
+            obj_name = (
+                result.get("object_name", name) if isinstance(result, dict) else name
+            )
+            self.refresh_document_label()
+            self._set_status(
+                f"Box '{obj_name}' in workspace document '{doc_id}'.", error=False
+            )
+        else:
+            error = response.get("error", {})
+            message = (
+                str(error.get("message", "Workspace operation failed"))
+                if isinstance(error, dict)
+                else str(error or "Workspace operation failed")
+            )
+            self._set_status(f"Error: {message}", error=True)
 
     def _set_status(self, message: str, *, error: bool = False) -> None:
         self._status_label.setText(message)
