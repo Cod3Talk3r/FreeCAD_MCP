@@ -72,3 +72,4 @@ scratch/
 
 # --- Agents ---
 kilo.json
+.kilo/
