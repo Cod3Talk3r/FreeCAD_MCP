@@ -375,3 +375,371 @@ def test_real_freecad_create_box_placement_and_reopen(tmp_path: Path) -> None:
         "validate", {"document_id": document_id, "workspace": workspace}
     )
     assert validated["all_valid"] is True
+
+
+@requires_freecad
+def test_real_freecad_set_placement_box(tmp_path: Path) -> None:
+    """Move an existing Box; verify position updated and dimensions preserved."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "sbox", "workspace": workspace}
+    )
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "sbox",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 5.0,
+            "height": 3.0,
+        },
+    )
+
+    moved = bridge.run(
+        "set_placement",
+        {
+            "document_id": "sbox",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "x": 10.0,
+            "y": 20.0,
+            "z": 30.0,
+        },
+    )
+    assert moved["x"] == pytest.approx(10.0)
+    assert moved["y"] == pytest.approx(20.0)
+    assert moved["z"] == pytest.approx(30.0)
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "sbox", "workspace": workspace, "object_name": "Box1"},
+    )["info"]
+    assert info["placement_x"] == pytest.approx(10.0)
+    assert info["placement_y"] == pytest.approx(20.0)
+    assert info["placement_z"] == pytest.approx(30.0)
+    assert info["Length"] == pytest.approx(10.0)
+    assert info["Width"] == pytest.approx(5.0)
+    assert info["Height"] == pytest.approx(3.0)
+
+    reopened = bridge.run(
+        "list_objects", {"document_id": "sbox", "workspace": workspace}
+    )["objects"]
+    box = next(o for o in reopened if o["name"] == "Box1")
+    assert box["length"] == pytest.approx(10.0)
+    assert box["width"] == pytest.approx(5.0)
+    assert box["height"] == pytest.approx(3.0)
+
+
+@requires_freecad
+def test_real_freecad_set_placement_cylinder(tmp_path: Path) -> None:
+    """Move an existing Cylinder; verify position updated and dimensions preserved."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "scyl", "workspace": workspace}
+    )
+    bridge.run(
+        "create_cylinder",
+        {
+            "document_id": "scyl",
+            "workspace": workspace,
+            "object_name": "Cyl1",
+            "radius": 2.0,
+            "height": 7.0,
+        },
+    )
+
+    moved = bridge.run(
+        "set_placement",
+        {
+            "document_id": "scyl",
+            "workspace": workspace,
+            "object_name": "Cyl1",
+            "x": 5.0,
+            "y": -3.0,
+            "z": 8.0,
+        },
+    )
+    assert moved["x"] == pytest.approx(5.0)
+    assert moved["y"] == pytest.approx(-3.0)
+    assert moved["z"] == pytest.approx(8.0)
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "scyl", "workspace": workspace, "object_name": "Cyl1"},
+    )["info"]
+    assert info["placement_x"] == pytest.approx(5.0)
+    assert info["placement_y"] == pytest.approx(-3.0)
+    assert info["placement_z"] == pytest.approx(8.0)
+    assert info["Radius"] == pytest.approx(2.0)
+    assert info["Height"] == pytest.approx(7.0)
+
+
+@requires_freecad
+def test_real_freecad_set_placement_preserves_rotation(tmp_path: Path) -> None:
+    """Set placement twice; second call lands at new coords (Rotation preserved)."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "srot", "workspace": workspace}
+    )
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "srot",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+
+    bridge.run(
+        "set_placement",
+        {"document_id": "srot", "workspace": workspace, "object_name": "Box1", "x": 1.0, "y": 2.0, "z": 3.0},
+    )
+    info_first = bridge.run(
+        "inspect_object",
+        {"document_id": "srot", "workspace": workspace, "object_name": "Box1"},
+    )["info"]
+    assert info_first["placement_x"] == pytest.approx(1.0)
+    assert info_first["placement_y"] == pytest.approx(2.0)
+    assert info_first["placement_z"] == pytest.approx(3.0)
+
+    bridge.run(
+        "set_placement",
+        {"document_id": "srot", "workspace": workspace, "object_name": "Box1", "x": 9.0, "y": 8.0, "z": 7.0},
+    )
+    info_second = bridge.run(
+        "inspect_object",
+        {"document_id": "srot", "workspace": workspace, "object_name": "Box1"},
+    )["info"]
+    assert info_second["placement_x"] == pytest.approx(9.0)
+    assert info_second["placement_y"] == pytest.approx(8.0)
+    assert info_second["placement_z"] == pytest.approx(7.0)
+    assert info_second["Length"] == pytest.approx(4.0)
+
+
+@requires_freecad
+def test_real_freecad_set_placement_missing_object(tmp_path: Path) -> None:
+    """set_placement on a missing object returns a structured error."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "smiss", "workspace": workspace}
+    )
+
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "set_placement",
+            {
+                "document_id": "smiss",
+                "workspace": workspace,
+                "object_name": "DoesNotExist",
+                "x": 1.0,
+                "y": 2.0,
+                "z": 3.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_set_placement_boolean_cut_result(tmp_path: Path) -> None:
+    """set_placement on a Boolean Cut result (Part::Feature) now succeeds."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "sfeat", "workspace": workspace}
+    )
+    bridge.run(
+        "create_cylinder",
+        {
+            "document_id": "sfeat",
+            "workspace": workspace,
+            "object_name": "Outer",
+            "radius": 2.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "create_cylinder",
+        {
+            "document_id": "sfeat",
+            "workspace": workspace,
+            "object_name": "Inner",
+            "radius": 1.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "boolean_cut",
+        {
+            "document_id": "sfeat",
+            "workspace": workspace,
+            "base_object": "Outer",
+            "tool_object": "Inner",
+            "result_name": "Cut1",
+        },
+    )
+
+    # Part::Feature results are now supported for placement editing.
+    moved = bridge.run(
+        "set_placement",
+        {
+            "document_id": "sfeat",
+            "workspace": workspace,
+            "object_name": "Cut1",
+            "x": 1.0,
+            "y": 2.0,
+            "z": 3.0,
+        },
+    )
+    assert moved["x"] == pytest.approx(1.0)
+    assert moved["y"] == pytest.approx(2.0)
+    assert moved["z"] == pytest.approx(3.0)
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "sfeat", "workspace": workspace, "object_name": "Cut1"},
+    )["info"]
+    assert info["placement_x"] == pytest.approx(1.0)
+    assert info["placement_y"] == pytest.approx(2.0)
+    assert info["placement_z"] == pytest.approx(3.0)
+    assert info["shape_type"] == "Solid"
+
+
+@requires_freecad
+def test_real_freecad_set_placement_boolean_cut_result_reopen(tmp_path: Path) -> None:
+    """Create two boxes, boolean_cut, move the result, reopen and verify placement + geometry."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "sreopen", "workspace": workspace}
+    )
+
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "sreopen",
+            "workspace": workspace,
+            "object_name": "OuterBox",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "sreopen",
+            "workspace": workspace,
+            "object_name": "InnerBox",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+
+    cut = bridge.run(
+        "boolean_cut",
+        {
+            "document_id": "sreopen",
+            "workspace": workspace,
+            "base_object": "OuterBox",
+            "tool_object": "InnerBox",
+            "result_name": "Cut1",
+        },
+    )
+    expected_volume = 10.0**3 - 4.0**3
+    assert cut["shape_type"] == "Solid"
+    assert cut["volume"] == pytest.approx(expected_volume, rel=1e-6)
+
+    # Move the boolean cut result.
+    moved = bridge.run(
+        "set_placement",
+        {
+            "document_id": "sreopen",
+            "workspace": workspace,
+            "object_name": "Cut1",
+            "x": 50.0,
+            "y": 60.0,
+            "z": 70.0,
+        },
+    )
+    assert moved["x"] == pytest.approx(50.0)
+    assert moved["y"] == pytest.approx(60.0)
+    assert moved["z"] == pytest.approx(70.0)
+
+    # Reopen via inspect_object (fresh FreeCAD process).
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "sreopen", "workspace": workspace, "object_name": "Cut1"},
+    )["info"]
+    assert info["placement_x"] == pytest.approx(50.0)
+    assert info["placement_y"] == pytest.approx(60.0)
+    assert info["placement_z"] == pytest.approx(70.0)
+    assert info["shape_type"] == "Solid"
+    assert info["volume"] == pytest.approx(expected_volume, rel=1e-6)
+
+    # Reopen again via list_objects (another fresh process).
+    reopened = bridge.run(
+        "list_objects", {"document_id": "sreopen", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in reopened]
+    assert names == ["OuterBox", "InnerBox", "Cut1"]
+    cut_reopened = next(o for o in reopened if o["name"] == "Cut1")
+    assert cut_reopened["shape_type"] == "Solid"
+    assert cut_reopened["volume"] == pytest.approx(expected_volume, rel=1e-6)
+
+    # Source objects unchanged.
+    outer = next(o for o in reopened if o["name"] == "OuterBox")
+    inner = next(o for o in reopened if o["name"] == "InnerBox")
+    assert outer["volume"] == pytest.approx(1000.0, rel=1e-6)
+    assert inner["volume"] == pytest.approx(64.0, rel=1e-6)
+
+
+@requires_freecad
+def test_real_freecad_set_placement_invalid_numeric(tmp_path: Path) -> None:
+    """set_placement with NaN or infinity returns a structured error."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "sinvalid", "workspace": workspace}
+    )
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "sinvalid",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+
+    for bad_value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run(
+                "set_placement",
+                {
+                    "document_id": "sinvalid",
+                    "workspace": workspace,
+                    "object_name": "Box1",
+                    "x": bad_value,
+                    "y": 2.0,
+                    "z": 3.0,
+                },
+            )
+        assert "finite" in str(excinfo.value).lower()

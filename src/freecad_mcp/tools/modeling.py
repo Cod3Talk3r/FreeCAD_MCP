@@ -12,6 +12,7 @@ executed inside FreeCAD from the parent process.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from collections.abc import Mapping
 from typing import Any, Optional
@@ -159,6 +160,19 @@ class SetParameterParams(BaseModel):
     object_name: str = Field(description="Name of the object to modify.")
     property_name: str = Field(description="Property to change (whitelisted).")
     value: float = Field(description="New value (positive number in mm).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SetPlacementParams(BaseModel):
+    """Parameters for changing the position of an existing Box or Cylinder."""
+
+    document_id: str = Field(description="Existing document containing the object.")
+    object_name: str = Field(description="Name of the Box or Cylinder to move.")
+    x: float = Field(description="New X position in millimetres.")
+    y: float = Field(description="New Y position in millimetres.")
+    z: float = Field(description="New Z position in millimetres.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -463,6 +477,51 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "set_parameter", bridge_params)
+
+        info = ObjectInfo(
+            name=params.object_name,
+            type=result.get("type", ""),
+            shape_type=result.get("shape_type"),
+            volume=result.get("volume"),
+            length=result.get("length"),
+            width=result.get("width"),
+            height=result.get("height"),
+            radius=result.get("radius"),
+        )
+        return info
+
+    # ------------------------------------------------------------------
+    # set_placement
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="set_placement",
+        title="Set placement",
+        description=(
+            "Change the position (X/Y/Z) of an existing Box or Cylinder without "
+            "recreating it.  The object's existing Rotation is preserved and only "
+            "its translation is updated.  Supported object types are Part::Box "
+            "and Part::Cylinder.  The document is locked exclusively during the "
+            "operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def set_placement_tool(params: SetPlacementParams) -> ObjectInfo:
+        """Set the placement of an existing object and return its updated info."""
+        # Manual finite-number check before delegating to the bridge.
+        for name, value in (("x", params.x), ("y", params.y), ("z", params.z)):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "x": params.x,
+            "y": params.y,
+            "z": params.z,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "set_placement", bridge_params)
 
         info = ObjectInfo(
             name=params.object_name,

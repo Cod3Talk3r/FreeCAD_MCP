@@ -16,6 +16,7 @@ and dispatch logic remain importable and unit-testable on the host interpreter.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -49,6 +50,7 @@ OP_EXPORT_STEP = "export_step"
 OP_TANK = "tank"
 OP_TUBULAR_COIL = "tubular_coil"
 OP_BOOLEAN_CUT = "boolean_cut"
+OP_SET_PLACEMENT = "set_placement"
 
 REQUEST_ENV = "FREECAD_MCP_REQUEST"
 RESPONSE_ENV = "FREECAD_MCP_RESPONSE"
@@ -1168,6 +1170,129 @@ def _op_boolean_cut(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_set_placement(params: dict[str, Any]) -> dict[str, Any]:
+    """Set the placement (position) of an existing Box, Cylinder, or Part::Feature.
+
+    Preserves the object's existing Rotation and only changes the
+    translation (Base) of its Placement.  Supported object types are
+    Part::Box, Part::Cylinder, and plain Part::Feature objects (e.g. Boolean
+    Cut results).  Sketches and other Part subtypes are intentionally excluded.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    x = params.get("x")
+    y = params.get("y")
+    z = params.get("z")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate numeric inputs: must be present, finite numbers (reject NaN/inf).
+    try:
+        x_val = float(x)
+        y_val = float(y)
+        z_val = float(z)
+    except (TypeError, ValueError):
+        return {"ok": False, "op": "set_placement", "error": "x, y, and z must be numeric."}
+    for name, val in (("x", x_val), ("y", y_val), ("z", z_val)):
+        if math.isnan(val) or math.isinf(val):
+            return {"ok": False, "op": "set_placement", "error": f"{name} must be a finite number."}
+
+    SUPPORTED_TYPES = {"Box", "Cylinder", "Feature"}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "set_placement", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "set_placement", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "set_placement", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    try:
+        import FreeCAD as _FC
+        doc = _open_existing_document(_FC, wks, normalized)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "set_placement", "error": f"object '{object_name}' not found"}
+
+        type_id = obj.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name not in SUPPORTED_TYPES:
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "set_placement",
+                "error": (
+                    f"object type '{type_id}' not supported for placement editing; "
+                    f"supported: {sorted(SUPPORTED_TYPES)}"
+                ),
+            }
+
+        if not hasattr(obj, "Placement"):
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "set_placement", "error": f"object '{object_name}' has no Placement property."}
+
+        shape = getattr(obj, "Shape", None)
+        if shape is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "set_placement", "error": f"object '{object_name}' has no Part shape."}
+        if hasattr(shape, "isValid"):
+            try:
+                if not bool(shape.isValid()):
+                    ws_mod.release_lock(lock_path, pid)
+                    return {"ok": False, "op": "set_placement", "error": f"object '{object_name}' has an invalid Part shape."}
+            except Exception:
+                pass
+
+        current_placement = obj.Placement
+        rotation = current_placement.Rotation
+        obj.Placement = _FC.Placement(_FC.Vector(x_val, y_val, z_val), rotation)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "set_placement", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "set_placement",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "x": x_val,
+            "y": y_val,
+            "z": z_val,
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -1185,6 +1310,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_TANK: _op_tank,
     OP_TUBULAR_COIL: _op_tubular_coil,
     OP_BOOLEAN_CUT: _op_boolean_cut,
+    OP_SET_PLACEMENT: _op_set_placement,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

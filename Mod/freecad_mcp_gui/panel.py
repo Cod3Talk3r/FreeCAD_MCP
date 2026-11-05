@@ -160,6 +160,30 @@ class MCPGuiPanel:
         edit_layout.addWidget(self._set_param_button, 3, 0, 1, 2)
         layout.addWidget(edit_group)
 
+        # ---- Edit placement ---------------------------------------------
+        placement_group = QtWidgets.QGroupBox("Edit Placement")
+        placement_layout = QtWidgets.QGridLayout(placement_group)
+        self._placement_name_input = QtWidgets.QLineEdit()
+        placement_layout.addWidget(QtWidgets.QLabel("Object name:"), 0, 0)
+        placement_layout.addWidget(self._placement_name_input, 0, 1)
+        self._placement_x_input = QtWidgets.QDoubleSpinBox()
+        self._placement_y_input = QtWidgets.QDoubleSpinBox()
+        self._placement_z_input = QtWidgets.QDoubleSpinBox()
+        for spin in (self._placement_x_input, self._placement_y_input, self._placement_z_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        placement_layout.addWidget(QtWidgets.QLabel("X:"), 1, 0)
+        placement_layout.addWidget(self._placement_x_input, 1, 1)
+        placement_layout.addWidget(QtWidgets.QLabel("Y:"), 2, 0)
+        placement_layout.addWidget(self._placement_y_input, 2, 1)
+        placement_layout.addWidget(QtWidgets.QLabel("Z:"), 3, 0)
+        placement_layout.addWidget(self._placement_z_input, 3, 1)
+        self._set_placement_button = QtWidgets.QPushButton("Set Placement")
+        self._set_placement_button.clicked.connect(self._on_set_placement)
+        placement_layout.addWidget(self._set_placement_button, 4, 0, 1, 2)
+        layout.addWidget(placement_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -409,6 +433,45 @@ class MCPGuiPanel:
         self._objects_list.clear()
         self._set_status(
             f"Set {property_name}={value} on object '{object_name}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Set placement
+    # ------------------------------------------------------------------
+    def _on_set_placement(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._placement_name_input.text().strip()
+        if not object_name:
+            self._set_status("Error: Object name must not be empty.", error=True)
+            return
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+
+        x = self._placement_x_input.value()
+        y = self._placement_y_input.value()
+        z = self._placement_z_input.value()
+
+        response = self._run_operation(
+            "set_placement",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "x": x,
+                "y": y,
+                "z": z,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Set placement x={x}, y={y}, z={z} on object '{object_name}' "
             f"in workspace document '{document_id}'.",
             error=False,
         )
