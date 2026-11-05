@@ -177,6 +177,9 @@ def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
     length = float(params.get("length") or 10.0)
     width = float(params.get("width") or 5.0)
     height = float(params.get("height") or 3.0)
+    x = float(params.get("x") or 0.0)
+    y = float(params.get("y") or 0.0)
+    z = float(params.get("z") or 0.0)
     workspace_str = params.get("workspace") or ""
 
     try:
@@ -211,6 +214,7 @@ def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
         box.Length = length
         box.Width = width
         box.Height = height
+        box.Placement = _FC.Placement(_FC.Vector(x, y, z), _FC.Rotation())
         doc.recompute()
 
         fcstd_path = wks.document_path(normalized)
@@ -240,6 +244,9 @@ def _op_create_box(params: dict[str, Any]) -> dict[str, Any]:
             "length": length,
             "width": width,
             "height": height,
+            "x": x,
+            "y": y,
+            "z": z,
             "meta_before": meta_before,
         },
     }
@@ -253,6 +260,9 @@ def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
     object_name = params.get("object_name") or "Cyl1"
     radius = float(params.get("radius") or 2.0)
     height = float(params.get("height") or 7.0)
+    x = float(params.get("x") or 0.0)
+    y = float(params.get("y") or 0.0)
+    z = float(params.get("z") or 0.0)
     workspace_str = params.get("workspace") or ""
 
     try:
@@ -286,6 +296,7 @@ def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
         cyl = doc.addObject("Part::Cylinder", obj_name)
         cyl.Radius = radius
         cyl.Height = height
+        cyl.Placement = _FC.Placement(_FC.Vector(x, y, z), _FC.Rotation())
         doc.recompute()
 
         fcstd_path = wks.document_path(normalized)
@@ -314,6 +325,9 @@ def _op_create_cylinder(params: dict[str, Any]) -> dict[str, Any]:
             "object_name": object_name,
             "radius": radius,
             "height": height,
+            "x": x,
+            "y": y,
+            "z": z,
             "meta_before": meta_before,
         },
     }

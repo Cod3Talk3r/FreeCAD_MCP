@@ -71,15 +71,28 @@ class MCPGuiPanel:
         self._height_input.setValue(3.0)
         for spin in (self._length_input, self._width_input, self._height_input):
             spin.setDecimals(3)
+        self._box_x_input = QtWidgets.QDoubleSpinBox()
+        self._box_y_input = QtWidgets.QDoubleSpinBox()
+        self._box_z_input = QtWidgets.QDoubleSpinBox()
+        for spin in (self._box_x_input, self._box_y_input, self._box_z_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
         box_layout.addWidget(QtWidgets.QLabel("Length:"), 0, 0)
         box_layout.addWidget(self._length_input, 0, 1)
         box_layout.addWidget(QtWidgets.QLabel("Width:"), 1, 0)
         box_layout.addWidget(self._width_input, 1, 1)
         box_layout.addWidget(QtWidgets.QLabel("Height:"), 2, 0)
         box_layout.addWidget(self._height_input, 2, 1)
+        box_layout.addWidget(QtWidgets.QLabel("X:"), 3, 0)
+        box_layout.addWidget(self._box_x_input, 3, 1)
+        box_layout.addWidget(QtWidgets.QLabel("Y:"), 4, 0)
+        box_layout.addWidget(self._box_y_input, 4, 1)
+        box_layout.addWidget(QtWidgets.QLabel("Z:"), 5, 0)
+        box_layout.addWidget(self._box_z_input, 5, 1)
         self._create_box_button = QtWidgets.QPushButton("Create Box")
         self._create_box_button.clicked.connect(self._on_create_box)
-        box_layout.addWidget(self._create_box_button, 3, 0, 1, 2)
+        box_layout.addWidget(self._create_box_button, 6, 0, 1, 2)
         layout.addWidget(box_group)
 
         # ---- Create Cylinder --------------------------------------------
@@ -93,13 +106,26 @@ class MCPGuiPanel:
         self._cyl_height_input.setValue(7.0)
         self._radius_input.setDecimals(3)
         self._cyl_height_input.setDecimals(3)
+        self._cyl_x_input = QtWidgets.QDoubleSpinBox()
+        self._cyl_y_input = QtWidgets.QDoubleSpinBox()
+        self._cyl_z_input = QtWidgets.QDoubleSpinBox()
+        for spin in (self._cyl_x_input, self._cyl_y_input, self._cyl_z_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
         cyl_layout.addWidget(QtWidgets.QLabel("Radius:"), 0, 0)
         cyl_layout.addWidget(self._radius_input, 0, 1)
         cyl_layout.addWidget(QtWidgets.QLabel("Height:"), 1, 0)
         cyl_layout.addWidget(self._cyl_height_input, 1, 1)
+        cyl_layout.addWidget(QtWidgets.QLabel("X:"), 2, 0)
+        cyl_layout.addWidget(self._cyl_x_input, 2, 1)
+        cyl_layout.addWidget(QtWidgets.QLabel("Y:"), 3, 0)
+        cyl_layout.addWidget(self._cyl_y_input, 3, 1)
+        cyl_layout.addWidget(QtWidgets.QLabel("Z:"), 4, 0)
+        cyl_layout.addWidget(self._cyl_z_input, 4, 1)
         self._create_cyl_button = QtWidgets.QPushButton("Create Cylinder")
         self._create_cyl_button.clicked.connect(self._on_create_cylinder)
-        cyl_layout.addWidget(self._create_cyl_button, 2, 0, 1, 2)
+        cyl_layout.addWidget(self._create_cyl_button, 5, 0, 1, 2)
         layout.addWidget(cyl_group)
 
         # ---- List objects -----------------------------------------------
@@ -134,6 +160,23 @@ class MCPGuiPanel:
         edit_layout.addWidget(self._set_param_button, 3, 0, 1, 2)
         layout.addWidget(edit_group)
 
+        # ---- Boolean Cut ------------------------------------------------
+        cut_group = QtWidgets.QGroupBox("Boolean Cut")
+        cut_layout = QtWidgets.QGridLayout(cut_group)
+        self._cut_base_input = QtWidgets.QLineEdit()
+        cut_layout.addWidget(QtWidgets.QLabel("Base Object:"), 0, 0)
+        cut_layout.addWidget(self._cut_base_input, 0, 1)
+        self._cut_tool_input = QtWidgets.QLineEdit()
+        cut_layout.addWidget(QtWidgets.QLabel("Tool Object:"), 1, 0)
+        cut_layout.addWidget(self._cut_tool_input, 1, 1)
+        self._cut_result_input = QtWidgets.QLineEdit("Cut1")
+        cut_layout.addWidget(QtWidgets.QLabel("Result Name:"), 2, 0)
+        cut_layout.addWidget(self._cut_result_input, 2, 1)
+        self._cut_button = QtWidgets.QPushButton("Boolean Cut")
+        self._cut_button.clicked.connect(self._on_boolean_cut)
+        cut_layout.addWidget(self._cut_button, 3, 0, 1, 2)
+        layout.addWidget(cut_group)
+
         # ---- Recompute / Validate ---------------------------------------
         actions_layout = QtWidgets.QHBoxLayout()
         self._recompute_button = QtWidgets.QPushButton("Recompute Document")
@@ -155,7 +198,13 @@ class MCPGuiPanel:
         layout.addWidget(self._status_label)
 
         layout.addStretch()
-        self._dock.setWidget(container)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setWidget(container)
+        self._dock.setWidget(scroll)
 
         self.refresh_document_label()
 
@@ -208,6 +257,9 @@ class MCPGuiPanel:
         length = self._length_input.value()
         width = self._width_input.value()
         height = self._height_input.value()
+        x = self._box_x_input.value()
+        y = self._box_y_input.value()
+        z = self._box_z_input.value()
         if length <= 0 or width <= 0 or height <= 0:
             self._set_status(
                 "Error: Length, width, and height must be positive.", error=True
@@ -222,6 +274,9 @@ class MCPGuiPanel:
                 "length": length,
                 "width": width,
                 "height": height,
+                "x": x,
+                "y": y,
+                "z": z,
             },
         )
         if response is None or not response.get("ok"):
@@ -251,6 +306,9 @@ class MCPGuiPanel:
 
         radius = self._radius_input.value()
         height = self._cyl_height_input.value()
+        x = self._cyl_x_input.value()
+        y = self._cyl_y_input.value()
+        z = self._cyl_z_input.value()
         if radius <= 0 or height <= 0:
             self._set_status(
                 "Error: Radius and height must be positive.", error=True
@@ -264,6 +322,9 @@ class MCPGuiPanel:
                 "object_name": name,
                 "radius": radius,
                 "height": height,
+                "x": x,
+                "y": y,
+                "z": z,
             },
         )
         if response is None or not response.get("ok"):
@@ -399,6 +460,56 @@ class MCPGuiPanel:
         self._validate_result.setText("\n".join(lines))
         self.refresh_document_label()
         self._set_status(f"Validated workspace document '{name}'.", error=False)
+
+    # ------------------------------------------------------------------
+    # Boolean Cut
+    # ------------------------------------------------------------------
+    def _on_boolean_cut(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        base_object = self._cut_base_input.text().strip()
+        tool_object = self._cut_tool_input.text().strip()
+        result_name = self._cut_result_input.text().strip() or "Cut1"
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not base_object:
+            self._set_status("Error: Base Object must not be empty.", error=True)
+            return
+        if not tool_object:
+            self._set_status("Error: Tool Object must not be empty.", error=True)
+            return
+        if base_object == tool_object:
+            self._set_status(
+                "Error: Base Object and Tool Object must be different.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "boolean_cut",
+            {
+                "document_id": document_id,
+                "base_object": base_object,
+                "tool_object": tool_object,
+                "result_name": result_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        obj_name = (
+            result.get("object_name", result_name)
+            if isinstance(result, dict)
+            else result_name
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Boolean Cut '{obj_name}' = '{base_object}' - '{tool_object}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
 
     def _set_status(self, message: str, *, error: bool = False) -> None:
         self._status_label.setText(message)

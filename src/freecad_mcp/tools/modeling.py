@@ -129,6 +129,9 @@ class CreateBoxParams(BaseModel):
     length: float = Field(default=10.0, description="Length in millimetres.")
     width: float = Field(default=5.0, description="Width in millimetres.")
     height: float = Field(default=3.0, description="Height in millimetres.")
+    x: float = Field(default=0.0, description="X position in millimetres.")
+    y: float = Field(default=0.0, description="Y position in millimetres.")
+    z: float = Field(default=0.0, description="Z position in millimetres.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -141,6 +144,9 @@ class CreateCylinderParams(BaseModel):
     object_name: str = Field(default="Cyl1", description="Name for the new Cylinder object.")
     radius: float = Field(default=2.0, description="Radius in millimetres.")
     height: float = Field(default=7.0, description="Height in millimetres.")
+    x: float = Field(default=0.0, description="X position in millimetres.")
+    y: float = Field(default=0.0, description="Y position in millimetres.")
+    z: float = Field(default=0.0, description="Z position in millimetres.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -370,6 +376,9 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "length": params.length,
             "width": params.width,
             "height": params.height,
+            "x": params.x,
+            "y": params.y,
+            "z": params.z,
             "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "create_box", bridge_params)
@@ -408,6 +417,9 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "object_name": params.object_name,
             "radius": params.radius,
             "height": params.height,
+            "x": params.x,
+            "y": params.y,
+            "z": params.z,
             "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "create_cylinder", bridge_params)
