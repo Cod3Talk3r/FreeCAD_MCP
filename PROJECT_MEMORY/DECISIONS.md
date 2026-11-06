@@ -54,6 +54,15 @@ Significant decisions with rationale. Keep concise; source code wins on conflict
   bridge operations (`list_objects`, `inspect_object`) and never imports
   FreeCAD in the parent process.
 
+- **D13 — Sketch line edits via `sketch.Geometry` assignment (2026-11-07):**
+  FreeCAD 1.1.4 has no `setGeometry`/`setLine`/`replaceGeometry`. Edit an
+  existing line by mutating the existing geometry copy and assigning the full
+  geometry list back (`sketch.Geometry = geometry_list`), then recompute. This
+  matches FreeCAD's installed Draft editing code and preserves index, unrelated
+  geometry, constraints, construction state, and geometry ID. Reject geometry
+  referenced by constraints. Rationale: verified against real FreeCAD 1.1.4;
+  delete-and-re-add is not equivalent.
+
 Add new dated decisions here; do not record trivial implementation details.
 
 ---

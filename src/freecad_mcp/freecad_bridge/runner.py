@@ -62,6 +62,7 @@ OP_SKETCH_ADD_REGULAR_POLYGON = "sketch_add_regular_polygon"
 OP_SKETCH_ADD_POLYGON = "sketch_add_polygon"
 OP_INSPECT_SKETCH = "inspect_sketch"
 OP_SKETCH_DELETE_GEOMETRY = "sketch_delete_geometry"
+OP_SKETCH_EDIT_LINE = "sketch_edit_line"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -2815,6 +2816,231 @@ def _op_sketch_delete_geometry(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_edit_line(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit an existing line geometry in a sketch (read-modify-write).
+
+    Validates that the target object exists and is a Sketcher::SketchObject,
+    validates geometry_index strictly (integer, not boolean, in range), verifies
+    the geometry at that index is a line segment, validates all coordinates are
+    finite and non-degenerate, then replaces the line endpoints by mutating the
+    geometry and assigning the full geometry list back to ``sketch.Geometry``
+    (the documented FreeCAD property-assignment pattern; FreeCAD 1.1.4 has no
+    ``setGeometry``/``setLine`` method).  This keeps the geometry at the same
+    index and preserves construction state and geometry IDs.  The document is
+    recomputed, saved atomically, and its revision is bumped.
+
+    Constraint safety: if any constraint references the geometry being edited
+    (via Constraint.First/Second/Third integer geometry indices), the operation
+    is rejected with a clear error rather than silently breaking constraints.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    geometry_index_param = params.get("geometry_index")
+    start_x_param = params.get("start_x")
+    start_y_param = params.get("start_y")
+    end_x_param = params.get("end_x")
+    end_y_param = params.get("end_y")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate geometry_index: must be an integer, not a boolean.
+    if isinstance(geometry_index_param, bool) or not isinstance(geometry_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_line",
+            "error": "geometry_index must be an integer (boolean values are not accepted).",
+        }
+
+    geometry_index = geometry_index_param
+
+    # Validate all coordinates are finite numbers.
+    try:
+        start_x_val = float(start_x_param)
+        start_y_val = float(start_y_param)
+        end_x_val = float(end_x_param)
+        end_y_val = float(end_y_param)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_edit_line",
+            "error": "start_x, start_y, end_x, end_y must be finite numbers.",
+        }
+    for name, val in (
+        ("start_x", start_x_val),
+        ("start_y", start_y_val),
+        ("end_x", end_x_val),
+        ("end_y", end_y_val),
+    ):
+        if math.isnan(val) or math.isinf(val):
+            return {
+                "ok": False,
+                "op": "sketch_edit_line",
+                "error": f"{name} must be a finite number.",
+            }
+
+    # Reject zero-length / degenerate lines.
+    dx = end_x_val - start_x_val
+    dy = end_y_val - start_y_val
+    if dx * dx + dy * dy <= 1e-12:
+        return {
+            "ok": False,
+            "op": "sketch_edit_line",
+            "error": "line is degenerate (zero length): start and end points must differ.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_edit_line", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_edit_line", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_edit_line", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_edit_line", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot edit sketch geometry."
+            )
+
+        # Get current geometry count for range validation.
+        try:
+            geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_count = 0
+
+        if geometry_index < 0 or geometry_index >= geometry_count:
+            return _fail(
+                f"geometry_index {geometry_index} is out of range (valid range: 0 to {geometry_count - 1})."
+            )
+
+        # Verify the geometry at this index is a line segment.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        target_geometry = geometry_list[geometry_index]
+        geom_type = type(target_geometry).__name__
+        if geom_type != "LineSegment":
+            return _fail(
+                f"geometry at index {geometry_index} is type '{geom_type}', not 'LineSegment'; "
+                f"cannot edit as a line."
+            )
+
+        # Constraint safety: reject if any constraint references this geometry index.
+        # FreeCAD Constraint.First/Second/Third are integer geometry indices
+        # (not sub-element name strings), so we can check them directly.
+        constraint_references_geometry = False
+        constraint_count_before = None
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+            for constraint in getattr(sketch, "Constraints", []):
+                if (
+                    getattr(constraint, "First", None) == geometry_index
+                    or getattr(constraint, "Second", None) == geometry_index
+                    or getattr(constraint, "Third", None) == geometry_index
+                ):
+                    constraint_references_geometry = True
+                    break
+        except Exception:
+            pass
+
+        if constraint_references_geometry:
+            return _fail(
+                f"Cannot edit geometry at index {geometry_index}: it is referenced by one or more "
+                f"constraints. Remove the constraints first."
+            )
+
+        # FreeCAD 1.1.4 exposes no setGeometry/setLine method.  The supported
+        # pattern (used by FreeCAD's own Draft sketcher-editing code) is to
+        # mutate the geometry copy and assign the full list back to the
+        # Geometry property.  Reassigning the existing object keeps the same
+        # index, construction state, and geometry ID; only the endpoints change.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+            target_geometry = geometry_list[geometry_index]
+            target_geometry.StartPoint = _FC.Vector(start_x_val, start_y_val, 0.0)
+            target_geometry.EndPoint = _FC.Vector(end_x_val, end_y_val, 0.0)
+            geometry_list[geometry_index] = target_geometry
+            sketch.Geometry = geometry_list
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _fail(
+                f"FreeCAD Sketcher API does not support editing line geometry: {exc}"
+            )
+
+        doc.recompute()
+
+        # Record constraint count after edit.
+        constraint_count_after = None
+        try:
+            constraint_count_after = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            pass
+
+        # Get updated geometry count.
+        updated_geometry_count = None
+        try:
+            updated_geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            pass
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_edit_line",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "geometry_index": geometry_index,
+            "start_x": start_x_val,
+            "start_y": start_y_val,
+            "end_x": end_x_val,
+            "end_y": end_y_val,
+            "geometry_count": updated_geometry_count if updated_geometry_count is not None else geometry_count,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": constraint_count_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -2844,6 +3070,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_ADD_POLYGON: _op_sketch_add_polygon,
     OP_INSPECT_SKETCH: _op_inspect_sketch,
     OP_SKETCH_DELETE_GEOMETRY: _op_sketch_delete_geometry,
+    OP_SKETCH_EDIT_LINE: _op_sketch_edit_line,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

@@ -14,6 +14,7 @@ from freecad_mcp.tools.modeling import (
     SketchAddRegularPolygonParams,
     SketchAddTriangleParams,
     SketchDeleteGeometryParams,
+    SketchEditLineParams,
     TankParams,
     TubularCoilParams,
 )
@@ -252,3 +253,33 @@ def test_sketch_delete_geometry_params_defaults():
     """SketchDeleteGeometryParams defaults workspace to None."""
     p = SketchDeleteGeometryParams(document_id="mydoc", sketch_name="MySketch", geometry_index=0)
     assert p.workspace is None
+
+
+def test_sketch_edit_line_params_valid():
+    """Valid SketchEditLineParams should be accepted."""
+    p = SketchEditLineParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        geometry_index=1,
+        start_x=1.0,
+        start_y=2.0,
+        end_x=3.0,
+        end_y=4.0,
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.geometry_index == 1
+    assert p.start_x == 1.0
+    assert p.start_y == 2.0
+    assert p.end_x == 3.0
+    assert p.end_y == 4.0
+
+
+def test_sketch_edit_line_params_defaults():
+    """SketchEditLineParams defaults start/end coordinates and workspace."""
+    p = SketchEditLineParams(document_id="mydoc", sketch_name="MySketch", geometry_index=0)
+    assert p.workspace is None
+    assert p.start_x == 0.0
+    assert p.start_y == 0.0
+    assert p.end_x == 1.0
+    assert p.end_y == 0.0

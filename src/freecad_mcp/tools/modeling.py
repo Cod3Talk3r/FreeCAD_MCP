@@ -261,6 +261,25 @@ class SketchDeleteGeometryResult(BaseModel):
     )
 
 
+class SketchEditLineResult(BaseModel):
+    """Result of sketch_edit_line."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the line was edited in.")
+    geometry_index: int = Field(description="Zero-based index of the edited line geometry.")
+    start_x: float = Field(description="New start X coordinate in millimetres.")
+    start_y: float = Field(description="New start Y coordinate in millimetres.")
+    end_x: float = Field(description="New end X coordinate in millimetres.")
+    end_y: float = Field(description="New end Y coordinate in millimetres.")
+    geometry_count: int = Field(description="Number of geometries in the sketch after editing.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -448,6 +467,21 @@ class SketchDeleteGeometryParams(BaseModel):
     document_id: str = Field(description="Existing document containing the sketch.")
     sketch_name: str = Field(description="Name of the sketch to delete geometry from.")
     geometry_index: int = Field(description="Zero-based index of the geometry to delete.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditLineParams(BaseModel):
+    """Parameters for editing line geometry in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to edit the line in.")
+    geometry_index: int = Field(description="Zero-based index of the line geometry to edit.")
+    start_x: float = Field(default=0.0, description="New start X coordinate in millimetres.")
+    start_y: float = Field(default=0.0, description="New start Y coordinate in millimetres.")
+    end_x: float = Field(default=1.0, description="New end X coordinate in millimetres.")
+    end_y: float = Field(default=0.0, description="New end Y coordinate in millimetres.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1603,6 +1637,60 @@ def _register_tools(server: Any, settings: Settings) -> None:
             document_id=params.document_id,
             sketch_name=result.get("sketch_name", params.sketch_name),
             deleted_index=result.get("deleted_index", params.geometry_index),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_line
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_line",
+        title="Edit line geometry in sketch",
+        description=(
+            "Edit an existing line geometry in a Sketcher::SketchObject by its "
+            "zero-based geometry index.  Validates that the geometry is a line "
+            "segment, that all coordinates are finite and non-degenerate, and "
+            "that no constraints reference the geometry being edited.  The "
+            "document is locked exclusively during the operation, recomputed, "
+            "saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_line_tool(params: SketchEditLineParams) -> SketchEditLineResult:
+        """Edit line geometry in a sketch and return its info."""
+        validate_direct_request("sketch_edit_line", params.model_dump())
+        for name, value in (
+            ("start_x", params.start_x),
+            ("start_y", params.start_y),
+            ("end_x", params.end_x),
+            ("end_y", params.end_y),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "start_x": params.start_x,
+            "start_y": params.start_y,
+            "end_x": params.end_x,
+            "end_y": params.end_y,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_edit_line", bridge_params)
+
+        return SketchEditLineResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_index=result.get("geometry_index", params.geometry_index),
+            start_x=result.get("start_x", params.start_x),
+            start_y=result.get("start_y", params.start_y),
+            end_x=result.get("end_x", params.end_x),
+            end_y=result.get("end_y", params.end_y),
             geometry_count=result.get("geometry_count", 0),
             constraint_count_before=result.get("constraint_count_before"),
             constraint_count_after=result.get("constraint_count_after"),

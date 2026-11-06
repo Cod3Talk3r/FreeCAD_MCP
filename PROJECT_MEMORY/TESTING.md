@@ -13,6 +13,11 @@
 
 ## Verified results
 
+- 2026-11-07 (Linux, Python 3.11.18): `uv run pytest -q -rs` -> **521 passed,
+  40 skipped** after sketch line-editing fix. Real FreeCAD 1.1.4 integration
+  `tests/test_freecad_integration.py -k "sketch_edit_line"` -> **2 passed**
+  (launched Windows `freecadcmd.exe` from WSL; Windows-visible temp path via
+  `/tmp/freecadtest` symlink).
 - 2026-11-04 (Linux, Python 3.11.18): `uv run pytest -q -rs` -> **385 passed,
   9 skipped** after Phase 4 M2 document & model inspection. Windows FreeCAD 1.1.4
   launched from WSL passed direct ping, version, and a temporary document/tank/

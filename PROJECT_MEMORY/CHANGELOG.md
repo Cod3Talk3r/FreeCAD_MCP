@@ -2,6 +2,10 @@
 
 ## Current task
 
+- Sketch line editing (`sketch_edit_line`) fixed against the verified FreeCAD
+  1.1.4 API: no `setGeometry`/`setLine`; use mutate-and-reassign of the
+  `Geometry` property. Real FreeCAD integration tests pass. Changes are in the
+  working tree, not committed.
 - Added shared agent skills (`.agents/skills/token-saver`,
   `.agents/skills/project-memory`) and persistent project memory
   (`PROJECT_MEMORY/`), plus root `AGENTS.md` routing agents to them.

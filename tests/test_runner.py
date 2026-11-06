@@ -174,6 +174,8 @@ class LineSegment:
     def __init__(self, start: _FakePoint, end: _FakePoint, construction: bool = False) -> None:
         self.StartPoint = start
         self.EndPoint = end
+        self.start = start
+        self.end = end
         self.Construction = construction
 
 
@@ -181,6 +183,8 @@ class Circle:
     def __init__(self, center: _FakePoint, radius: float, construction: bool = False) -> None:
         self.Center = center
         self.Radius = radius
+        self.center = center
+        self.radius = radius
         self.Construction = construction
 
 
@@ -197,6 +201,9 @@ class Ellipse:
         self.Center = center
         self.MajorRadius = major_radius
         self.MinorRadius = minor_radius
+        self.center = center
+        self.major_radius = major_radius
+        self.minor_radius = minor_radius
         self.MajorDirection = major_dir or _FakePoint(1, 0, 0)
         self.MinorDirection = minor_dir or _FakePoint(0, 1, 0)
         self.Construction = construction
@@ -207,16 +214,22 @@ class _FakeUnknownGeom:
         self.Construction = construction
 
 
+# Backward-compatible aliases for existing tests that reference _FakeSegment etc.
+_FakeSegment = LineSegment
+_FakeCircle = Circle
+_FakeEllipse = Ellipse
+
+
 class _FakePart:
     """Minimal stand-in for FreeCAD's Part module."""
 
     @staticmethod
-    def LineSegment(start: object, end: object) -> _FakeSegment:
-        return _FakeSegment(start, end)
+    def LineSegment(start: object, end: object) -> LineSegment:
+        return LineSegment(start, end)
 
     @staticmethod
-    def Circle(center: object, normal: object, radius: float) -> _FakeCircle:
-        return _FakeCircle(center, normal, radius)
+    def Circle(center: object, normal: object, radius: float) -> Circle:
+        return Circle(center, radius)
 
     @staticmethod
     def Ellipse(center: object, major_radius: float, minor_radius: float) -> _FakeEllipse:
@@ -2213,3 +2226,431 @@ def test_handle_request_dispatches_sketch_delete_geometry(
     assert response["op"] == "sketch_delete_geometry"
     assert response["result"]["deleted_index"] == 0
     assert response["result"]["geometry_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-B1: Edit sketch line geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_edit_line_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "start_x": 2.0,
+            "start_y": 3.0,
+            "end_x": 5.0,
+            "end_y": 7.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_line"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["start_x"] == 2.0
+    assert result["result"]["start_y"] == 3.0
+    assert result["result"]["end_x"] == 5.0
+    assert result["result"]["end_y"] == 7.0
+    assert result["result"]["geometry_count"] == 1
+
+    # Line was modified in place.
+    line = sketch.Geometry[0]
+    assert line.StartPoint.x == 2.0
+    assert line.StartPoint.y == 3.0
+    assert line.EndPoint.x == 5.0
+    assert line.EndPoint.y == 7.0
+
+
+def test_sketch_edit_line_mixed_sketch_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(Circle(_FakePoint(2, 2, 0), 1.5))
+    sketch.Geometry.append(LineSegment(_FakePoint(4, 4, 0), _FakePoint(5, 4, 0)))
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 2,
+            "start_x": 9.0,
+            "start_y": 9.0,
+            "end_x": 10.0,
+            "end_y": 9.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 3
+
+    # Other geometries preserved.
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert isinstance(sketch.Geometry[1], Circle)
+    assert sketch.Geometry[1].Radius == 1.5
+
+    # Edited line updated.
+    edited = sketch.Geometry[2]
+    assert isinstance(edited, LineSegment)
+    assert edited.StartPoint.x == 9.0
+    assert edited.StartPoint.y == 9.0
+    assert edited.EndPoint.x == 10.0
+    assert edited.EndPoint.y == 9.0
+
+
+def test_sketch_edit_line_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "out of range" in result["error"]
+    # Nothing changed.
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_line_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 5,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_line_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_edit_line_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editfloat", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editfloat",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "integer" in result["error"].lower()
+
+
+def test_sketch_edit_line_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "not found" in result["error"]
+
+
+def test_sketch_edit_line_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "editwtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editwtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_line_rejects_non_line_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnonline", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editnonline",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 1.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "LineSegment" in result["error"]
+    assert "Circle" in result["error"]
+
+
+def test_sketch_edit_line_rejects_non_finite_coordinates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnan", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    base = {
+        "document_id": "editnan",
+        "workspace": str(tmp_path),
+        "sketch_name": "Sketch1",
+        "geometry_index": 0,
+        "start_x": 0.0,
+        "start_y": 0.0,
+        "end_x": 1.0,
+        "end_y": 0.0,
+    }
+    for bad in (
+        {**base, "start_x": float("nan")},
+        {**base, "start_y": float("inf")},
+        {**base, "end_x": float("-inf")},
+        {**base, "end_y": float("nan")},
+    ):
+        result = runner._op_sketch_edit_line(bad)
+        assert result["ok"] is False, bad
+        assert result["op"] == "sketch_edit_line"
+        assert "finite" in result["error"]
+
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_line_rejects_zero_length_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editzero", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editzero",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 0.0,
+            "end_y": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "degenerate" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_line_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    # Add a constraint that references geometry index 0.
+    class _FakeConstraint:
+        First = 0
+        FirstPos = 1
+        Second = -1
+        SecondPos = 0
+        Third = -1
+        ThirdPos = 0
+
+    sketch.Constraints.append(_FakeConstraint())
+
+    result = runner._op_sketch_edit_line(
+        {
+            "document_id": "editcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "start_x": 2.0,
+            "start_y": 3.0,
+            "end_x": 5.0,
+            "end_y": 7.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_line"
+    assert "constraint" in result["error"].lower()
+    assert len(sketch.Geometry) == 1  # unchanged
+
+
+def test_handle_request_dispatches_sketch_edit_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editdisp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_EDIT_LINE,
+            "params": {
+                "document_id": "editdisp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "start_x": 3.0,
+                "start_y": 4.0,
+                "end_x": 6.0,
+                "end_y": 8.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_line"
+    assert response["result"]["geometry_index"] == 0
+    assert response["result"]["start_x"] == 3.0
+    assert response["result"]["start_y"] == 4.0
+    assert response["result"]["end_x"] == 6.0
+    assert response["result"]["end_y"] == 8.0

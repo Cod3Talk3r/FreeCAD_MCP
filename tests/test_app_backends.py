@@ -135,6 +135,12 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("sketch_delete_geometry", {"sketch_name": "   "}, "sketch_name must not be empty"),
     ("sketch_delete_geometry", {"sketch_name": "S", "geometry_index": True}, "boolean values are not accepted"),
     ("sketch_delete_geometry", {"sketch_name": "S", "geometry_index": 1.5}, "must be an integer"),
+    ("sketch_edit_line", {"sketch_name": ""}, "sketch_name must not be empty"),
+    ("sketch_edit_line", {"sketch_name": "   "}, "sketch_name must not be empty"),
+    ("sketch_edit_line", {"sketch_name": "S", "geometry_index": True}, "boolean values are not accepted"),
+    ("sketch_edit_line", {"sketch_name": "S", "geometry_index": 1.5}, "must be an integer"),
+    ("sketch_edit_line", {"sketch_name": "S", "geometry_index": 0, "start_x": float("nan")}, "must be a finite number"),
+    ("sketch_edit_line", {"sketch_name": "S", "geometry_index": 0, "start_x": 0, "start_y": 0, "end_x": float("inf")}, "must be a finite number"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

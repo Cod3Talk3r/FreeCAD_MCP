@@ -1952,3 +1952,206 @@ def test_real_freecad_sketch_delete_geometry_out_of_range(tmp_path: Path) -> Non
         {"document_id": "skdor", "workspace": workspace, "sketch_name": "Sketch1"},
     )
     assert info["geometry_count"] == 4
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_line(tmp_path: Path) -> None:
+    """Edit a line in a sketch; verify endpoints, persistence, and mixed sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skedit", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skedit", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add geometry: rectangle (4 lines) + circle.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skedit",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skedit",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 2.0,
+        },
+    )
+
+    # Inspect: should have 5 geometries (4 lines + 1 circle).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skedit", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+
+    # Edit the first line (index 0) to new endpoints.
+    result = bridge.run(
+        "sketch_edit_line",
+        {
+            "document_id": "skedit",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "start_x": 10.0,
+            "start_y": 20.0,
+            "end_x": 30.0,
+            "end_y": 40.0,
+        },
+    )
+    assert result["geometry_index"] == 0
+    assert result["start_x"] == pytest.approx(10.0)
+    assert result["start_y"] == pytest.approx(20.0)
+    assert result["end_x"] == pytest.approx(30.0)
+    assert result["end_y"] == pytest.approx(40.0)
+    assert result["geometry_count"] == 5
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skedit", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+    assert len(info["geometries"]) == 5
+
+    # First geometry should now be a line with the new endpoints.
+    first_geo = info["geometries"][0]
+    assert first_geo["type"] == "LineSegment"
+    assert first_geo["start_point"]["x"] == pytest.approx(10.0)
+    assert first_geo["start_point"]["y"] == pytest.approx(20.0)
+    assert first_geo["end_point"]["x"] == pytest.approx(30.0)
+    assert first_geo["end_point"]["y"] == pytest.approx(40.0)
+
+    # Other geometries preserved: 3 more lines + 1 circle.
+    line_types = [g for g in info["geometries"] if g["type"] == "LineSegment"]
+    circle_types = [g for g in info["geometries"] if g["type"] == "Circle"]
+    assert len(line_types) == 4  # edited line + 3 remaining rectangle lines
+    assert len(circle_types) == 1
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_line_errors(tmp_path: Path) -> None:
+    """sketch_edit_line returns structured errors for missing sketch, wrong type, non-line, out-of-range."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeder", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skeder",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeder", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skeder",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skeder",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 1.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_line",
+            {
+                "document_id": "skeder",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "start_x": 0.0,
+                "start_y": 0.0,
+                "end_x": 1.0,
+                "end_y": 0.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_line",
+            {
+                "document_id": "skeder",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "start_x": 0.0,
+                "start_y": 0.0,
+                "end_x": 1.0,
+                "end_y": 0.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Non-line geometry (circle at index 4).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_line",
+            {
+                "document_id": "skeder",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 4,
+                "start_x": 0.0,
+                "start_y": 0.0,
+                "end_x": 1.0,
+                "end_y": 0.0,
+            },
+        )
+    assert "LineSegment" in str(excinfo.value)
+
+    # Out-of-range index (only 5 geometries).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_line",
+            {
+                "document_id": "skeder",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 99,
+                "start_x": 0.0,
+                "start_y": 0.0,
+                "end_x": 1.0,
+                "end_y": 0.0,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()

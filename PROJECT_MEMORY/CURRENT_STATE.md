@@ -2,7 +2,9 @@
 
 ## Latest verified state
 
-- HEAD: `c879c68` — test: cover FreeCAD transport compatibility (branch `feat/freecad-mcp`).
+- HEAD: `44f994e` — feat(sketch): add geometry deletion (branch `feat/freecad-mcp`).
+- Working tree contains uncommitted sketch geometry tools and the verified
+  `sketch_edit_line` fix; do not stage or commit without explicit request.
 - Phase 4 M1 (shared application backend layer) and M2 (document & model
   inspection) are committed.
 - Full test suite verified locally (Python 3.11.18): `uv run pytest -q -rs` →
@@ -118,6 +120,28 @@
 ### Current status (VERIFIED)
 - `taiga_build` **implemented and committed** (`1949a5b`).
 - Next: Milestone 8 (documentation/release preparation).
+
+### Sketch line editing API (VERIFIED 2026-11-07, FreeCAD 1.1.4)
+
+- FreeCAD 1.1.4 `Sketcher.SketchObject` has **no** `setGeometry`, `setLine`, or
+  `replaceGeometry` method. The earlier `setGeometry` implementation was invalid.
+- `Geometry` is an assignable property (list). Installed FreeCAD examples use the
+  supported pattern: mutate the geometry copy's `StartPoint`/`EndPoint`, then
+  assign the full list back (`sketch.Geometry = geometry_list`), followed by
+  `doc.recompute()`.
+  - `Mod/Sketcher/SketcherExample.py` assigns `f.Geometry = [...]`.
+  - `Mod/Draft/draftguitools/gui_edit_sketcher_objects.py` mutates a line and
+    assigns `obj.Geometry = [line]`.
+- Verified on real FreeCAD 1.1.4: whole-list assignment keeps the same index,
+  unrelated geometry, constraints, construction state, and geometry ID when the
+  existing geometry object is mutated and reassigned. Constructing a *new*
+  `Part.LineSegment` changes the geometry ID (construction defaults can also
+  change), so prefer mutate-and-reassign.
+- `sketch_edit_line` now uses this pattern; it still rejects geometry referenced
+  by constraints.
+- Tests: full suite 521 passed, 40 skipped (Linux); real FreeCAD integration
+  `tests/test_freecad_integration.py -k "sketch_edit_line"` 2 passed against
+  FreeCAD 1.1.4.
 
 ### Phase 0 verification (2026-11-03) — read-only experiments
 All run against real FreeCAD 1.1.4 embedded Python and Taiga upstream at
