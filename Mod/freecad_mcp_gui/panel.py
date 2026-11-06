@@ -407,6 +407,22 @@ class MCPGuiPanel:
         insp_layout.addWidget(self._inspect_button, 1, 0, 1, 2)
         layout.addWidget(insp_group)
 
+        # ---- Delete Geometry from Sketch -----------------------------------
+        del_group = QtWidgets.QGroupBox("Delete Geometry from Sketch")
+        del_layout = QtWidgets.QGridLayout(del_group)
+        self._del_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        del_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        del_layout.addWidget(self._del_sketch_input, 0, 1)
+        self._del_geo_index_input = QtWidgets.QSpinBox()
+        self._del_geo_index_input.setRange(0, 1000000)
+        self._del_geo_index_input.setValue(0)
+        del_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        del_layout.addWidget(self._del_geo_index_input, 1, 1)
+        self._del_geo_button = QtWidgets.QPushButton("Delete Geometry")
+        self._del_geo_button.clicked.connect(self._on_sketch_delete_geometry)
+        del_layout.addWidget(self._del_geo_button, 2, 0, 1, 2)
+        layout.addWidget(del_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1096,6 +1112,45 @@ class MCPGuiPanel:
                 if geo.get("construction"):
                     lines[-1] += " (construction)"
             self._validate_result.setText("\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # Sketch: Delete Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_delete_geometry(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._del_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._del_geo_index_input.value()
+
+        response = self._run_operation(
+            "sketch_delete_geometry",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Deleted geometry index {geometry_index} from sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' ({geometry_count} geometry remaining).",
+            error=False,
+        )
 
     # ------------------------------------------------------------------
     # Recompute

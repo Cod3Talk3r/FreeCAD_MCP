@@ -246,6 +246,21 @@ class InspectSketchResult(BaseModel):
     )
 
 
+class SketchDeleteGeometryResult(BaseModel):
+    """Result of sketch_delete_geometry."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the geometry was deleted from.")
+    deleted_index: int = Field(description="Zero-based index of the deleted geometry.")
+    geometry_count: int = Field(description="Number of geometries remaining in the sketch after deletion.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before deletion."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after deletion."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -422,6 +437,17 @@ class InspectSketchParams(BaseModel):
 
     document_id: str = Field(description="Existing document containing the sketch.")
     sketch_name: str = Field(description="Name of the sketch to inspect.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchDeleteGeometryParams(BaseModel):
+    """Parameters for deleting geometry from an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to delete geometry from.")
+    geometry_index: int = Field(description="Zero-based index of the geometry to delete.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1543,6 +1569,43 @@ def _register_tools(server: Any, settings: Settings) -> None:
             constraint_count=result.get("constraint_count"),
             geometries=result.get("geometries", []),
             placement=result.get("placement", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_delete_geometry
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_delete_geometry",
+        title="Delete geometry from sketch",
+        description=(
+            "Delete one geometry element from an existing Sketcher::SketchObject "
+            "by its zero-based geometry index.  The document is locked "
+            "exclusively during the operation, recomputed, saved atomically, "
+            "and its revision is bumped.  FreeCAD automatically removes any "
+            "constraints that referenced the deleted geometry."
+        ),
+        structured_output=True,
+    )
+    def sketch_delete_geometry_tool(params: SketchDeleteGeometryParams) -> SketchDeleteGeometryResult:
+        """Delete geometry from a sketch and return its info."""
+        validate_direct_request("sketch_delete_geometry", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_delete_geometry", bridge_params)
+
+        return SketchDeleteGeometryResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            deleted_index=result.get("deleted_index", params.geometry_index),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
         )
 
     # ------------------------------------------------------------------

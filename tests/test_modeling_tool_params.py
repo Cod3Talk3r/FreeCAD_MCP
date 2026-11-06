@@ -70,6 +70,10 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
         modeling.InspectSketchParams,
         {"document_id": "doc", "sketch_name": "Sketch"},
     ),
+    (
+        modeling.SketchDeleteGeometryParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0},
+    ),
 )
 
 _MODELING_PARAMS_MODELS = tuple(model for model, _ in MODELING_PARAMS_CASES)

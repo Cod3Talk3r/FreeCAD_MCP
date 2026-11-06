@@ -128,6 +128,12 @@ def validate_direct_request(op: str, params: Any) -> None:
     elif op == "inspect_sketch":
         if not params.get("sketch_name", "").strip():
             raise ValueError("sketch_name must not be empty.")
+    elif op == "sketch_delete_geometry":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        geometry_index = params.get("geometry_index")
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
+            raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
 
 
 class DirectBackend:

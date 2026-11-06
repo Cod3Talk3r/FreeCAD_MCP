@@ -237,6 +237,9 @@ class _FakeSketch:
     def addGeometry(self, geometry: object, check: bool = False) -> None:
         self.Geometry.append(geometry)
 
+    def delGeometry(self, index: int) -> None:
+        del self.Geometry[index]
+
 
 class _FakeDoc:
     def __init__(self) -> None:
@@ -1968,3 +1971,245 @@ def test_handle_request_dispatches_inspect_sketch(
     assert response["op"] == "inspect_sketch"
     assert response["result"]["geometry_count"] == 0
     assert response["result"]["sketch_name"] == "Sketch1"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-A: Delete sketch geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_delete_geometry_deletes_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "del", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(1, 0, 0), _FakePoint(1, 1, 0)))
+    sketch.Geometry.append(Circle(_FakePoint(2, 2, 0), 1.0))
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "del",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_delete_geometry"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["deleted_index"] == 1
+    assert result["result"]["geometry_count"] == 2
+
+    # Remaining geometries preserve order and properties.
+    assert len(sketch.Geometry) == 2
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert isinstance(sketch.Geometry[1], Circle)
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert sketch.Geometry[1].Center.x == 2.0
+
+
+def test_sketch_delete_geometry_deletes_first_and_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "delend", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(1, 0, 0), _FakePoint(1, 1, 0)))
+
+    # Delete first (index 0).
+    result = runner._op_sketch_delete_geometry(
+        {"document_id": "delend", "workspace": str(tmp_path), "sketch_name": "Sketch1", "geometry_index": 0}
+    )
+    assert result["ok"] is True
+    assert result["result"]["deleted_index"] == 0
+    assert result["result"]["geometry_count"] == 1
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert sketch.Geometry[0].StartPoint.x == 1.0
+
+    # Delete last (index 0 again, since only one remains).
+    result = runner._op_sketch_delete_geometry(
+        {"document_id": "delend", "workspace": str(tmp_path), "sketch_name": "Sketch1", "geometry_index": 0}
+    )
+    assert result["ok"] is True
+    assert result["result"]["deleted_index"] == 0
+    assert result["result"]["geometry_count"] == 0
+    assert len(sketch.Geometry) == 0
+
+
+def test_sketch_delete_geometry_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "delneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "delneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_geometry"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1  # nothing deleted
+
+
+def test_sketch_delete_geometry_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "deloor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "deloor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 5,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_geometry"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1  # nothing deleted
+
+
+def test_sketch_delete_geometry_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "delbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "delbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_geometry"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_delete_geometry_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "delfloat", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "delfloat",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_geometry"
+    assert "integer" in result["error"].lower()
+
+
+def test_sketch_delete_geometry_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "delmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_geometry"
+    assert "not found" in result["error"]
+
+
+def test_sketch_delete_geometry_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "delwtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_delete_geometry(
+        {
+            "document_id": "delwtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_geometry"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_handle_request_dispatches_sketch_delete_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "deldel", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_DELETE_GEOMETRY,
+            "params": {
+                "document_id": "deldel",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_delete_geometry"
+    assert response["result"]["deleted_index"] == 0
+    assert response["result"]["geometry_count"] == 0

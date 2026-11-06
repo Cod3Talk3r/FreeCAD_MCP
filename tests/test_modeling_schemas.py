@@ -13,6 +13,7 @@ from freecad_mcp.tools.modeling import (
     SketchAddRectangleParams,
     SketchAddRegularPolygonParams,
     SketchAddTriangleParams,
+    SketchDeleteGeometryParams,
     TankParams,
     TubularCoilParams,
 )
@@ -236,4 +237,18 @@ def test_inspect_sketch_params_valid():
 def test_inspect_sketch_params_defaults():
     """InspectSketchParams defaults workspace to None."""
     p = InspectSketchParams(document_id="mydoc", sketch_name="MySketch")
+    assert p.workspace is None
+
+
+def test_sketch_delete_geometry_params_valid():
+    """Valid SketchDeleteGeometryParams should be accepted."""
+    p = SketchDeleteGeometryParams(document_id="mydoc", sketch_name="MySketch", geometry_index=2)
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.geometry_index == 2
+
+
+def test_sketch_delete_geometry_params_defaults():
+    """SketchDeleteGeometryParams defaults workspace to None."""
+    p = SketchDeleteGeometryParams(document_id="mydoc", sketch_name="MySketch", geometry_index=0)
     assert p.workspace is None

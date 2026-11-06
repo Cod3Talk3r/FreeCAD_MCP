@@ -1773,3 +1773,182 @@ def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> N
             {"document_id": "skerr2", "workspace": workspace, "sketch_name": "Box1"},
         )
     assert "Sketcher::SketchObject" in str(excinfo.value)
+
+
+@requires_freecad
+def test_real_freecad_sketch_delete_geometry(tmp_path: Path) -> None:
+    """Delete geometry from a sketch; verify count, persistence, and constraint handling."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skdel", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skdel", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add geometry: rectangle (4 lines) + circle + ellipse.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skdel",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skdel",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 2.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_ellipse",
+        {
+            "document_id": "skdel",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 10.0,
+            "center_y": 10.0,
+            "major_radius": 4.0,
+            "minor_radius": 2.0,
+        },
+    )
+
+    # Inspect: should have 6 geometries (4 lines + 1 circle + 1 ellipse).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skdel", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 6
+
+    # Delete the circle (index 4, after 4 rectangle lines).
+    result = bridge.run(
+        "sketch_delete_geometry",
+        {
+            "document_id": "skdel",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 4,
+        },
+    )
+    assert result["deleted_index"] == 4
+    assert result["geometry_count"] == 5
+
+    # Verify deletion persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skdel", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+    assert len(info["geometries"]) == 5
+
+    # Remaining geometries should be 4 lines + 1 ellipse (circle removed).
+    line_types = [g for g in info["geometries"] if g["type"] == "LineSegment"]
+    ellipse_types = [g for g in info["geometries"] if g["type"] == "Ellipse"]
+    assert len(line_types) == 4
+    assert len(ellipse_types) == 1
+
+
+@requires_freecad
+def test_real_freecad_sketch_delete_geometry_errors(tmp_path: Path) -> None:
+    """sketch_delete_geometry returns structured errors for missing sketch and wrong type."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skderr", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skderr",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skderr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_delete_geometry",
+            {
+                "document_id": "skderr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_delete_geometry",
+            {
+                "document_id": "skderr",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+
+@requires_freecad
+def test_real_freecad_sketch_delete_geometry_out_of_range(tmp_path: Path) -> None:
+    """sketch_delete_geometry rejects out-of-range index."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skdor", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skdor", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skdor",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+
+    # Index out of range (only 4 lines, index 10 is invalid).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_delete_geometry",
+            {
+                "document_id": "skdor",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 10,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Geometry count unchanged.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skdor", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 4
