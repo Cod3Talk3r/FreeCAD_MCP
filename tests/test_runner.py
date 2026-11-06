@@ -153,6 +153,13 @@ class _FakeCircle:
         self.radius = radius
 
 
+class _FakeEllipse:
+    def __init__(self, center: object, major_radius: float, minor_radius: float) -> None:
+        self.center = center
+        self.major_radius = major_radius
+        self.minor_radius = minor_radius
+
+
 class _FakePart:
     """Minimal stand-in for FreeCAD's Part module."""
 
@@ -163,6 +170,10 @@ class _FakePart:
     @staticmethod
     def Circle(center: object, normal: object, radius: float) -> _FakeCircle:
         return _FakeCircle(center, normal, radius)
+
+    @staticmethod
+    def Ellipse(center: object, major_radius: float, minor_radius: float) -> _FakeEllipse:
+        return _FakeEllipse(center, major_radius, minor_radius)
 
 
 class _FakeSketch:
@@ -404,6 +415,7 @@ def _install_fake_freecad(
     part = types.ModuleType("Part")
     part.LineSegment = _FakePart.LineSegment
     part.Circle = _FakePart.Circle
+    part.Ellipse = _FakePart.Ellipse
     monkeypatch.setitem(sys.modules, "Part", part)
     sketcher = types.ModuleType("Sketcher")
     monkeypatch.setitem(sys.modules, "Sketcher", sketcher)
@@ -823,3 +835,386 @@ def test_handle_request_dispatches_sketch_operations(
     assert response["op"] == "sketch_add_circle"
     assert response["result"]["edges_added"] == 1
     assert response["result"]["total_edges"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-B: Sketch triangle and ellipse (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_add_triangle_creates_three_connected_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "tri", "workspace": str(tmp_path), "sketch_name": "Tri1"}
+    )
+
+    result = runner._op_sketch_add_triangle(
+        {
+            "document_id": "tri",
+            "workspace": str(tmp_path),
+            "sketch_name": "Tri1",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 4.0,
+            "y2": 0.0,
+            "x3": 2.0,
+            "y3": 3.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_add_triangle"
+    assert result["result"]["document_id"] == "tri"
+    assert result["result"]["sketch_name"] == "Tri1"
+    assert result["result"]["x1"] == 0.0
+    assert result["result"]["y1"] == 0.0
+    assert result["result"]["x2"] == 4.0
+    assert result["result"]["y2"] == 0.0
+    assert result["result"]["x3"] == 2.0
+    assert result["result"]["y3"] == 3.0
+    assert result["result"]["edges_added"] == 3
+    assert result["result"]["total_edges"] == 3
+
+    sketch = doc.objects["Tri1"]
+    assert len(sketch.Geometry) == 3
+    segments = sketch.Geometry
+    assert all(isinstance(seg, _FakeSegment) for seg in segments)
+
+    # Vertices preserved in order, all on Z = 0.
+    expected = [
+        (0.0, 0.0, 0.0, 4.0, 0.0, 0.0),
+        (4.0, 0.0, 0.0, 2.0, 3.0, 0.0),
+        (2.0, 3.0, 0.0, 0.0, 0.0, 0.0),
+    ]
+    for seg, (sx, sy, sz, ex, ey, ez) in zip(segments, expected):
+        assert seg.start.x == sx and seg.start.y == sy and seg.start.z == sz
+        assert seg.end.x == ex and seg.end.y == ey and seg.end.z == ez
+
+    # Closed: end of each segment is the start of the next, last closes to first.
+    for i in range(3):
+        assert segments[i].end is segments[(i + 1) % 3].start
+
+    assert (tmp_path / "tri.fcstd").read_bytes() == b"fake fcstd"
+    assert not (tmp_path / "tri.lock").exists()
+
+
+def test_sketch_add_triangle_rejects_collinear_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "tri", "workspace": str(tmp_path), "sketch_name": "Tri1"}
+    )
+
+    base = {
+        "document_id": "tri",
+        "workspace": str(tmp_path),
+        "sketch_name": "Tri1",
+        "x1": 0.0,
+        "y1": 0.0,
+        "x2": 2.0,
+        "y2": 2.0,
+        "x3": 4.0,
+        "y3": 4.0,
+    }
+    result = runner._op_sketch_add_triangle(base)
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_triangle"
+    assert "collinear" in result["error"] or "degenerate" in result["error"]
+
+    # Duplicate vertex (zero area) also rejected.
+    dup = {**base, "x3": 2.0, "y3": 2.0}
+    result = runner._op_sketch_add_triangle(dup)
+    assert result["ok"] is False
+    assert "collinear" in result["error"] or "degenerate" in result["error"]
+
+    assert len(doc.objects["Tri1"].Geometry) == 0
+
+
+def test_sketch_add_triangle_rejects_invalid_coordinates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "tri", "workspace": str(tmp_path), "sketch_name": "Tri1"}
+    )
+
+    base = {
+        "document_id": "tri",
+        "workspace": str(tmp_path),
+        "sketch_name": "Tri1",
+        "x1": 0.0,
+        "y1": 0.0,
+        "x2": 1.0,
+        "y2": 0.0,
+        "x3": 0.0,
+        "y3": 1.0,
+    }
+    for bad in (
+        {**base, "x1": float("nan")},
+        {**base, "y2": float("inf")},
+        {**base, "x3": float("-inf")},
+    ):
+        result = runner._op_sketch_add_triangle(bad)
+        assert result["ok"] is False, bad
+        assert result["op"] == "sketch_add_triangle"
+        assert result["error"]
+
+    assert len(doc.objects["Tri1"].Geometry) == 0
+
+
+def test_sketch_add_ellipse_creates_ellipse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "ell", "workspace": str(tmp_path), "sketch_name": "Ell1"}
+    )
+
+    result = runner._op_sketch_add_ellipse(
+        {
+            "document_id": "ell",
+            "workspace": str(tmp_path),
+            "sketch_name": "Ell1",
+            "center_x": 3.0,
+            "center_y": -2.0,
+            "major_radius": 6.0,
+            "minor_radius": 2.5,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_add_ellipse"
+    assert result["result"]["document_id"] == "ell"
+    assert result["result"]["sketch_name"] == "Ell1"
+    assert result["result"]["center_x"] == 3.0
+    assert result["result"]["center_y"] == -2.0
+    assert result["result"]["major_radius"] == 6.0
+    assert result["result"]["minor_radius"] == 2.5
+    assert result["result"]["edges_added"] == 1
+    assert result["result"]["total_edges"] == 1
+
+    sketch = doc.objects["Ell1"]
+    assert len(sketch.Geometry) == 1
+    ellipse = sketch.Geometry[0]
+    assert isinstance(ellipse, _FakeEllipse)
+    assert ellipse.center.x == 3.0
+    assert ellipse.center.y == -2.0
+    assert ellipse.center.z == 0.0
+    assert ellipse.major_radius == 6.0
+    assert ellipse.minor_radius == 2.5
+    # Part.Ellipse(center, major, minor) is axis-aligned: major along X,
+    # minor along Y, centre on Z=0.
+
+    assert (tmp_path / "ell.fcstd").read_bytes() == b"fake fcstd"
+    assert not (tmp_path / "ell.lock").exists()
+
+
+def test_sketch_add_ellipse_rejects_invalid_radii(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "ell", "workspace": str(tmp_path), "sketch_name": "Ell1"}
+    )
+
+    base = {
+        "document_id": "ell",
+        "workspace": str(tmp_path),
+        "sketch_name": "Ell1",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "major_radius": 4.0,
+        "minor_radius": 2.0,
+    }
+    for bad in (
+        {**base, "major_radius": 0},
+        {**base, "minor_radius": -1.5},
+        {**base, "center_x": float("nan")},
+        {**base, "major_radius": float("inf")},
+    ):
+        result = runner._op_sketch_add_ellipse(bad)
+        assert result["ok"] is False, bad
+        assert result["op"] == "sketch_add_ellipse"
+        assert result["error"]
+
+    assert len(doc.objects["Ell1"].Geometry) == 0
+
+
+def test_sketch_add_triangle_and_ellipse_mixed_in_same_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mix", "workspace": str(tmp_path), "sketch_name": "Sk1"}
+    )
+
+    tri = runner._op_sketch_add_triangle(
+        {
+            "document_id": "mix",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sk1",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 2.0,
+            "y2": 0.0,
+            "x3": 1.0,
+            "y3": 2.0,
+        }
+    )
+    assert tri["ok"] is True
+    assert tri["result"]["total_edges"] == 3
+
+    ell = runner._op_sketch_add_ellipse(
+        {
+            "document_id": "mix",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sk1",
+            "center_x": 1.0,
+            "center_y": 1.0,
+            "major_radius": 1.0,
+            "minor_radius": 0.5,
+        }
+    )
+    assert ell["ok"] is True
+    assert ell["result"]["total_edges"] == 4
+
+    sketch = doc.objects["Sk1"]
+    assert len(sketch.Geometry) == 4
+    assert isinstance(sketch.Geometry[0], _FakeSegment)
+    assert isinstance(sketch.Geometry[3], _FakeEllipse)
+
+
+def test_sketch_add_triangle_requires_existing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_add_triangle(
+        {
+            "document_id": "tri",
+            "workspace": str(tmp_path),
+            "sketch_name": "Missing",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 1.0,
+            "y2": 0.0,
+            "x3": 0.0,
+            "y3": 1.0,
+        }
+    )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+
+    result = runner._op_sketch_add_ellipse(
+        {
+            "document_id": "tri",
+            "workspace": str(tmp_path),
+            "sketch_name": "Missing",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+
+
+def test_sketch_add_triangle_and_ellipse_reject_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "tri", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_add_triangle(
+        {
+            "document_id": "tri",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 1.0,
+            "y2": 0.0,
+            "x3": 0.0,
+            "y3": 1.0,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_triangle"
+    assert "Sketcher::SketchObject" in result["error"]
+
+    result = runner._op_sketch_add_ellipse(
+        {
+            "document_id": "tri",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_ellipse"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_handle_request_dispatches_triangle_and_ellipse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "tri", "workspace": str(tmp_path), "sketch_name": "Tri1"}
+    )
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_ADD_TRIANGLE,
+            "params": {
+                "document_id": "tri",
+                "workspace": str(tmp_path),
+                "sketch_name": "Tri1",
+                "x1": 0.0,
+                "y1": 0.0,
+                "x2": 2.0,
+                "y2": 0.0,
+                "x3": 1.0,
+                "y3": 2.0,
+            },
+        }
+    )
+    assert response["ok"] is True
+    assert response["op"] == "sketch_add_triangle"
+    assert response["result"]["edges_added"] == 3
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_ADD_ELLIPSE,
+            "params": {
+                "document_id": "tri",
+                "workspace": str(tmp_path),
+                "sketch_name": "Tri1",
+                "center_x": 1.0,
+                "center_y": 1.0,
+                "major_radius": 2.0,
+                "minor_radius": 1.0,
+            },
+        }
+    )
+    assert response["ok"] is True
+    assert response["op"] == "sketch_add_ellipse"
+    assert response["result"]["edges_added"] == 1
+    assert response["result"]["total_edges"] == 4

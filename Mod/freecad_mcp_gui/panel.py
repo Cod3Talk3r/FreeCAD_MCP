@@ -257,6 +257,85 @@ class MCPGuiPanel:
         circ_layout.addWidget(self._add_circle_button, 4, 0, 1, 2)
         layout.addWidget(circ_group)
 
+        # ---- Add Sketch Triangle ------------------------------------------
+        tri_group = QtWidgets.QGroupBox("Add Triangle to Sketch")
+        tri_layout = QtWidgets.QGridLayout(tri_group)
+        self._tri_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        tri_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        tri_layout.addWidget(self._tri_sketch_input, 0, 1)
+        self._tri_x1_input = QtWidgets.QDoubleSpinBox()
+        self._tri_y1_input = QtWidgets.QDoubleSpinBox()
+        self._tri_x2_input = QtWidgets.QDoubleSpinBox()
+        self._tri_y2_input = QtWidgets.QDoubleSpinBox()
+        self._tri_x3_input = QtWidgets.QDoubleSpinBox()
+        self._tri_y3_input = QtWidgets.QDoubleSpinBox()
+        for spin in (
+            self._tri_x1_input,
+            self._tri_y1_input,
+            self._tri_x2_input,
+            self._tri_y2_input,
+            self._tri_x3_input,
+            self._tri_y3_input,
+        ):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        self._tri_x2_input.setValue(1.0)
+        self._tri_y3_input.setValue(1.0)
+        tri_layout.addWidget(QtWidgets.QLabel("Vertex 1 X:"), 1, 0)
+        tri_layout.addWidget(self._tri_x1_input, 1, 1)
+        tri_layout.addWidget(QtWidgets.QLabel("Vertex 1 Y:"), 2, 0)
+        tri_layout.addWidget(self._tri_y1_input, 2, 1)
+        tri_layout.addWidget(QtWidgets.QLabel("Vertex 2 X:"), 3, 0)
+        tri_layout.addWidget(self._tri_x2_input, 3, 1)
+        tri_layout.addWidget(QtWidgets.QLabel("Vertex 2 Y:"), 4, 0)
+        tri_layout.addWidget(self._tri_y2_input, 4, 1)
+        tri_layout.addWidget(QtWidgets.QLabel("Vertex 3 X:"), 5, 0)
+        tri_layout.addWidget(self._tri_x3_input, 5, 1)
+        tri_layout.addWidget(QtWidgets.QLabel("Vertex 3 Y:"), 6, 0)
+        tri_layout.addWidget(self._tri_y3_input, 6, 1)
+        note = QtWidgets.QLabel("Vertices must not be collinear; no constraints are added.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        tri_layout.addWidget(note, 7, 0, 1, 2)
+        self._add_tri_button = QtWidgets.QPushButton("Add Triangle")
+        self._add_tri_button.clicked.connect(self._on_sketch_add_triangle)
+        tri_layout.addWidget(self._add_tri_button, 8, 0, 1, 2)
+        layout.addWidget(tri_group)
+
+        # ---- Add Sketch Ellipse -------------------------------------------
+        ell_group = QtWidgets.QGroupBox("Add Ellipse to Sketch")
+        ell_layout = QtWidgets.QGridLayout(ell_group)
+        self._ell_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        ell_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        ell_layout.addWidget(self._ell_sketch_input, 0, 1)
+        self._ell_cx_input = QtWidgets.QDoubleSpinBox()
+        self._ell_cy_input = QtWidgets.QDoubleSpinBox()
+        self._ell_major_input = QtWidgets.QDoubleSpinBox()
+        self._ell_minor_input = QtWidgets.QDoubleSpinBox()
+        self._ell_major_input.setRange(0.001, 100000.0)
+        self._ell_major_input.setValue(5.0)
+        self._ell_major_input.setDecimals(3)
+        self._ell_minor_input.setRange(0.001, 100000.0)
+        self._ell_minor_input.setValue(3.0)
+        self._ell_minor_input.setDecimals(3)
+        for spin in (self._ell_cx_input, self._ell_cy_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        ell_layout.addWidget(QtWidgets.QLabel("Center X:"), 1, 0)
+        ell_layout.addWidget(self._ell_cx_input, 1, 1)
+        ell_layout.addWidget(QtWidgets.QLabel("Center Y:"), 2, 0)
+        ell_layout.addWidget(self._ell_cy_input, 2, 1)
+        ell_layout.addWidget(QtWidgets.QLabel("Major radius:"), 3, 0)
+        ell_layout.addWidget(self._ell_major_input, 3, 1)
+        ell_layout.addWidget(QtWidgets.QLabel("Minor radius:"), 4, 0)
+        ell_layout.addWidget(self._ell_minor_input, 4, 1)
+        self._add_ell_button = QtWidgets.QPushButton("Add Ellipse")
+        self._add_ell_button.clicked.connect(self._on_sketch_add_ellipse)
+        ell_layout.addWidget(self._add_ell_button, 5, 0, 1, 2)
+        layout.addWidget(ell_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -683,6 +762,106 @@ class MCPGuiPanel:
         self._set_status(
             f"Added circle (radius {radius} at {center_x},{center_y}) to sketch '{sketch_name}' "
             f"in workspace document '{document_id}' ({total_edges} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Add Triangle
+    # ------------------------------------------------------------------
+    def _on_sketch_add_triangle(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._tri_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        x1 = self._tri_x1_input.value()
+        y1 = self._tri_y1_input.value()
+        x2 = self._tri_x2_input.value()
+        y2 = self._tri_y2_input.value()
+        x3 = self._tri_x3_input.value()
+        y3 = self._tri_y3_input.value()
+
+        response = self._run_operation(
+            "sketch_add_triangle",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "x3": x3,
+                "y3": y3,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        total_edges = (
+            result.get("total_edges", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Added triangle ({x1},{y1})-({x2},{y2})-({x3},{y3}) to sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' ({total_edges} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Add Ellipse
+    # ------------------------------------------------------------------
+    def _on_sketch_add_ellipse(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._ell_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        center_x = self._ell_cx_input.value()
+        center_y = self._ell_cy_input.value()
+        major_radius = self._ell_major_input.value()
+        minor_radius = self._ell_minor_input.value()
+        if major_radius <= 0 or minor_radius <= 0:
+            self._set_status(
+                "Error: Major and minor radius must be positive.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "sketch_add_ellipse",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "center_x": center_x,
+                "center_y": center_y,
+                "major_radius": major_radius,
+                "minor_radius": minor_radius,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        total_edges = (
+            result.get("total_edges", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Added ellipse (major {major_radius}, minor {minor_radius} at {center_x},{center_y}) "
+            f"to sketch '{sketch_name}' in workspace document '{document_id}' "
+            f"({total_edges} geometry).",
             error=False,
         )
 

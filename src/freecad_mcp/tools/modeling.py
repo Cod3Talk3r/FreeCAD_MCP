@@ -173,6 +173,38 @@ class SketchAddCircleResult(BaseModel):
     )
 
 
+class SketchAddTriangleResult(BaseModel):
+    """Result of sketch_add_triangle."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the triangle was added to.")
+    x1: float = Field(description="X coordinate of the first vertex in millimetres.")
+    y1: float = Field(description="Y coordinate of the first vertex in millimetres.")
+    x2: float = Field(description="X coordinate of the second vertex in millimetres.")
+    y2: float = Field(description="Y coordinate of the second vertex in millimetres.")
+    x3: float = Field(description="X coordinate of the third vertex in millimetres.")
+    y3: float = Field(description="Y coordinate of the third vertex in millimetres.")
+    edges_added: int = Field(description="Number of line segments added (3).")
+    total_edges: Optional[int] = Field(
+        default=None, description="Total Sketcher geometries in the sketch after adding the triangle."
+    )
+
+
+class SketchAddEllipseResult(BaseModel):
+    """Result of sketch_add_ellipse."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the ellipse was added to.")
+    center_x: float = Field(description="X coordinate of the ellipse centre in millimetres.")
+    center_y: float = Field(description="Y coordinate of the ellipse centre in millimetres.")
+    major_radius: float = Field(description="Major radius of the ellipse in millimetres.")
+    minor_radius: float = Field(description="Minor radius of the ellipse in millimetres.")
+    edges_added: int = Field(description="Number of geometries added (1).")
+    total_edges: Optional[int] = Field(
+        default=None, description="Total Sketcher geometries in the sketch after adding the ellipse."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -279,6 +311,36 @@ class SketchAddCircleParams(BaseModel):
     center_x: float = Field(default=0.0, description="X coordinate of the circle centre in millimetres.")
     center_y: float = Field(default=0.0, description="Y coordinate of the circle centre in millimetres.")
     radius: float = Field(description="Circle radius in millimetres (must be positive).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddTriangleParams(BaseModel):
+    """Parameters for adding a triangle to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the triangle to.")
+    x1: float = Field(default=0.0, description="X coordinate of the first vertex in millimetres.")
+    y1: float = Field(default=0.0, description="Y coordinate of the first vertex in millimetres.")
+    x2: float = Field(default=1.0, description="X coordinate of the second vertex in millimetres.")
+    y2: float = Field(default=0.0, description="Y coordinate of the second vertex in millimetres.")
+    x3: float = Field(default=0.0, description="X coordinate of the third vertex in millimetres.")
+    y3: float = Field(default=1.0, description="Y coordinate of the third vertex in millimetres.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddEllipseParams(BaseModel):
+    """Parameters for adding an ellipse to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the ellipse to.")
+    center_x: float = Field(default=0.0, description="X coordinate of the ellipse centre in millimetres.")
+    center_y: float = Field(default=0.0, description="Y coordinate of the ellipse centre in millimetres.")
+    major_radius: float = Field(description="Major radius of the ellipse in millimetres (must be positive).")
+    minor_radius: float = Field(description="Minor radius of the ellipse in millimetres (must be positive).")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1155,6 +1217,120 @@ def _register_tools(server: Any, settings: Settings) -> None:
         )
 
 # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # sketch_add_triangle
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_triangle",
+        title="Add triangle to sketch",
+        description=(
+            "Add three connected line segments forming a triangle to an "
+            "existing Sketcher::SketchObject.  The triangle sides lie on the "
+            "sketch XY plane (Z = 0) and share endpoints so the geometry is "
+            "closed and topologically connected.  Vertex order is preserved. "
+            "Coordinates must be finite and the three vertices must not be "
+            "collinear (zero signed area).  No constraints are added, so the "
+            "geometry stays editable.  The document is locked exclusively "
+            "during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_triangle_tool(params: SketchAddTriangleParams) -> SketchAddTriangleResult:
+        """Add a triangle to a sketch and return its info."""
+        validate_direct_request("sketch_add_triangle", params.model_dump())
+        for name, value in (
+            ("x1", params.x1),
+            ("y1", params.y1),
+            ("x2", params.x2),
+            ("y2", params.y2),
+            ("x3", params.x3),
+            ("y3", params.y3),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "x1": params.x1,
+            "y1": params.y1,
+            "x2": params.x2,
+            "y2": params.y2,
+            "x3": params.x3,
+            "y3": params.y3,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_triangle", bridge_params)
+
+        return SketchAddTriangleResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            x1=result.get("x1", params.x1),
+            y1=result.get("y1", params.y1),
+            x2=result.get("x2", params.x2),
+            y2=result.get("y2", params.y2),
+            x3=result.get("x3", params.x3),
+            y3=result.get("y3", params.y3),
+            edges_added=result.get("edges_added", 3),
+            total_edges=result.get("total_edges"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_ellipse
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_ellipse",
+        title="Add ellipse to sketch",
+        description=(
+            "Add a single axis-aligned ellipse geometry to an existing "
+            "Sketcher::SketchObject.  The ellipse centre lies on the sketch "
+            "XY plane (Z = 0) at (*center_x*, *center_y*) with *major_radius* "
+            "and *minor_radius*.  Both radii must be positive numbers "
+            "(millimetres).  The major axis is aligned with the sketch X "
+            "direction and the minor axis with the sketch Y direction.  No "
+            "constraints are added, so the geometry stays editable.  The "
+            "document is locked exclusively during the operation and saved "
+            "atomically."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_ellipse_tool(params: SketchAddEllipseParams) -> SketchAddEllipseResult:
+        """Add an ellipse to a sketch and return its info."""
+        validate_direct_request("sketch_add_ellipse", params.model_dump())
+        for name, value in (
+            ("center_x", params.center_x),
+            ("center_y", params.center_y),
+            ("major_radius", params.major_radius),
+            ("minor_radius", params.minor_radius),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "center_x": params.center_x,
+            "center_y": params.center_y,
+            "major_radius": params.major_radius,
+            "minor_radius": params.minor_radius,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_ellipse", bridge_params)
+
+        return SketchAddEllipseResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            center_x=result.get("center_x", params.center_x),
+            center_y=result.get("center_y", params.center_y),
+            major_radius=result.get("major_radius", params.major_radius),
+            minor_radius=result.get("minor_radius", params.minor_radius),
+            edges_added=result.get("edges_added", 1),
+            total_edges=result.get("total_edges"),
+        )
+
+    # ------------------------------------------------------------------
     # tank
     # ------------------------------------------------------------------
     @server.tool(

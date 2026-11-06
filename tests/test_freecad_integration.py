@@ -1258,3 +1258,242 @@ def test_real_freecad_sketch_save_reopen_and_existing_objects_unchanged(tmp_path
     assert box_info["Length"] == pytest.approx(4.0)
     assert box_info["Width"] == pytest.approx(4.0)
     assert box_info["Height"] == pytest.approx(4.0)
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_triangle(tmp_path: Path) -> None:
+    """Add three connected line segments forming a closed triangle; verify persistence."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "sktri", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "sktri", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    tri = bridge.run(
+        "sketch_add_triangle",
+        {
+            "document_id": "sktri",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 4.0,
+            "y2": 0.0,
+            "x3": 2.0,
+            "y3": 3.0,
+        },
+    )
+    assert tri["sketch_name"] == "Sketch1"
+    assert tri["x1"] == pytest.approx(0.0)
+    assert tri["y1"] == pytest.approx(0.0)
+    assert tri["x2"] == pytest.approx(4.0)
+    assert tri["y2"] == pytest.approx(0.0)
+    assert tri["x3"] == pytest.approx(2.0)
+    assert tri["y3"] == pytest.approx(3.0)
+    assert tri["edges_added"] == 3
+    assert tri["total_edges"] == 3
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "sktri", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 3
+
+    reopened = bridge.run("list_objects", {"document_id": "sktri", "workspace": workspace})["objects"]
+    assert [obj["name"] for obj in reopened] == ["Sketch1"]
+    assert reopened[0]["geometry_count"] == 3
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_ellipse(tmp_path: Path) -> None:
+    """Add an axis-aligned ellipse; verify center and radii persistence."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skell", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skell", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    ell = bridge.run(
+        "sketch_add_ellipse",
+        {
+            "document_id": "skell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": -1.0,
+            "major_radius": 4.0,
+            "minor_radius": 2.0,
+        },
+    )
+    assert ell["sketch_name"] == "Sketch1"
+    assert ell["center_x"] == pytest.approx(5.0)
+    assert ell["center_y"] == pytest.approx(-1.0)
+    assert ell["major_radius"] == pytest.approx(4.0)
+    assert ell["minor_radius"] == pytest.approx(2.0)
+    assert ell["edges_added"] == 1
+    assert ell["total_edges"] == 1
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skell", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 1
+
+    reopened = bridge.run("list_objects", {"document_id": "skell", "workspace": workspace})["objects"]
+    assert reopened[0]["geometry_count"] == 1
+
+
+@requires_freecad
+def test_real_freecad_sketch_mixed_geometry(tmp_path: Path) -> None:
+    """A triangle and an ellipse accumulate in one sketch alongside existing M9-A geometry."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skmix", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skmix", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skmix",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 2.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_triangle",
+        {
+            "document_id": "skmix",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 1.0,
+            "y2": 0.0,
+            "x3": 0.0,
+            "y3": 1.0,
+        },
+    )
+    ell = bridge.run(
+        "sketch_add_ellipse",
+        {
+            "document_id": "skmix",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 1.0,
+            "center_y": 1.0,
+            "major_radius": 1.0,
+            "minor_radius": 0.5,
+        },
+    )
+    assert ell["total_edges"] == 8  # 4 rectangle + 3 triangle + 1 ellipse
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skmix", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 8  # 4 rectangle + 3 triangle + 1 ellipse
+
+
+@requires_freecad
+def test_real_freecad_sketch_triangle_ellipse_error_cases(tmp_path: Path) -> None:
+    """Collinear triangle, invalid radii, missing sketch, and wrong object type are structured errors."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skerr", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skerr",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Collinear triangle (zero signed area).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_triangle",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "x1": 0.0,
+                "y1": 0.0,
+                "x2": 2.0,
+                "y2": 2.0,
+                "x3": 4.0,
+                "y3": 4.0,
+            },
+        )
+    assert "collinear" in str(excinfo.value).lower() or "degenerate" in str(excinfo.value).lower()
+
+    # Invalid ellipse radii.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_ellipse",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": -1.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "major_radius" in str(excinfo.value).lower()
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_triangle",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "x1": 0.0,
+                "y1": 0.0,
+                "x2": 1.0,
+                "y2": 0.0,
+                "x3": 0.0,
+                "y3": 1.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type: a Part::Box is not a sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_ellipse",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 1.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)

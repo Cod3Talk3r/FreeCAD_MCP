@@ -65,6 +65,26 @@ def validate_direct_request(op: str, params: Any) -> None:
                 raise ValueError(f"{key} must be a finite number.")
         if params["radius"] <= 0:
             raise ValueError("radius must be positive")
+    elif op == "sketch_add_triangle":
+        for key in ("x1", "y1", "x2", "y2", "x3", "y3"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+    elif op == "sketch_add_ellipse":
+        for key in ("center_x", "center_y", "major_radius", "minor_radius"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+        if params["major_radius"] <= 0:
+            raise ValueError("major_radius must be positive")
+        if params["minor_radius"] <= 0:
+            raise ValueError("minor_radius must be positive")
 
 
 class DirectBackend:

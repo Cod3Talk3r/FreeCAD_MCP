@@ -119,6 +119,10 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("sketch_add_circle", {"center_x": 0, "center_y": 0, "radius": 0}, "radius must be positive"),
     ("sketch_add_circle", {"center_x": 0, "center_y": 0, "radius": -1}, "radius must be positive"),
     ("sketch_add_circle", {"center_x": float("nan"), "center_y": 0, "radius": 1}, "must be a finite number"),
+    ("sketch_add_triangle", {"x1": float("nan"), "y1": 0, "x2": 1, "y2": 0, "x3": 0, "y3": 1}, "must be a finite number"),
+    ("sketch_add_ellipse", {"center_x": 0, "center_y": 0, "major_radius": 0, "minor_radius": 1}, "major_radius must be positive"),
+    ("sketch_add_ellipse", {"center_x": 0, "center_y": 0, "major_radius": 1, "minor_radius": -1}, "minor_radius must be positive"),
+    ("sketch_add_ellipse", {"center_x": float("inf"), "center_y": 0, "major_radius": 1, "minor_radius": 1}, "must be a finite number"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

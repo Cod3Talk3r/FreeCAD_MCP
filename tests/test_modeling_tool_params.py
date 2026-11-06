@@ -50,6 +50,14 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
         modeling.SketchAddCircleParams,
         {"document_id": "doc", "sketch_name": "Sketch", "radius": 1.0},
     ),
+    (
+        modeling.SketchAddTriangleParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 0.0, "x3": 0.0, "y3": 1.0},
+    ),
+    (
+        modeling.SketchAddEllipseParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "center_x": 0.0, "center_y": 0.0, "major_radius": 1.0, "minor_radius": 1.0},
+    ),
 )
 
 _MODELING_PARAMS_MODELS = tuple(model for model, _ in MODELING_PARAMS_CASES)

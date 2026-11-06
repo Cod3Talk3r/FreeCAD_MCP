@@ -56,6 +56,8 @@ OP_SET_PLACEMENT = "set_placement"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
+OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
+OP_SKETCH_ADD_ELLIPSE = "sketch_add_ellipse"
 
 REQUEST_ENV = "FREECAD_MCP_REQUEST"
 RESPONSE_ENV = "FREECAD_MCP_RESPONSE"
@@ -1932,6 +1934,257 @@ def _op_sketch_add_circle(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_add_triangle(params: dict[str, Any]) -> dict[str, Any]:
+    """Add three connected line segments forming a triangle to an existing sketch.
+
+    The triangle sides lie on the sketch XY plane (Z = 0).  The three segments
+    share endpoints so the geometry is closed and topologically connected.
+    Preserves the specified vertex order; no constraints are added.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    x1 = params.get("x1")
+    y1 = params.get("y1")
+    x2 = params.get("x2")
+    y2 = params.get("y2")
+    x3 = params.get("x3")
+    y3 = params.get("y3")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate numeric inputs: must be present, finite numbers (reject NaN/inf).
+    try:
+        x1_val = float(x1)
+        y1_val = float(y1)
+        x2_val = float(x2)
+        y2_val = float(y2)
+        x3_val = float(x3)
+        y3_val = float(y3)
+    except (TypeError, ValueError):
+        return {"ok": False, "op": "sketch_add_triangle", "error": "x1, y1, x2, y2, x3, and y3 must be numeric."}
+    for name, val in (
+        ("x1", x1_val),
+        ("y1", y1_val),
+        ("x2", x2_val),
+        ("y2", y2_val),
+        ("x3", x3_val),
+        ("y3", y3_val),
+    ):
+        if math.isnan(val) or math.isinf(val):
+            return {"ok": False, "op": "sketch_add_triangle", "error": f"{name} must be a finite number."}
+
+    # Reject degenerate / collinear triangles (zero signed area).
+    cross = (x2_val - x1_val) * (y3_val - y1_val) - (y2_val - y1_val) * (x3_val - x1_val)
+    scale_sq = max(
+        1.0,
+        (x2_val - x1_val) ** 2 + (y2_val - y1_val) ** 2,
+        (x3_val - x2_val) ** 2 + (y3_val - y2_val) ** 2,
+        (x1_val - x3_val) ** 2 + (y1_val - y3_val) ** 2,
+    )
+    if abs(cross) <= 1e-9 * scale_sq:
+        return {
+            "ok": False,
+            "op": "sketch_add_triangle",
+            "error": "triangle is degenerate or collinear (zero signed area).",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_triangle", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_triangle", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_triangle", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_triangle", "error": message}
+
+    try:
+        import FreeCAD as _FC
+        import Part  # noqa: F401,PLC0415 - Part.LineSegment geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add sketch geometry."
+            )
+
+        vertices = [
+            _FC.Vector(x1_val, y1_val, 0.0),
+            _FC.Vector(x2_val, y2_val, 0.0),
+            _FC.Vector(x3_val, y3_val, 0.0),
+        ]
+        segments = [
+            Part.LineSegment(vertices[0], vertices[1]),
+            Part.LineSegment(vertices[1], vertices[2]),
+            Part.LineSegment(vertices[2], vertices[0]),
+        ]
+        for segment in segments:
+            sketch.addGeometry(segment, False)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_triangle",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "x1": x1_val,
+            "y1": y1_val,
+            "x2": x2_val,
+            "y2": y2_val,
+            "x3": x3_val,
+            "y3": y3_val,
+            "edges_added": 3,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_add_ellipse(params: dict[str, Any]) -> dict[str, Any]:
+    """Add a single axis-aligned ellipse geometry to an existing sketch.
+
+    The ellipse centre lies on the sketch XY plane (Z = 0).  The major axis is
+    aligned with the sketch X direction and the minor axis with the sketch Y
+    direction.  No constraints are added.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    center_x = params.get("center_x")
+    center_y = params.get("center_y")
+    major_radius = params.get("major_radius")
+    minor_radius = params.get("minor_radius")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate numeric inputs: must be present, finite numbers (reject NaN/inf).
+    try:
+        cx_val = float(center_x)
+        cy_val = float(center_y)
+        major_val = float(major_radius)
+        minor_val = float(minor_radius)
+    except (TypeError, ValueError):
+        return {"ok": False, "op": "sketch_add_ellipse", "error": "center_x, center_y, major_radius, and minor_radius must be numeric."}
+    for name, val in (("center_x", cx_val), ("center_y", cy_val), ("major_radius", major_val), ("minor_radius", minor_val)):
+        if math.isnan(val) or math.isinf(val):
+            return {"ok": False, "op": "sketch_add_ellipse", "error": f"{name} must be a finite number."}
+    if major_val <= 0:
+        return {"ok": False, "op": "sketch_add_ellipse", "error": "major_radius must be a positive number."}
+    if minor_val <= 0:
+        return {"ok": False, "op": "sketch_add_ellipse", "error": "minor_radius must be a positive number."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_ellipse", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_ellipse", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_ellipse", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_ellipse", "error": message}
+
+    # FreeCAD 1.1.4 supports Part.Ellipse(Point, double, double) = (center,
+    # major_radius, minor_radius), which creates an axis-aligned ellipse in the
+    # sketch XY plane with the major axis along X and the minor axis along Y.
+    try:
+        import FreeCAD as _FC
+        import Part  # noqa: F401,PLC0415 - Part.Ellipse geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add sketch geometry."
+            )
+
+        ellipse = Part.Ellipse(_FC.Vector(cx_val, cy_val, 0.0), major_val, minor_val)
+        sketch.addGeometry(ellipse, False)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_ellipse",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "center_x": cx_val,
+            "center_y": cy_val,
+            "major_radius": major_val,
+            "minor_radius": minor_val,
+            "edges_added": 1,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -1955,6 +2208,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,
+    OP_SKETCH_ADD_TRIANGLE: _op_sketch_add_triangle,
+    OP_SKETCH_ADD_ELLIPSE: _op_sketch_add_ellipse,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

@@ -7,7 +7,9 @@ import pytest
 from freecad_mcp.tools.modeling import (
     CreateSketchParams,
     SketchAddCircleParams,
+    SketchAddEllipseParams,
     SketchAddRectangleParams,
+    SketchAddTriangleParams,
     TankParams,
     TubularCoilParams,
 )
@@ -125,3 +127,56 @@ def test_sketch_params_accept_zero_and_negative_at_schema_level():
     assert p.height == -5
     c = SketchAddCircleParams(document_id="mydoc", sketch_name="S", radius=0)
     assert c.radius == 0
+
+
+def test_sketch_add_triangle_params_valid():
+    """Valid SketchAddTriangleParams should be accepted."""
+    p = SketchAddTriangleParams(
+        document_id="mydoc", sketch_name="S", x1=0.0, y1=0.0, x2=1.0, y2=0.0, x3=0.0, y3=1.0
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "S"
+    assert p.x1 == 0.0
+    assert p.y1 == 0.0
+    assert p.x2 == 1.0
+    assert p.y2 == 0.0
+    assert p.x3 == 0.0
+    assert p.y3 == 1.0
+
+
+def test_sketch_add_triangle_params_defaults():
+    """SketchAddTriangleParams defaults form a non-degenerate triangle."""
+    p = SketchAddTriangleParams(document_id="mydoc", sketch_name="S")
+    assert p.x1 == 0.0
+    assert p.y1 == 0.0
+    assert p.x2 == 1.0
+    assert p.y2 == 0.0
+    assert p.x3 == 0.0
+    assert p.y3 == 1.0
+
+
+def test_sketch_add_ellipse_params_valid():
+    """Valid SketchAddEllipseParams should be accepted."""
+    p = SketchAddEllipseParams(
+        document_id="mydoc", sketch_name="S", center_x=1.0, center_y=2.0, major_radius=5.0, minor_radius=3.0
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "S"
+    assert p.center_x == 1.0
+    assert p.center_y == 2.0
+    assert p.major_radius == 5.0
+    assert p.minor_radius == 3.0
+
+
+def test_sketch_add_ellipse_params_defaults():
+    """SketchAddEllipseParams defaults center to zero."""
+    p = SketchAddEllipseParams(document_id="mydoc", sketch_name="S", major_radius=5.0, minor_radius=3.0)
+    assert p.center_x == 0.0
+    assert p.center_y == 0.0
+
+
+def test_sketch_add_ellipse_accepts_zero_and_negative_at_schema_level():
+    """Invalid radii are accepted by the schema and rejected by the handler."""
+    e = SketchAddEllipseParams(document_id="mydoc", sketch_name="S", major_radius=0, minor_radius=-2)
+    assert e.major_radius == 0
+    assert e.minor_radius == -2
