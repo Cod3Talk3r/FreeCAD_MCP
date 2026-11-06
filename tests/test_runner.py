@@ -2654,3 +2654,442 @@ def test_handle_request_dispatches_sketch_edit_line(
     assert response["result"]["start_y"] == 4.0
     assert response["result"]["end_x"] == 6.0
     assert response["result"]["end_y"] == 8.0
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-B2: Edit sketch circle geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_edit_circle_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(1.0, 1.0, 0), 2.5))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "radius": 7.5,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_circle"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["center_x"] == 10.0
+    assert result["result"]["center_y"] == 20.0
+    assert result["result"]["radius"] == 7.5
+    assert result["result"]["geometry_count"] == 1
+
+    # Circle was modified in place.
+    circle = sketch.Geometry[0]
+    assert circle.Center.x == 10.0
+    assert circle.Center.y == 20.0
+    assert circle.Radius == 7.5
+
+
+def test_sketch_edit_circle_mixed_sketch_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(Circle(_FakePoint(2, 2, 0), 1.5))
+    sketch.Geometry.append(LineSegment(_FakePoint(4, 4, 0), _FakePoint(5, 4, 0)))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "center_x": 99.0,
+            "center_y": 88.0,
+            "radius": 3.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 3
+
+    # Other geometries preserved.
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert isinstance(sketch.Geometry[2], LineSegment)
+    assert sketch.Geometry[2].StartPoint.x == 4.0
+
+    # Edited circle updated.
+    edited = sketch.Geometry[1]
+    assert isinstance(edited, Circle)
+    assert edited.Center.x == 99.0
+    assert edited.Center.y == 88.0
+    assert edited.Radius == 3.0
+
+
+def test_sketch_edit_circle_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_circle_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 5,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_circle_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_edit_circle_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editfloat", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editfloat",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "integer" in result["error"].lower()
+
+
+def test_sketch_edit_circle_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "not found" in result["error"]
+
+
+def test_sketch_edit_circle_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "editwtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editwtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_circle_rejects_non_circle_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnoncircle", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editnoncircle",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "Circle" in result["error"]
+    assert "LineSegment" in result["error"]
+
+
+def test_sketch_edit_circle_rejects_non_finite_coordinates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnan", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    base = {
+        "document_id": "editnan",
+        "workspace": str(tmp_path),
+        "sketch_name": "Sketch1",
+        "geometry_index": 0,
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 1.0,
+    }
+    for bad in (
+        {**base, "center_x": float("nan")},
+        {**base, "center_y": float("inf")},
+        {**base, "radius": float("-inf")},
+        {**base, "center_x": float("nan")},
+    ):
+        result = runner._op_sketch_edit_circle(bad)
+        assert result["ok"] is False, bad
+        assert result["op"] == "sketch_edit_circle"
+        assert "finite" in result["error"]
+
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_circle_rejects_zero_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editzero", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editzero",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "positive" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_circle_rejects_negative_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnegrad", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editnegrad",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": -5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "positive" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_circle_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    # Add a constraint that references geometry index 0.
+    class _FakeConstraint:
+        First = 0
+        FirstPos = 1
+        Second = -1
+        SecondPos = 0
+        Third = -1
+        ThirdPos = 0
+
+    sketch.Constraints.append(_FakeConstraint())
+
+    result = runner._op_sketch_edit_circle(
+        {
+            "document_id": "editcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "radius": 7.5,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_circle"
+    assert "constraint" in result["error"].lower()
+    assert len(sketch.Geometry) == 1  # unchanged
+
+
+def test_handle_request_dispatches_sketch_edit_circle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editdisp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(1.0, 1.0, 0), 2.5))
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_EDIT_CIRCLE,
+            "params": {
+                "document_id": "editdisp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 3.0,
+                "center_y": 4.0,
+                "radius": 6.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_circle"
+    assert response["result"]["geometry_index"] == 0
+    assert response["result"]["center_x"] == 3.0
+    assert response["result"]["center_y"] == 4.0
+    assert response["result"]["radius"] == 6.0

@@ -147,6 +147,21 @@ def validate_direct_request(op: str, params: Any) -> None:
                 raise ValueError(f"{key} must be a finite number.")
             if not math.isfinite(value):
                 raise ValueError(f"{key} must be a finite number.")
+    elif op == "sketch_edit_circle":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        geometry_index = params.get("geometry_index")
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
+            raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
+        for key in ("center_x", "center_y", "radius"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+        if params["radius"] <= 0:
+            raise ValueError("radius must be positive")
 
 
 class DirectBackend:

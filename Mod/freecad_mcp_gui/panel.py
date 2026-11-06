@@ -461,6 +461,38 @@ class MCPGuiPanel:
         edit_layout.addWidget(self._edit_line_button, 6, 0, 1, 2)
         layout.addWidget(edit_group)
 
+        # ---- Edit Circle Geometry in Sketch ----------------------------------
+        edit_circ_group = QtWidgets.QGroupBox("Edit Circle Geometry in Sketch")
+        edit_circ_layout = QtWidgets.QGridLayout(edit_circ_group)
+        self._edit_circle_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        edit_circ_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        edit_circ_layout.addWidget(self._edit_circle_sketch_input, 0, 1)
+        self._edit_circle_index_input = QtWidgets.QSpinBox()
+        self._edit_circle_index_input.setRange(0, 1000000)
+        self._edit_circle_index_input.setValue(0)
+        edit_circ_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        edit_circ_layout.addWidget(self._edit_circle_index_input, 1, 1)
+        self._edit_circle_cx_input = QtWidgets.QDoubleSpinBox()
+        self._edit_circle_cy_input = QtWidgets.QDoubleSpinBox()
+        self._edit_circle_radius_input = QtWidgets.QDoubleSpinBox()
+        self._edit_circle_radius_input.setRange(0.001, 100000.0)
+        self._edit_circle_radius_input.setValue(5.0)
+        self._edit_circle_radius_input.setDecimals(3)
+        for spin in (self._edit_circle_cx_input, self._edit_circle_cy_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        edit_circ_layout.addWidget(QtWidgets.QLabel("Center X:"), 2, 0)
+        edit_circ_layout.addWidget(self._edit_circle_cx_input, 2, 1)
+        edit_circ_layout.addWidget(QtWidgets.QLabel("Center Y:"), 3, 0)
+        edit_circ_layout.addWidget(self._edit_circle_cy_input, 3, 1)
+        edit_circ_layout.addWidget(QtWidgets.QLabel("Radius:"), 4, 0)
+        edit_circ_layout.addWidget(self._edit_circle_radius_input, 4, 1)
+        self._edit_circle_button = QtWidgets.QPushButton("Edit Circle")
+        self._edit_circle_button.clicked.connect(self._on_sketch_edit_circle)
+        edit_circ_layout.addWidget(self._edit_circle_button, 5, 0, 1, 2)
+        layout.addWidget(edit_circ_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1235,6 +1267,52 @@ class MCPGuiPanel:
             f"Edited line at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
             f"({start_x},{start_y}) -> ({end_x},{end_y}) ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Edit Circle Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_edit_circle(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._edit_circle_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._edit_circle_index_input.value()
+        center_x = self._edit_circle_cx_input.value()
+        center_y = self._edit_circle_cy_input.value()
+        radius = self._edit_circle_radius_input.value()
+
+        response = self._run_operation(
+            "sketch_edit_circle",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": radius,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Edited circle at index {geometry_index} in sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' "
+            f"center=({center_x},{center_y}) radius={radius} ({geometry_count} geometry).",
             error=False,
         )
 

@@ -2155,3 +2155,215 @@ def test_real_freecad_sketch_edit_line_errors(tmp_path: Path) -> None:
             },
         )
     assert "out of range" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_circle(tmp_path: Path) -> None:
+    """Edit a circle in a sketch; verify center, radius, persistence, and mixed sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditcirc", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add geometry: rectangle (4 lines) + circle.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skeditcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skeditcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 2.0,
+        },
+    )
+
+    # Inspect: should have 5 geometries (4 lines + 1 circle).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+
+    # Edit the circle (index 4) to new center and radius.
+    result = bridge.run(
+        "sketch_edit_circle",
+        {
+            "document_id": "skeditcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 4,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "radius": 7.5,
+        },
+    )
+    assert result["geometry_index"] == 4
+    assert result["center_x"] == pytest.approx(10.0)
+    assert result["center_y"] == pytest.approx(20.0)
+    assert result["radius"] == pytest.approx(7.5)
+    assert result["geometry_count"] == 5
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+    assert len(info["geometries"]) == 5
+
+    # Fifth geometry should now be a circle with the new center and radius.
+    fifth_geo = info["geometries"][4]
+    assert fifth_geo["type"] == "Circle"
+    assert fifth_geo["center"]["x"] == pytest.approx(10.0)
+    assert fifth_geo["center"]["y"] == pytest.approx(20.0)
+    assert fifth_geo["radius"] == pytest.approx(7.5)
+
+    # Other geometries preserved: 4 lines.
+    line_types = [g for g in info["geometries"] if g["type"] == "LineSegment"]
+    circle_types = [g for g in info["geometries"] if g["type"] == "Circle"]
+    assert len(line_types) == 4
+    assert len(circle_types) == 1
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_circle_errors(tmp_path: Path) -> None:
+    """sketch_edit_circle returns structured errors for missing sketch, wrong type, non-circle, out-of-range, bad radius."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skederrcirc", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skederrcirc",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skederrcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skederrcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skederrcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 1.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_circle",
+            {
+                "document_id": "skederrcirc",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 1.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_circle",
+            {
+                "document_id": "skederrcirc",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 1.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Non-circle geometry (line at index 0).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_circle",
+            {
+                "document_id": "skederrcirc",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 1.0,
+            },
+        )
+    assert "Circle" in str(excinfo.value)
+
+    # Out-of-range index (only 5 geometries).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_circle",
+            {
+                "document_id": "skederrcirc",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 99,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 1.0,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Zero radius.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_circle",
+            {
+                "document_id": "skederrcirc",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 4,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 0.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
