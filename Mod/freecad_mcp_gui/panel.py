@@ -396,6 +396,17 @@ class MCPGuiPanel:
         cus_layout.addWidget(self._add_cus_button, 3, 0, 1, 2)
         layout.addWidget(cus_group)
 
+        # ---- Inspect Sketch ----------------------------------------------
+        insp_group = QtWidgets.QGroupBox("Inspect Sketch")
+        insp_layout = QtWidgets.QGridLayout(insp_group)
+        self._insp_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        insp_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        insp_layout.addWidget(self._insp_sketch_input, 0, 1)
+        self._inspect_button = QtWidgets.QPushButton("Inspect Sketch")
+        self._inspect_button.clicked.connect(self._on_inspect_sketch)
+        insp_layout.addWidget(self._inspect_button, 1, 0, 1, 2)
+        layout.addWidget(insp_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1024,6 +1035,67 @@ class MCPGuiPanel:
             f"({total_edges} geometry).",
             error=False,
         )
+
+    # ------------------------------------------------------------------
+    # Sketch: Inspect
+    # ------------------------------------------------------------------
+    def _on_inspect_sketch(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._insp_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        response = self._run_operation(
+            "inspect_sketch",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        constraint_count = result.get("constraint_count", 0) if isinstance(result, dict) else 0
+        geometries = result.get("geometries", []) if isinstance(result, dict) else []
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Inspected sketch '{sketch_name}' in workspace document '{document_id}' "
+            f"({geometry_count} geometry, {constraint_count} constraints).",
+            error=False,
+        )
+        # Surface geometry details in the validate result label.
+        if isinstance(geometries, list):
+            lines = [f"Sketch '{sketch_name}': {geometry_count} geometry, {constraint_count} constraints"]
+            for geo in geometries:
+                if not isinstance(geo, dict):
+                    continue
+                idx = geo.get("index", "?")
+                gtype = geo.get("type", "Unknown")
+                lines.append(f"  [{idx}] {gtype}")
+                if "start_point" in geo:
+                    sp = geo["start_point"]
+                    ep = geo.get("end_point", {})
+                    lines.append(f"      line ({sp.get('x')},{sp.get('y')}) -> ({ep.get('x')},{ep.get('y')})")
+                elif "center" in geo and "radius" in geo:
+                    c = geo["center"]
+                    lines.append(f"      circle center=({c.get('x')},{c.get('y')}) radius={geo.get('radius')}")
+                elif "center" in geo and "major_radius" in geo:
+                    c = geo["center"]
+                    lines.append(
+                        f"      ellipse center=({c.get('x')},{c.get('y')}) "
+                        f"major={geo.get('major_radius')} minor={geo.get('minor_radius')}"
+                    )
+                if geo.get("construction"):
+                    lines[-1] += " (construction)"
+            self._validate_result.setText("\n".join(lines))
 
     # ------------------------------------------------------------------
     # Recompute

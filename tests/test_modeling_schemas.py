@@ -6,6 +6,7 @@ import pytest
 
 from freecad_mcp.tools.modeling import (
     CreateSketchParams,
+    InspectSketchParams,
     SketchAddCircleParams,
     SketchAddEllipseParams,
     SketchAddPolygonParams,
@@ -223,3 +224,16 @@ def test_sketch_add_polygon_params_valid():
     assert p.document_id == "mydoc"
     assert p.sketch_name == "S"
     assert p.vertices == [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}]
+
+
+def test_inspect_sketch_params_valid():
+    """Valid InspectSketchParams should be accepted."""
+    p = InspectSketchParams(document_id="mydoc", sketch_name="MySketch")
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+
+
+def test_inspect_sketch_params_defaults():
+    """InspectSketchParams defaults workspace to None."""
+    p = InspectSketchParams(document_id="mydoc", sketch_name="MySketch")
+    assert p.workspace is None

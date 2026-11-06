@@ -1637,3 +1637,139 @@ def test_real_freecad_sketch_mixed_polygon_geometry(tmp_path: Path) -> None:
         {"document_id": "skmpoly", "workspace": workspace, "object_name": "Sketch1"},
     )["info"]
     assert info["geometry_count"] == 12
+
+
+@requires_freecad
+def test_real_freecad_inspect_sketch(tmp_path: Path) -> None:
+    """Inspect a sketch with line, circle, and ellipse geometry; verify structure."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skinsp", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skinsp", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Empty sketch inspection.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skinsp", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["sketch_name"] == "Sketch1"
+    assert info["geometry_count"] == 0
+    assert info["constraint_count"] == 0
+    assert info["geometries"] == []
+    assert info["type"] == "Sketcher::SketchObject"
+
+    # Add geometry.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skinsp",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skinsp",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 2.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_ellipse",
+        {
+            "document_id": "skinsp",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 10.0,
+            "center_y": 10.0,
+            "major_radius": 4.0,
+            "minor_radius": 2.0,
+        },
+    )
+
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skinsp", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 6  # 4 lines (rectangle) + 1 circle + 1 ellipse
+    assert len(info["geometries"]) == 6
+
+    # Verify each geometry has index and type.
+    for geo in info["geometries"]:
+        assert "index" in geo
+        assert "type" in geo
+        assert isinstance(geo["index"], int)
+
+    # Line segment should have start_point and end_point.
+    lines = [g for g in info["geometries"] if g["type"] == "LineSegment"]
+    assert len(lines) == 4
+    for line in lines:
+        assert "start_point" in line
+        assert "end_point" in line
+        assert "x" in line["start_point"]
+        assert "y" in line["start_point"]
+
+    # Circle should have center and radius.
+    circles = [g for g in info["geometries"] if g["type"] == "Circle"]
+    assert len(circles) == 1
+    assert "center" in circles[0]
+    assert "radius" in circles[0]
+
+    # Ellipse should have center, major_radius, minor_radius.
+    ellipses = [g for g in info["geometries"] if g["type"] == "Ellipse"]
+    assert len(ellipses) == 1
+    assert "center" in ellipses[0]
+    assert "major_radius" in ellipses[0]
+    assert "minor_radius" in ellipses[0]
+
+
+@requires_freecad
+def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> None:
+    """inspect_sketch returns structured errors for missing sketch and wrong type."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skerr2", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skerr2",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skerr2", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "inspect_sketch",
+            {"document_id": "skerr2", "workspace": workspace, "sketch_name": "NoSuchSketch"},
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "inspect_sketch",
+            {"document_id": "skerr2", "workspace": workspace, "sketch_name": "Box1"},
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)

@@ -60,6 +60,7 @@ OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
 OP_SKETCH_ADD_ELLIPSE = "sketch_add_ellipse"
 OP_SKETCH_ADD_REGULAR_POLYGON = "sketch_add_regular_polygon"
 OP_SKETCH_ADD_POLYGON = "sketch_add_polygon"
+OP_INSPECT_SKETCH = "inspect_sketch"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -2499,6 +2500,189 @@ def _op_sketch_add_polygon(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _inspect_geometry(geometry: Any) -> dict[str, Any]:
+    """Inspect a single Sketcher geometry object and return its parameters.
+
+    Reads properties safely with getattr/try-except so unknown or
+    partially-available geometry types never crash the inspection.
+    """
+    info: dict[str, Any] = {"index": 0, "type": "Unknown"}
+    try:
+        info["type"] = type(geometry).__name__
+    except Exception:
+        pass
+
+    # Construction geometry status.
+    try:
+        info["construction"] = bool(getattr(geometry, "Construction", False))
+    except Exception:
+        pass
+
+    # LineSegment: StartPoint, EndPoint.
+    geom_type = info["type"]
+    if geom_type == "LineSegment":
+        for attr, key in (("StartPoint", "start_point"), ("EndPoint", "end_point")):
+            try:
+                point = getattr(geometry, attr)
+                info[key] = {
+                    "x": float(point.x),
+                    "y": float(point.y),
+                    "z": float(point.z),
+                }
+            except Exception:
+                pass
+    # Circle: Center, Radius.
+    elif geom_type == "Circle":
+        try:
+            center = getattr(geometry, "Center")
+            info["center"] = {
+                "x": float(center.x),
+                "y": float(center.y),
+                "z": float(center.z),
+            }
+        except Exception:
+            pass
+        try:
+            info["radius"] = float(getattr(geometry, "Radius"))
+        except Exception:
+            pass
+    # Ellipse: Center, MajorRadius, MinorRadius, MajorDirection, MinorDirection.
+    elif geom_type == "Ellipse":
+        try:
+            center = getattr(geometry, "Center")
+            info["center"] = {
+                "x": float(center.x),
+                "y": float(center.y),
+                "z": float(center.z),
+            }
+        except Exception:
+            pass
+        for attr, key in (("MajorRadius", "major_radius"), ("MinorRadius", "minor_radius")):
+            try:
+                info[key] = float(getattr(geometry, attr))
+            except Exception:
+                pass
+        for attr, key in (
+            ("MajorDirection", "major_direction"),
+            ("MinorDirection", "minor_direction"),
+        ):
+            try:
+                direction = getattr(geometry, attr)
+                info[key] = {
+                    "x": float(direction.x),
+                    "y": float(direction.y),
+                    "z": float(direction.z),
+                }
+            except Exception:
+                pass
+
+    return info
+
+
+def _op_inspect_sketch(params: dict[str, Any]) -> dict[str, Any]:
+    """Inspect a sketch and return structured geometry information (read-only).
+
+    Does not save, recompute, or increment document revision.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "inspect_sketch", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "inspect_sketch", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "inspect_sketch", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "inspect_sketch", "error": f"sketch '{sketch_name}' not found"}
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "inspect_sketch",
+                "error": (
+                    f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                    f"cannot inspect sketch geometry."
+                ),
+            }
+
+        geometries = []
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        for index, geometry in enumerate(geometry_list):
+            geometry_info = _inspect_geometry(geometry)
+            geometry_info["index"] = index
+            geometries.append(geometry_info)
+
+        # Constraint count.
+        try:
+            constraint_count = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            constraint_count = None
+
+        # Sketch placement if available.
+        placement_info: dict[str, Any] = {}
+        try:
+            placement = getattr(sketch, "Placement", None)
+            if placement is not None:
+                base = getattr(placement, "Base", None)
+                if base is not None:
+                    placement_info = {
+                        "x": float(base.x),
+                        "y": float(base.y),
+                        "z": float(base.z),
+                    }
+        except Exception:
+            pass
+
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "inspect_sketch", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "inspect_sketch",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "type": type_id,
+            "geometry_count": len(geometries),
+            "constraint_count": constraint_count,
+            "geometries": geometries,
+            "placement": placement_info,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -2526,6 +2710,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_ADD_ELLIPSE: _op_sketch_add_ellipse,
     OP_SKETCH_ADD_REGULAR_POLYGON: _op_sketch_add_regular_polygon,
     OP_SKETCH_ADD_POLYGON: _op_sketch_add_polygon,
+    OP_INSPECT_SKETCH: _op_inspect_sketch,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

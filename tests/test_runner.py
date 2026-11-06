@@ -161,6 +161,52 @@ class _FakeEllipse:
         self.minor_radius = minor_radius
 
 
+# --- FreeCAD-style geometry fakes for inspect_sketch tests -----------------
+
+class _FakePoint:
+    def __init__(self, x: float, y: float, z: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+
+class LineSegment:
+    def __init__(self, start: _FakePoint, end: _FakePoint, construction: bool = False) -> None:
+        self.StartPoint = start
+        self.EndPoint = end
+        self.Construction = construction
+
+
+class Circle:
+    def __init__(self, center: _FakePoint, radius: float, construction: bool = False) -> None:
+        self.Center = center
+        self.Radius = radius
+        self.Construction = construction
+
+
+class Ellipse:
+    def __init__(
+        self,
+        center: _FakePoint,
+        major_radius: float,
+        minor_radius: float,
+        major_dir: _FakePoint | None = None,
+        minor_dir: _FakePoint | None = None,
+        construction: bool = False,
+    ) -> None:
+        self.Center = center
+        self.MajorRadius = major_radius
+        self.MinorRadius = minor_radius
+        self.MajorDirection = major_dir or _FakePoint(1, 0, 0)
+        self.MinorDirection = minor_dir or _FakePoint(0, 1, 0)
+        self.Construction = construction
+
+
+class _FakeUnknownGeom:
+    def __init__(self, construction: bool = False) -> None:
+        self.Construction = construction
+
+
 class _FakePart:
     """Minimal stand-in for FreeCAD's Part module."""
 
@@ -1725,3 +1771,200 @@ def test_handle_request_dispatches_polygon_operations(
     assert response["op"] == "sketch_add_polygon"
     assert response["result"]["edges_added"] == 3
     assert response["result"]["total_edges"] == 8
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D1: Inspect sketch (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_sketch_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "empty", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "empty", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "inspect_sketch"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_count"] == 0
+    assert result["result"]["constraint_count"] == 0
+    assert result["result"]["geometries"] == []
+    assert result["result"]["type"] == "Sketcher::SketchObject"
+
+
+def test_inspect_sketch_all_supported_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "insp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    # Add line segment, circle, ellipse directly to Geometry list.
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(2, 0, 0)))
+    sketch.Geometry.append(Circle(_FakePoint(1, 1, 0), 1.5))
+    sketch.Geometry.append(
+        Ellipse(_FakePoint(3, 3, 0), 4.0, 2.0, _FakePoint(1, 0, 0), _FakePoint(0, 1, 0))
+    )
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "insp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 3
+    assert result["result"]["sketch_name"] == "Sketch1"
+
+    geometries = result["result"]["geometries"]
+    assert len(geometries) == 3
+
+    # Line segment.
+    line = geometries[0]
+    assert line["index"] == 0
+    assert line["type"] == "LineSegment"
+    assert line["start_point"] == {"x": 0.0, "y": 0.0, "z": 0.0}
+    assert line["end_point"] == {"x": 2.0, "y": 0.0, "z": 0.0}
+
+    # Circle.
+    circle = geometries[1]
+    assert circle["index"] == 1
+    assert circle["type"] == "Circle"
+    assert circle["center"] == {"x": 1.0, "y": 1.0, "z": 0.0}
+    assert circle["radius"] == 1.5
+
+    # Ellipse.
+    ellipse = geometries[2]
+    assert ellipse["index"] == 2
+    assert ellipse["type"] == "Ellipse"
+    assert ellipse["center"] == {"x": 3.0, "y": 3.0, "z": 0.0}
+    assert ellipse["major_radius"] == 4.0
+    assert ellipse["minor_radius"] == 2.0
+    assert ellipse["major_direction"] == {"x": 1.0, "y": 0.0, "z": 0.0}
+    assert ellipse["minor_direction"] == {"x": 0.0, "y": 1.0, "z": 0.0}
+
+
+def test_inspect_sketch_construction_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "constr", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0), construction=True))
+    sketch.Geometry.append(LineSegment(_FakePoint(1, 0, 0), _FakePoint(1, 1, 0)))
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "constr", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    assert result["ok"] is True
+    geometries = result["result"]["geometries"]
+    assert geometries[0]["construction"] is True
+    assert geometries[1]["construction"] is False
+
+
+def test_inspect_sketch_unknown_geometry_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "unk", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    sketch.Geometry.append(_FakeUnknownGeom())
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "unk", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 1
+    geometries = result["result"]["geometries"]
+    assert geometries[0]["type"] == "_FakeUnknownGeom"
+    assert geometries[0]["index"] == 0
+
+
+def test_inspect_sketch_placement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "place", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Placement = _FakePlacement(_FakeVector(10.0, 20.0, 0.0), _FakeRotation())
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "place", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    assert result["ok"] is True
+    assert result["result"]["placement"] == {"x": 10.0, "y": 20.0, "z": 0.0}
+
+
+def test_inspect_sketch_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "missing", "workspace": str(tmp_path), "sketch_name": "NoSuchSketch"}
+    )
+    assert result["ok"] is False
+    assert result["op"] == "inspect_sketch"
+    assert "not found" in result["error"]
+
+
+def test_inspect_sketch_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "wtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "wtype", "workspace": str(tmp_path), "sketch_name": "Box1"}
+    )
+    assert result["ok"] is False
+    assert result["op"] == "inspect_sketch"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_handle_request_dispatches_inspect_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "disp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_INSPECT_SKETCH,
+            "params": {
+                "document_id": "disp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+            },
+        }
+    )
+    assert response["ok"] is True
+    assert response["op"] == "inspect_sketch"
+    assert response["result"]["geometry_count"] == 0
+    assert response["result"]["sketch_name"] == "Sketch1"

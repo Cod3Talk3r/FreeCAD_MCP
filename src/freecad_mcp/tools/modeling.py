@@ -232,6 +232,20 @@ class SketchAddPolygonResult(BaseModel):
     )
 
 
+class InspectSketchResult(BaseModel):
+    """Result of inspect_sketch."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the inspected sketch.")
+    type: str = Field(description="FreeCAD TypeId, e.g. 'Sketcher::SketchObject'.")
+    geometry_count: int = Field(description="Number of geometry objects in the sketch.")
+    constraint_count: Optional[int] = Field(description="Number of constraints in the sketch.")
+    geometries: list[dict[str, Any]] = Field(description="Per-geometry inspection details.")
+    placement: dict[str, Any] = Field(
+        default={}, description="Sketch placement (X/Y/Z) if available, otherwise empty."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -398,6 +412,16 @@ class SketchAddPolygonParams(BaseModel):
     vertices: list[dict[str, float]] = Field(
         description="Ordered list of {x, y} vertex coordinates in millimetres (at least 3)."
     )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class InspectSketchParams(BaseModel):
+    """Parameters for inspecting an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to inspect.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1480,6 +1504,45 @@ def _register_tools(server: Any, settings: Settings) -> None:
             sketch_name=result.get("sketch_name", params.sketch_name),
             edges_added=result.get("edges_added", len(params.vertices)),
             total_edges=result.get("total_edges"),
+        )
+
+    # ------------------------------------------------------------------
+    # inspect_sketch
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="inspect_sketch",
+        title="Inspect sketch",
+        description=(
+            "Inspect an existing Sketcher::SketchObject and return structured "
+            "information about its geometry (read-only).  For each geometry "
+            "reports its index, type, relevant parameters (line endpoints, "
+            "circle center/radius, ellipse center/radii/directions), "
+            "construction status, and coordinates in the sketch-local XY "
+            "plane.  Also reports geometry count, constraint count, and "
+            "sketch placement if available.  Does not modify the document."
+        ),
+        structured_output=True,
+    )
+    def inspect_sketch_tool(params: InspectSketchParams) -> InspectSketchResult:
+        """Inspect a sketch and return its geometry information."""
+        validate_direct_request("inspect_sketch", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "inspect_sketch", bridge_params)
+
+        return InspectSketchResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            type=result.get("type", "Sketcher::SketchObject"),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count=result.get("constraint_count"),
+            geometries=result.get("geometries", []),
+            placement=result.get("placement", {}),
         )
 
     # ------------------------------------------------------------------

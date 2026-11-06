@@ -66,6 +66,10 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
         modeling.SketchAddPolygonParams,
         {"document_id": "doc", "sketch_name": "Sketch", "vertices": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}]},
     ),
+    (
+        modeling.InspectSketchParams,
+        {"document_id": "doc", "sketch_name": "Sketch"},
+    ),
 )
 
 _MODELING_PARAMS_MODELS = tuple(model for model, _ in MODELING_PARAMS_CASES)

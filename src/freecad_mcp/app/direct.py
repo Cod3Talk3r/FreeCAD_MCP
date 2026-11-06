@@ -125,6 +125,9 @@ def validate_direct_request(op: str, params: Any) -> None:
                     raise ValueError(f"vertices[{idx}] {key} must be a finite number.")
                 if not math.isfinite(value):
                     raise ValueError(f"vertices[{idx}] {key} must be a finite number.")
+    elif op == "inspect_sketch":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
 
 
 class DirectBackend:
