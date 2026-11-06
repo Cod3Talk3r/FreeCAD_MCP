@@ -199,6 +199,12 @@ class MCPGuiPanel:
         self._cut_button = QtWidgets.QPushButton("Boolean Cut")
         self._cut_button.clicked.connect(self._on_boolean_cut)
         cut_layout.addWidget(self._cut_button, 3, 0, 1, 2)
+        self._fuse_button = QtWidgets.QPushButton("Boolean Fuse")
+        self._fuse_button.clicked.connect(self._on_boolean_fuse)
+        cut_layout.addWidget(self._fuse_button, 4, 0, 1, 2)
+        self._common_button = QtWidgets.QPushButton("Boolean Common")
+        self._common_button.clicked.connect(self._on_boolean_common)
+        cut_layout.addWidget(self._common_button, 5, 0, 1, 2)
         layout.addWidget(cut_group)
 
         # ---- Recompute / Validate ---------------------------------------
@@ -570,6 +576,100 @@ class MCPGuiPanel:
         self._objects_list.clear()
         self._set_status(
             f"Boolean Cut '{obj_name}' = '{base_object}' - '{tool_object}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    def _on_boolean_fuse(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        base_object = self._cut_base_input.text().strip()
+        tool_object = self._cut_tool_input.text().strip()
+        result_name = self._cut_result_input.text().strip() or "Fuse1"
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not base_object:
+            self._set_status("Error: Base Object must not be empty.", error=True)
+            return
+        if not tool_object:
+            self._set_status("Error: Tool Object must not be empty.", error=True)
+            return
+        if base_object == tool_object:
+            self._set_status(
+                "Error: Base Object and Tool Object must be different.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "boolean_fuse",
+            {
+                "document_id": document_id,
+                "base_object": base_object,
+                "tool_object": tool_object,
+                "result_name": result_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        obj_name = (
+            result.get("object_name", result_name)
+            if isinstance(result, dict)
+            else result_name
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Boolean Fuse '{obj_name}' = '{base_object}' + '{tool_object}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    def _on_boolean_common(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        base_object = self._cut_base_input.text().strip()
+        tool_object = self._cut_tool_input.text().strip()
+        result_name = self._cut_result_input.text().strip() or "Common1"
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not base_object:
+            self._set_status("Error: Base Object must not be empty.", error=True)
+            return
+        if not tool_object:
+            self._set_status("Error: Tool Object must not be empty.", error=True)
+            return
+        if base_object == tool_object:
+            self._set_status(
+                "Error: Base Object and Tool Object must be different.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "boolean_common",
+            {
+                "document_id": document_id,
+                "base_object": base_object,
+                "tool_object": tool_object,
+                "result_name": result_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        obj_name = (
+            result.get("object_name", result_name)
+            if isinstance(result, dict)
+            else result_name
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Boolean Common '{obj_name}' = '{base_object}' ∩ '{tool_object}' "
             f"in workspace document '{document_id}'.",
             error=False,
         )

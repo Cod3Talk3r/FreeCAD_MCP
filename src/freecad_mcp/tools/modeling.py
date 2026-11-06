@@ -104,6 +104,36 @@ class BooleanCutResult(BaseModel):
     height: Optional[float] = Field(default=None, description="Bounding-box height in mm.")
 
 
+class BooleanFuseResult(BaseModel):
+    """Result of boolean_fuse."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the new Boolean-fuse result object.")
+    base_object: str = Field(description="Name of the first object fused.")
+    tool_object: str = Field(description="Name of the second object fused into the base.")
+    type: str = Field(description="FreeCAD TypeId of the result object.")
+    shape_type: str = Field(description="Shape.ShapeType of the resulting shape.")
+    volume: float = Field(description="Volume of the resulting shape in mm^3.")
+    length: Optional[float] = Field(default=None, description="Bounding-box length in mm.")
+    width: Optional[float] = Field(default=None, description="Bounding-box width in mm.")
+    height: Optional[float] = Field(default=None, description="Bounding-box height in mm.")
+
+
+class BooleanCommonResult(BaseModel):
+    """Result of boolean_common."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the new Boolean-common result object.")
+    base_object: str = Field(description="Name of the first object intersected.")
+    tool_object: str = Field(description="Name of the second object intersected with the base.")
+    type: str = Field(description="FreeCAD TypeId of the result object.")
+    shape_type: str = Field(description="Shape.ShapeType of the resulting shape.")
+    volume: float = Field(description="Volume of the resulting shape in mm^3.")
+    length: Optional[float] = Field(default=None, description="Bounding-box length in mm.")
+    width: Optional[float] = Field(default=None, description="Bounding-box width in mm.")
+    height: Optional[float] = Field(default=None, description="Bounding-box height in mm.")
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -255,6 +285,50 @@ class BooleanCutParams(BaseModel):
         default=None,
         description=(
             "Optional name for the resulting object (default 'Cut1'). An "
+            "existing name is suffixed rather than overwritten."
+        ),
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class BooleanFuseParams(BaseModel):
+    """Parameters for fusing two Part shapes."""
+
+    document_id: str = Field(description="Existing document containing both objects.")
+    base_object: str = Field(
+        description="Name of the first object to fuse."
+    )
+    tool_object: str = Field(
+        description="Name of the second object to fuse into the base object."
+    )
+    result_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional name for the resulting object (default 'Fuse1'). An "
+            "existing name is suffixed rather than overwritten."
+        ),
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class BooleanCommonParams(BaseModel):
+    """Parameters for intersecting two Part shapes."""
+
+    document_id: str = Field(description="Existing document containing both objects.")
+    base_object: str = Field(
+        description="Name of the first object to intersect."
+    )
+    tool_object: str = Field(
+        description="Name of the second object to intersect with the base object."
+    )
+    result_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional name for the resulting object (default 'Common1'). An "
             "existing name is suffixed rather than overwritten."
         ),
     )
@@ -773,6 +847,95 @@ def _register_tools(server: Any, settings: Settings) -> None:
         result = _run_bridge_op(bridge, "boolean_cut", bridge_params)
 
         return BooleanCutResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", ""),
+            base_object=result.get("base_object", params.base_object),
+            tool_object=result.get("tool_object", params.tool_object),
+            type=result.get("type", "Part::Feature"),
+            shape_type=result.get("shape_type", ""),
+            volume=result.get("volume", 0.0),
+            length=result.get("length"),
+            width=result.get("width"),
+            height=result.get("height"),
+        )
+
+    # ------------------------------------------------------------------
+    # boolean_fuse
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="boolean_fuse",
+        title="Boolean fuse",
+        description=(
+            "Fuse (union) two existing Part shapes using FreeCAD's native "
+            "Part Boolean fuse.  Both objects are retained and a separate "
+            "result object (named *result_name*, default 'Fuse1') is created. "
+            "Both objects must exist in *document_id* and have valid Solid "
+            "shapes; identical names, invalid/empty shapes and empty fuse "
+            "results are reported as structured errors.  The document is "
+            "locked exclusively during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def boolean_fuse_tool(params: BooleanFuseParams) -> BooleanFuseResult:
+        """Fuse *base_object* with *tool_object* and return result info."""
+        validate_direct_request("boolean_fuse", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "base_object": params.base_object,
+            "tool_object": params.tool_object,
+            "result_name": params.result_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "boolean_fuse", bridge_params)
+
+        return BooleanFuseResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", ""),
+            base_object=result.get("base_object", params.base_object),
+            tool_object=result.get("tool_object", params.tool_object),
+            type=result.get("type", "Part::Feature"),
+            shape_type=result.get("shape_type", ""),
+            volume=result.get("volume", 0.0),
+            length=result.get("length"),
+            width=result.get("width"),
+            height=result.get("height"),
+        )
+
+    # ------------------------------------------------------------------
+    # boolean_common
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="boolean_common",
+        title="Boolean common",
+        description=(
+            "Intersect (common) two existing Part shapes using FreeCAD's "
+            "native Part Boolean common.  Both objects are retained and a "
+            "separate result object (named *result_name*, default 'Common1') "
+            "is created.  Both objects must exist in *document_id* and have "
+            "valid Solid shapes; identical names, invalid/empty shapes and "
+            "empty common results are reported as structured errors.  The "
+            "document is locked exclusively during the operation and saved "
+            "atomically."
+        ),
+        structured_output=True,
+    )
+    def boolean_common_tool(params: BooleanCommonParams) -> BooleanCommonResult:
+        """Intersect *base_object* with *tool_object* and return result info."""
+        validate_direct_request("boolean_common", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "base_object": params.base_object,
+            "tool_object": params.tool_object,
+            "result_name": params.result_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "boolean_common", bridge_params)
+
+        return BooleanCommonResult(
             document_id=params.document_id,
             object_name=result.get("object_name", ""),
             base_object=result.get("base_object", params.base_object),

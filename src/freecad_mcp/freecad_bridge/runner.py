@@ -50,6 +50,8 @@ OP_EXPORT_STEP = "export_step"
 OP_TANK = "tank"
 OP_TUBULAR_COIL = "tubular_coil"
 OP_BOOLEAN_CUT = "boolean_cut"
+OP_BOOLEAN_FUSE = "boolean_fuse"
+OP_BOOLEAN_COMMON = "boolean_common"
 OP_SET_PLACEMENT = "set_placement"
 
 REQUEST_ENV = "FREECAD_MCP_REQUEST"
@@ -1170,6 +1172,326 @@ def _op_boolean_cut(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_boolean_fuse(params: dict[str, Any]) -> dict[str, Any]:
+    """Fuse two Part shapes using a native Boolean union."""
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    base_object = params.get("base_object") or ""
+    tool_object = params.get("tool_object") or ""
+    result_name = params.get("result_name") or "Fuse1"
+    workspace_str = params.get("workspace") or ""
+
+    if not base_object:
+        return {"ok": False, "op": "boolean_fuse", "error": "base_object is required"}
+    if not tool_object:
+        return {"ok": False, "op": "boolean_fuse", "error": "tool_object is required"}
+    if base_object == tool_object:
+        return {
+            "ok": False,
+            "op": "boolean_fuse",
+            "error": "base_object and tool_object must be different",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "boolean_fuse", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "boolean_fuse", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") != "acquired" and lock_status.get("status") != "reacquired":
+        return {"ok": False, "op": "boolean_fuse", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "boolean_fuse", "error": message}
+
+    try:
+        import FreeCAD as _FC
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        base_obj = doc.getObject(base_object)
+        if base_obj is None:
+            return _fail(f"base object '{base_object}' not found")
+        tool_obj = doc.getObject(tool_object)
+        if tool_obj is None:
+            return _fail(f"tool object '{tool_object}' not found")
+
+        base_shape = getattr(base_obj, "Shape", None)
+        tool_shape = getattr(tool_obj, "Shape", None)
+        if base_shape is None:
+            return _fail(f"base object '{base_object}' has no Part shape")
+        if tool_shape is None:
+            return _fail(f"tool object '{tool_object}' has no Part shape")
+
+        for label, shape in (("base", base_shape), ("tool", tool_shape)):
+            try:
+                is_valid = bool(shape.isValid())
+            except Exception as exc:
+                return _fail(f"could not validate {label} shape: {exc}")
+            if not is_valid:
+                return _fail(f"{label} object shape is not valid")
+            shape_type = getattr(shape, "ShapeType", "")
+            if shape_type != "Solid":
+                return _fail(f"{label} object is not a Solid (type: {shape_type})")
+            try:
+                volume = float(shape.Volume)
+            except Exception:
+                volume = 0.0
+            if volume <= 0:
+                return _fail(f"{label} object has an empty (zero-volume) shape")
+
+        try:
+            result_shape = base_shape.fuse(tool_shape)
+        except Exception as exc:
+            return _fail(f"Boolean fuse failed: {exc}")
+
+        if result_shape is None:
+            return _fail("Boolean fuse returned no shape")
+
+        try:
+            if getattr(result_shape, "ShapeType", "") == "Compound":
+                solids = list(getattr(result_shape, "Solids", []) or [])
+                if len(solids) == 1:
+                    result_shape = solids[0]
+                elif not solids:
+                    return _fail("Boolean fuse produced an empty result (no solids)")
+        except Exception as exc:
+            return _fail(f"could not inspect fuse result: {exc}")
+
+        try:
+            result_valid = bool(result_shape.isValid())
+        except Exception as exc:
+            return _fail(f"could not validate fuse result: {exc}")
+        if not result_valid:
+            return _fail("Boolean fuse produced an invalid shape")
+        result_volume = float(getattr(result_shape, "Volume", 0.0) or 0.0)
+        if result_volume <= 0:
+            return _fail("Boolean fuse produced an empty result (zero volume)")
+        result_shape_type = getattr(result_shape, "ShapeType", "")
+        if result_shape_type not in ("Solid", "Compound"):
+            return _fail(f"Boolean fuse result is not a usable Part shape (type: {result_shape_type})")
+
+        actual_name = result_name
+        counter = 0
+        while doc.getObject(actual_name) is not None:
+            counter += 1
+            actual_name = f"{result_name}_{counter}"
+
+        result_obj = doc.addObject("Part::Feature", actual_name)
+        result_obj.Shape = result_shape
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+
+        bbox = result_shape.BoundBox
+        length = float(bbox.XLength)
+        width = float(bbox.YLength)
+        height = float(bbox.ZLength)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "boolean_fuse",
+        "result": {
+            "document_id": normalized,
+            "object_name": actual_name,
+            "base_object": base_object,
+            "tool_object": tool_object,
+            "type": result_obj.TypeId,
+            "shape_type": result_shape_type,
+            "volume": result_volume,
+            "length": length,
+            "width": width,
+            "height": height,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_boolean_common(params: dict[str, Any]) -> dict[str, Any]:
+    """Intersect two Part shapes using a native Boolean common."""
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    base_object = params.get("base_object") or ""
+    tool_object = params.get("tool_object") or ""
+    result_name = params.get("result_name") or "Common1"
+    workspace_str = params.get("workspace") or ""
+
+    if not base_object:
+        return {"ok": False, "op": "boolean_common", "error": "base_object is required"}
+    if not tool_object:
+        return {"ok": False, "op": "boolean_common", "error": "tool_object is required"}
+    if base_object == tool_object:
+        return {
+            "ok": False,
+            "op": "boolean_common",
+            "error": "base_object and tool_object must be different",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "boolean_common", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "boolean_common", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") != "acquired" and lock_status.get("status") != "reacquired":
+        return {"ok": False, "op": "boolean_common", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "boolean_common", "error": message}
+
+    try:
+        import FreeCAD as _FC
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        base_obj = doc.getObject(base_object)
+        if base_obj is None:
+            return _fail(f"base object '{base_object}' not found")
+        tool_obj = doc.getObject(tool_object)
+        if tool_obj is None:
+            return _fail(f"tool object '{tool_object}' not found")
+
+        base_shape = getattr(base_obj, "Shape", None)
+        tool_shape = getattr(tool_obj, "Shape", None)
+        if base_shape is None:
+            return _fail(f"base object '{base_object}' has no Part shape")
+        if tool_shape is None:
+            return _fail(f"tool object '{tool_object}' has no Part shape")
+
+        for label, shape in (("base", base_shape), ("tool", tool_shape)):
+            try:
+                is_valid = bool(shape.isValid())
+            except Exception as exc:
+                return _fail(f"could not validate {label} shape: {exc}")
+            if not is_valid:
+                return _fail(f"{label} object shape is not valid")
+            shape_type = getattr(shape, "ShapeType", "")
+            if shape_type != "Solid":
+                return _fail(f"{label} object is not a Solid (type: {shape_type})")
+            try:
+                volume = float(shape.Volume)
+            except Exception:
+                volume = 0.0
+            if volume <= 0:
+                return _fail(f"{label} object has an empty (zero-volume) shape")
+
+        try:
+            result_shape = base_shape.common(tool_shape)
+        except Exception as exc:
+            return _fail(f"Boolean common failed: {exc}")
+
+        if result_shape is None:
+            return _fail("Boolean common returned no shape")
+
+        try:
+            if getattr(result_shape, "ShapeType", "") == "Compound":
+                solids = list(getattr(result_shape, "Solids", []) or [])
+                if len(solids) == 1:
+                    result_shape = solids[0]
+                elif not solids:
+                    return _fail("Boolean common produced an empty result (no solids)")
+        except Exception as exc:
+            return _fail(f"could not inspect common result: {exc}")
+
+        try:
+            result_valid = bool(result_shape.isValid())
+        except Exception as exc:
+            return _fail(f"could not validate common result: {exc}")
+        if not result_valid:
+            return _fail("Boolean common produced an invalid shape")
+        result_volume = float(getattr(result_shape, "Volume", 0.0) or 0.0)
+        if result_volume <= 0:
+            return _fail("Boolean common produced an empty result (zero volume)")
+        result_shape_type = getattr(result_shape, "ShapeType", "")
+        if result_shape_type not in ("Solid", "Compound"):
+            return _fail(f"Boolean common result is not a usable Part shape (type: {result_shape_type})")
+
+        actual_name = result_name
+        counter = 0
+        while doc.getObject(actual_name) is not None:
+            counter += 1
+            actual_name = f"{result_name}_{counter}"
+
+        result_obj = doc.addObject("Part::Feature", actual_name)
+        result_obj.Shape = result_shape
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+
+        bbox = result_shape.BoundBox
+        length = float(bbox.XLength)
+        width = float(bbox.YLength)
+        height = float(bbox.ZLength)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "boolean_common",
+        "result": {
+            "document_id": normalized,
+            "object_name": actual_name,
+            "base_object": base_object,
+            "tool_object": tool_object,
+            "type": result_obj.TypeId,
+            "shape_type": result_shape_type,
+            "volume": result_volume,
+            "length": length,
+            "width": width,
+            "height": height,
+            "meta_before": meta_before,
+        },
+    }
+
+
 def _op_set_placement(params: dict[str, Any]) -> dict[str, Any]:
     """Set the placement (position) of an existing Box, Cylinder, or Part::Feature.
 
@@ -1310,6 +1632,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_TANK: _op_tank,
     OP_TUBULAR_COIL: _op_tubular_coil,
     OP_BOOLEAN_CUT: _op_boolean_cut,
+    OP_BOOLEAN_FUSE: _op_boolean_fuse,
+    OP_BOOLEAN_COMMON: _op_boolean_common,
     OP_SET_PLACEMENT: _op_set_placement,
 }
 

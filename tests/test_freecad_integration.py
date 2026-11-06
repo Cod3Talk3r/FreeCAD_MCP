@@ -297,6 +297,224 @@ def test_real_freecad_boolean_cut_error_cases(tmp_path: Path) -> None:
 
 
 @requires_freecad
+def test_real_freecad_boolean_fuse_overlapping_boxes(tmp_path: Path) -> None:
+    """Fuse two overlapping boxes; verify valid solid result and expected volume.
+
+    Box A: 10x10x10 at (0,0,0), volume 1000.
+    Box B: 10x10x10 at (5,5,5), volume 1000.
+    Overlap: 5x5x5 at (5,5,5), volume 125.
+    Fuse volume = 1000 + 1000 - 125 = 1875.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "fuse1", "workspace": workspace}
+    )
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "fuse1",
+            "workspace": workspace,
+            "object_name": "BoxA",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "fuse1",
+            "workspace": workspace,
+            "object_name": "BoxB",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "x": 5.0,
+            "y": 5.0,
+            "z": 5.0,
+        },
+    )
+
+    fused = bridge.run(
+        "boolean_fuse",
+        {
+            "document_id": "fuse1",
+            "workspace": workspace,
+            "base_object": "BoxA",
+            "tool_object": "BoxB",
+            "result_name": "Fused1",
+        },
+    )
+    expected_volume = 1000.0 + 1000.0 - 125.0
+
+    assert fused["object_name"] == "Fused1"
+    assert fused["base_object"] == "BoxA"
+    assert fused["tool_object"] == "BoxB"
+    assert fused["shape_type"] == "Solid"
+    assert fused["volume"] == pytest.approx(expected_volume, rel=1e-6)
+
+    reopened = bridge.run(
+        "list_objects", {"document_id": "fuse1", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in reopened]
+    assert names == ["BoxA", "BoxB", "Fused1"]
+
+    fused_reopened = next(obj for obj in reopened if obj["name"] == "Fused1")
+    assert fused_reopened["shape_type"] == "Solid"
+    assert fused_reopened["volume"] == pytest.approx(expected_volume, rel=1e-6)
+
+    # Source objects remain unchanged.
+    a = next(obj for obj in reopened if obj["name"] == "BoxA")
+    b = next(obj for obj in reopened if obj["name"] == "BoxB")
+    assert a["volume"] == pytest.approx(1000.0, rel=1e-6)
+    assert b["volume"] == pytest.approx(1000.0, rel=1e-6)
+
+
+@requires_freecad
+def test_real_freecad_boolean_common_overlapping_boxes(tmp_path: Path) -> None:
+    """Intersect two overlapping boxes; verify valid solid result and expected volume.
+
+    Box A: 10x10x10 at (0,0,0), volume 1000.
+    Box B: 10x10x10 at (5,5,5), volume 1000.
+    Overlap: 5x5x5 at (5,5,5), volume 125.
+    Common volume = 125.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "common1", "workspace": workspace}
+    )
+
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "common1",
+            "workspace": workspace,
+            "object_name": "BoxA",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "common1",
+            "workspace": workspace,
+            "object_name": "BoxB",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "x": 5.0,
+            "y": 5.0,
+            "z": 5.0,
+        },
+    )
+
+    common = bridge.run(
+        "boolean_common",
+        {
+            "document_id": "common1",
+            "workspace": workspace,
+            "base_object": "BoxA",
+            "tool_object": "BoxB",
+            "result_name": "Common1",
+        },
+    )
+
+    assert common["object_name"] == "Common1"
+    assert common["base_object"] == "BoxA"
+    assert common["tool_object"] == "BoxB"
+    assert common["shape_type"] == "Solid"
+    assert common["volume"] == pytest.approx(125.0, rel=1e-6)
+
+    reopened = bridge.run(
+        "list_objects", {"document_id": "common1", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in reopened]
+    assert names == ["BoxA", "BoxB", "Common1"]
+
+    common_reopened = next(obj for obj in reopened if obj["name"] == "Common1")
+    assert common_reopened["shape_type"] == "Solid"
+    assert common_reopened["volume"] == pytest.approx(125.0, rel=1e-6)
+
+    # Source objects remain unchanged.
+    a = next(obj for obj in reopened if obj["name"] == "BoxA")
+    b = next(obj for obj in reopened if obj["name"] == "BoxB")
+    assert a["volume"] == pytest.approx(1000.0, rel=1e-6)
+    assert b["volume"] == pytest.approx(1000.0, rel=1e-6)
+
+
+@requires_freecad
+def test_real_freecad_boolean_fuse_common_error_cases(tmp_path: Path) -> None:
+    """Missing operands and identical names become structured errors for fuse and common."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run(
+        "create_document", {"document_id": "boolerr", "workspace": workspace}
+    )
+    for name in ("A", "B"):
+        bridge.run(
+            "create_box",
+            {
+                "document_id": "boolerr",
+                "workspace": workspace,
+                "object_name": name,
+                "length": 10.0,
+                "width": 10.0,
+                "height": 10.0,
+            },
+        )
+
+    def _fuse(base: str, tool: str) -> None:
+        bridge.run(
+            "boolean_fuse",
+            {
+                "document_id": "boolerr",
+                "workspace": workspace,
+                "base_object": base,
+                "tool_object": tool,
+            },
+        )
+
+    def _common(base: str, tool: str) -> None:
+        bridge.run(
+            "boolean_common",
+            {
+                "document_id": "boolerr",
+                "workspace": workspace,
+                "base_object": base,
+                "tool_object": tool,
+            },
+        )
+
+    # fuse: missing tool
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        _fuse("A", "Missing")
+    assert "not found" in str(excinfo.value)
+
+    # fuse: identical operands
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        _fuse("A", "A")
+    assert "different" in str(excinfo.value).lower()
+
+    # common: missing base
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        _common("Missing", "B")
+    assert "not found" in str(excinfo.value)
+
+    # common: identical operands
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        _common("B", "B")
+    assert "different" in str(excinfo.value).lower()
+
+
+@requires_freecad
 def test_real_freecad_create_box_placement_and_reopen(tmp_path: Path) -> None:
     """Create a box with placement through Method A, then independently reopen
     the saved FCStd document and verify dimensions, placement, validity, and
