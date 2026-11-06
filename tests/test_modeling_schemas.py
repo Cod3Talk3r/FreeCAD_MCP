@@ -8,7 +8,9 @@ from freecad_mcp.tools.modeling import (
     CreateSketchParams,
     SketchAddCircleParams,
     SketchAddEllipseParams,
+    SketchAddPolygonParams,
     SketchAddRectangleParams,
+    SketchAddRegularPolygonParams,
     SketchAddTriangleParams,
     TankParams,
     TubularCoilParams,
@@ -180,3 +182,44 @@ def test_sketch_add_ellipse_accepts_zero_and_negative_at_schema_level():
     e = SketchAddEllipseParams(document_id="mydoc", sketch_name="S", major_radius=0, minor_radius=-2)
     assert e.major_radius == 0
     assert e.minor_radius == -2
+
+
+def test_sketch_add_regular_polygon_params_valid():
+    """Valid SketchAddRegularPolygonParams should be accepted."""
+    p = SketchAddRegularPolygonParams(
+        document_id="mydoc", sketch_name="S", center_x=1.0, center_y=2.0, radius=5.0, sides=6, rotation_deg=30.0
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "S"
+    assert p.center_x == 1.0
+    assert p.center_y == 2.0
+    assert p.radius == 5.0
+    assert p.sides == 6
+    assert p.rotation_deg == 30.0
+
+
+def test_sketch_add_regular_polygon_params_defaults():
+    """SketchAddRegularPolygonParams defaults center and rotation to zero."""
+    p = SketchAddRegularPolygonParams(document_id="mydoc", sketch_name="S", radius=5.0, sides=6)
+    assert p.center_x == 0.0
+    assert p.center_y == 0.0
+    assert p.rotation_deg == 0.0
+
+
+def test_sketch_add_regular_polygon_accepts_invalid_at_schema_level():
+    """Invalid sides/radius accepted by schema, rejected by handler."""
+    p = SketchAddRegularPolygonParams(document_id="mydoc", sketch_name="S", radius=0, sides=2)
+    assert p.radius == 0
+    assert p.sides == 2
+
+
+def test_sketch_add_polygon_params_valid():
+    """Valid SketchAddPolygonParams should be accepted."""
+    p = SketchAddPolygonParams(
+        document_id="mydoc",
+        sketch_name="S",
+        vertices=[{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}],
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "S"
+    assert p.vertices == [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}]

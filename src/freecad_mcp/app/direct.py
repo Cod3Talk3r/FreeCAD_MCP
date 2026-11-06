@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from freecad_mcp.freecad_bridge import FreeCadOperationError
+from freecad_mcp.freecad_bridge.runner import MAX_POLYGON_SIDES
 
 from .contracts import BackendStatus, BuildRequest, BuildResult
 
@@ -85,6 +86,45 @@ def validate_direct_request(op: str, params: Any) -> None:
             raise ValueError("major_radius must be positive")
         if params["minor_radius"] <= 0:
             raise ValueError("minor_radius must be positive")
+    elif op == "sketch_add_regular_polygon":
+        for key in ("center_x", "center_y", "radius"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+        if params["radius"] <= 0:
+            raise ValueError("radius must be positive")
+        try:
+            sides = int(params.get("sides"))
+        except (TypeError, ValueError):
+            raise ValueError("sides must be an integer.")
+        if sides < 3:
+            raise ValueError("sides must be at least 3.")
+        if sides > MAX_POLYGON_SIDES:
+            raise ValueError(f"sides must not exceed {MAX_POLYGON_SIDES}.")
+        # rotation_deg defaults to 0 if omitted.
+        try:
+            rotation_val = float(params.get("rotation_deg", 0))
+        except (TypeError, ValueError):
+            raise ValueError("rotation_deg must be a finite number.")
+        if not math.isfinite(rotation_val):
+            raise ValueError("rotation_deg must be a finite number.")
+    elif op == "sketch_add_polygon":
+        vertices = params.get("vertices")
+        if not isinstance(vertices, list) or len(vertices) < 3:
+            raise ValueError("vertices must be a list of at least 3 {x, y} objects.")
+        for idx, v in enumerate(vertices):
+            if not isinstance(v, dict):
+                raise ValueError(f"vertices[{idx}] must be an object with 'x' and 'y'.")
+            for key in ("x", "y"):
+                try:
+                    value = float(v.get(key))
+                except (TypeError, ValueError):
+                    raise ValueError(f"vertices[{idx}] {key} must be a finite number.")
+                if not math.isfinite(value):
+                    raise ValueError(f"vertices[{idx}] {key} must be a finite number.")
 
 
 class DirectBackend:

@@ -205,6 +205,33 @@ class SketchAddEllipseResult(BaseModel):
     )
 
 
+class SketchAddRegularPolygonResult(BaseModel):
+    """Result of sketch_add_regular_polygon."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the polygon was added to.")
+    center_x: float = Field(description="X coordinate of the polygon centre in millimetres.")
+    center_y: float = Field(description="Y coordinate of the polygon centre in millimetres.")
+    radius: float = Field(description="Circumradius of the regular polygon in millimetres.")
+    sides: int = Field(description="Number of sides of the regular polygon.")
+    rotation_deg: float = Field(description="Rotation of the first vertex counter-clockwise from +X, in degrees.")
+    edges_added: int = Field(description="Number of line segments added (equal to sides).")
+    total_edges: Optional[int] = Field(
+        default=None, description="Total Sketcher geometries in the sketch after adding the polygon."
+    )
+
+
+class SketchAddPolygonResult(BaseModel):
+    """Result of sketch_add_polygon."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the polygon was added to.")
+    edges_added: int = Field(description="Number of line segments added (equal to vertex count).")
+    total_edges: Optional[int] = Field(
+        default=None, description="Total Sketcher geometries in the sketch after adding the polygon."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -341,6 +368,36 @@ class SketchAddEllipseParams(BaseModel):
     center_y: float = Field(default=0.0, description="Y coordinate of the ellipse centre in millimetres.")
     major_radius: float = Field(description="Major radius of the ellipse in millimetres (must be positive).")
     minor_radius: float = Field(description="Minor radius of the ellipse in millimetres (must be positive).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddRegularPolygonParams(BaseModel):
+    """Parameters for adding a regular polygon to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the polygon to.")
+    center_x: float = Field(default=0.0, description="X coordinate of the polygon centre in millimetres.")
+    center_y: float = Field(default=0.0, description="Y coordinate of the polygon centre in millimetres.")
+    radius: float = Field(description="Circumradius of the regular polygon in millimetres (must be positive).")
+    sides: int = Field(description="Number of sides (must be between 3 and MAX_POLYGON_SIDES).")
+    rotation_deg: float = Field(
+        default=0.0, description="Rotation of the first vertex counter-clockwise from +X, in degrees."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddPolygonParams(BaseModel):
+    """Parameters for adding a custom polygon to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the polygon to.")
+    vertices: list[dict[str, float]] = Field(
+        description="Ordered list of {x, y} vertex coordinates in millimetres (at least 3)."
+    )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1327,6 +1384,101 @@ def _register_tools(server: Any, settings: Settings) -> None:
             major_radius=result.get("major_radius", params.major_radius),
             minor_radius=result.get("minor_radius", params.minor_radius),
             edges_added=result.get("edges_added", 1),
+            total_edges=result.get("total_edges"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_regular_polygon
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_regular_polygon",
+        title="Add regular polygon to sketch",
+        description=(
+            "Add a regular polygon to an existing Sketcher::SketchObject.  "
+            "Vertices lie on a circle centred at (*center_x*, *center_y*) on "
+            "the sketch XY plane (Z = 0) with the given *radius* (circumradius).  "
+            "Consecutive vertices are connected by line segments and the last "
+            "vertex closes back to the first.  *rotation_deg* rotates the first "
+            "vertex counter-clockwise from the positive X axis.  *sides* must "
+            "be at least 3 and at most MAX_POLYGON_SIDES.  No constraints are "
+            "added, so the geometry stays editable.  The document is locked "
+            "exclusively during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_regular_polygon_tool(params: SketchAddRegularPolygonParams) -> SketchAddRegularPolygonResult:
+        """Add a regular polygon to a sketch and return its info."""
+        validate_direct_request("sketch_add_regular_polygon", params.model_dump())
+        for name, value in (
+            ("center_x", params.center_x),
+            ("center_y", params.center_y),
+            ("radius", params.radius),
+            ("rotation_deg", params.rotation_deg),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "center_x": params.center_x,
+            "center_y": params.center_y,
+            "radius": params.radius,
+            "sides": params.sides,
+            "rotation_deg": params.rotation_deg,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_regular_polygon", bridge_params)
+
+        return SketchAddRegularPolygonResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            center_x=result.get("center_x", params.center_x),
+            center_y=result.get("center_y", params.center_y),
+            radius=result.get("radius", params.radius),
+            sides=result.get("sides", params.sides),
+            rotation_deg=result.get("rotation_deg", params.rotation_deg),
+            edges_added=result.get("edges_added", params.sides),
+            total_edges=result.get("total_edges"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_polygon
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_polygon",
+        title="Add custom polygon to sketch",
+        description=(
+            "Add a custom polygon from ordered vertices to an existing "
+            "Sketcher::SketchObject.  Each vertex is connected to the next "
+            "and the last back to the first via line segments on the sketch "
+            "XY plane (Z = 0).  Vertex order is preserved; no reordering or "
+            "repair is performed.  At least 3 vertices are required; "
+            "consecutive duplicates, a repeated final vertex equal to the "
+            "first, and zero-area polygons are rejected.  Self-intersection "
+            "is not validated.  No constraints are added.  The document is "
+            "locked exclusively during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_polygon_tool(params: SketchAddPolygonParams) -> SketchAddPolygonResult:
+        """Add a custom polygon to a sketch and return its info."""
+        validate_direct_request("sketch_add_polygon", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "vertices": params.vertices,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_polygon", bridge_params)
+
+        return SketchAddPolygonResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            edges_added=result.get("edges_added", len(params.vertices)),
             total_edges=result.get("total_edges"),
         )
 

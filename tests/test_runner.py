@@ -8,6 +8,7 @@ without FreeCAD.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import types
 from pathlib import Path
@@ -1218,3 +1219,509 @@ def test_handle_request_dispatches_triangle_and_ellipse(
     assert response["op"] == "sketch_add_ellipse"
     assert response["result"]["edges_added"] == 1
     assert response["result"]["total_edges"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-C: Sketch regular and custom polygon (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_add_regular_polygon_hexagon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "reg", "workspace": str(tmp_path), "sketch_name": "Reg1"}
+    )
+
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "reg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Reg1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 10.0,
+            "sides": 6,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_add_regular_polygon"
+    assert result["result"]["edges_added"] == 6
+    assert result["result"]["total_edges"] == 6
+    assert result["result"]["sides"] == 6
+    assert result["result"]["radius"] == 10.0
+
+    sketch = doc.objects["Reg1"]
+    assert len(sketch.Geometry) == 6
+    segments = sketch.Geometry
+    assert all(isinstance(seg, _FakeSegment) for seg in segments)
+
+    # Closed: end of each segment is start of next, last closes to first.
+    for i in range(6):
+        assert segments[i].end is segments[(i + 1) % 6].start
+
+    # All vertices lie on the circumcircle (radius 10) at Z = 0.
+    starts = [seg.start for seg in segments]
+    for v in starts:
+        assert v.z == 0.0
+        dist = math.sqrt(v.x * v.x + v.y * v.y)
+        assert dist == pytest.approx(10.0, rel=1e-9)
+
+    # Vertices are spaced 60 degrees apart.
+    assert starts[0].x == pytest.approx(10.0) and starts[0].y == pytest.approx(0.0)
+    assert starts[1].x == pytest.approx(5.0) and starts[1].y == pytest.approx(8.6602540378, rel=1e-6)
+
+
+def test_sketch_add_regular_polygon_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "rot", "workspace": str(tmp_path), "sketch_name": "Reg1"}
+    )
+
+    # 90-degree rotation: first vertex at (0, radius).
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "rot",
+            "workspace": str(tmp_path),
+            "sketch_name": "Reg1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+            "rotation_deg": 90.0,
+        }
+    )
+    assert result["ok"] is True
+    sketch = doc.objects["Reg1"]
+    first = sketch.Geometry[0].start
+    assert first.x == pytest.approx(0.0)
+    assert first.y == pytest.approx(5.0)
+    assert first.z == 0.0
+
+
+def test_sketch_add_regular_polygon_triangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "trireg", "workspace": str(tmp_path), "sketch_name": "Reg1"}
+    )
+
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "trireg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Reg1",
+            "center_x": 1.0,
+            "center_y": 2.0,
+            "radius": 3.0,
+            "sides": 3,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["edges_added"] == 3
+
+    sketch = doc.objects["Reg1"]
+    assert len(sketch.Geometry) == 3
+    # Circumradius: distance from center to each vertex should be 3.
+    for seg in sketch.Geometry:
+        dist = math.sqrt(
+            (seg.start.x - 1.0) ** 2 + (seg.start.y - 2.0) ** 2
+        )
+        assert dist == pytest.approx(3.0, rel=1e-9)
+        assert seg.start.z == 0.0
+
+
+def test_sketch_add_regular_polygon_min_max_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "lim", "workspace": str(tmp_path), "sketch_name": "Reg1"}
+    )
+
+    # Minimum: 3 sides is allowed.
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "lim",
+            "workspace": str(tmp_path),
+            "sketch_name": "Reg1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+            "sides": 3,
+        }
+    )
+    assert result["ok"] is True
+
+    # Below minimum rejected.
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "lim",
+            "workspace": str(tmp_path),
+            "sketch_name": "Reg1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+            "sides": 2,
+        }
+    )
+    assert result["ok"] is False
+    assert "at least 3" in result["error"]
+
+    # Above max rejected.
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "lim",
+            "workspace": str(tmp_path),
+            "sketch_name": "Reg1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+            "sides": runner.MAX_POLYGON_SIDES + 1,
+        }
+    )
+    assert result["ok"] is False
+    assert "must not exceed" in result["error"]
+
+    assert len(doc.objects["Reg1"].Geometry) == 3
+
+
+def test_sketch_add_regular_polygon_invalid_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "badreg", "workspace": str(tmp_path), "sketch_name": "Reg1"}
+    )
+
+    base = {
+        "document_id": "badreg",
+        "workspace": str(tmp_path),
+        "sketch_name": "Reg1",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 5.0,
+        "sides": 6,
+    }
+    for bad in (
+        {**base, "center_x": float("nan")},
+        {**base, "radius": float("inf")},
+        {**base, "rotation_deg": float("-inf")},
+        {**base, "radius": 0},
+        {**base, "radius": -2.0},
+        {**base, "sides": 0},
+        {**base, "sides": -1},
+        {**base, "sides": "six"},
+    ):
+        result = runner._op_sketch_add_regular_polygon(bad)
+        assert result["ok"] is False, bad
+        assert result["op"] == "sketch_add_regular_polygon"
+        assert result["error"]
+
+    assert len(doc.objects["Reg1"].Geometry) == 0
+
+
+def test_sketch_add_polygon_custom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "cus", "workspace": str(tmp_path), "sketch_name": "Poly1"}
+    )
+
+    result = runner._op_sketch_add_polygon(
+        {
+            "document_id": "cus",
+            "workspace": str(tmp_path),
+            "sketch_name": "Poly1",
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 2.0, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_add_polygon"
+    assert result["result"]["edges_added"] == 4
+    assert result["result"]["total_edges"] == 4
+
+    sketch = doc.objects["Poly1"]
+    assert len(sketch.Geometry) == 4
+    segments = sketch.Geometry
+    assert all(isinstance(seg, _FakeSegment) for seg in segments)
+
+    # Vertex order preserved, all on Z=0.
+    expected = [
+        (0.0, 0.0, 2.0, 0.0),
+        (2.0, 0.0, 2.0, 1.0),
+        (2.0, 1.0, 0.0, 1.0),
+        (0.0, 1.0, 0.0, 0.0),
+    ]
+    for seg, (sx, sy, ex, ey) in zip(segments, expected):
+        assert seg.start.x == sx and seg.start.y == sy and seg.start.z == 0.0
+        assert seg.end.x == ex and seg.end.y == ey and seg.end.z == 0.0
+
+    # Closed: last segment end == first segment start.
+    assert segments[3].end is segments[0].start
+
+
+def test_sketch_add_polygon_automatic_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "clo", "workspace": str(tmp_path), "sketch_name": "Poly1"}
+    )
+
+    # Triangle: 3 vertices, 3 edges (closure is automatic).
+    result = runner._op_sketch_add_polygon(
+        {
+            "document_id": "clo",
+            "workspace": str(tmp_path),
+            "sketch_name": "Poly1",
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 1.0, "y": 0.0},
+                {"x": 0.0, "y": 1.0},
+            ],
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["edges_added"] == 3
+    assert len(doc.objects["Poly1"].Geometry) == 3
+
+
+def test_sketch_add_polygon_rejects_invalid_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "badcus", "workspace": str(tmp_path), "sketch_name": "Poly1"}
+    )
+
+    base = {
+        "document_id": "badcus",
+        "workspace": str(tmp_path),
+        "sketch_name": "Poly1",
+        "vertices": [
+            {"x": 0.0, "y": 0.0},
+            {"x": 1.0, "y": 0.0},
+            {"x": 0.0, "y": 1.0},
+        ],
+    }
+
+    # Too few vertices.
+    result = runner._op_sketch_add_polygon({**base, "vertices": [{"x": 0, "y": 0}]})
+    assert result["ok"] is False
+    assert "at least 3" in result["error"]
+
+    # Non-dict vertex.
+    result = runner._op_sketch_add_polygon(
+        {**base, "vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, "notadict"]}
+    )
+    assert result["ok"] is False
+    assert "object with 'x' and 'y'" in result["error"]
+
+    # NaN coordinate.
+    result = runner._op_sketch_add_polygon(
+        {**base, "vertices": [{"x": 0, "y": 0}, {"x": float("nan"), "y": 0}, {"x": 0, "y": 1}]}
+    )
+    assert result["ok"] is False
+    assert "finite" in result["error"]
+
+    # Consecutive duplicate.
+    result = runner._op_sketch_add_polygon(
+        {**base, "vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 1}]}
+    )
+    assert result["ok"] is False
+    assert "consecutive duplicate" in result["error"]
+
+    # Repeated first vertex at end.
+    result = runner._op_sketch_add_polygon(
+        {**base, "vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 1}, {"x": 0, "y": 0}]}
+    )
+    assert result["ok"] is False
+    assert "duplicates the first" in result["error"]
+
+    # Collinear / zero area.
+    result = runner._op_sketch_add_polygon(
+        {**base, "vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 2, "y": 0}]}
+    )
+    assert result["ok"] is False
+    assert "zero area" in result["error"]
+
+    assert len(doc.objects["Poly1"].Geometry) == 0
+
+
+def test_sketch_add_polygon_mixed_with_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixpoly", "workspace": str(tmp_path), "sketch_name": "Sk1"}
+    )
+
+    rect = runner._op_sketch_add_rectangle(
+        {
+            "document_id": "mixpoly",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sk1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 2.0,
+        }
+    )
+    assert rect["ok"] is True
+    assert rect["result"]["total_edges"] == 4
+
+    poly = runner._op_sketch_add_polygon(
+        {
+            "document_id": "mixpoly",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sk1",
+            "vertices": [
+                {"x": 3.0, "y": 3.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 3.5, "y": 4.0},
+            ],
+        }
+    )
+    assert poly["ok"] is True
+    assert poly["result"]["total_edges"] == 7
+
+    sketch = doc.objects["Sk1"]
+    assert len(sketch.Geometry) == 7
+
+
+def test_sketch_add_polygon_requires_existing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_add_polygon(
+        {
+            "document_id": "cus",
+            "workspace": str(tmp_path),
+            "sketch_name": "Missing",
+            "vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 1}],
+        }
+    )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "cus",
+            "workspace": str(tmp_path),
+            "sketch_name": "Missing",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+            "sides": 5,
+        }
+    )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
+
+
+def test_sketch_add_polygon_rejects_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "wtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_add_polygon(
+        {
+            "document_id": "wtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 1}],
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_polygon"
+    assert "Sketcher::SketchObject" in result["error"]
+
+    result = runner._op_sketch_add_regular_polygon(
+        {
+            "document_id": "wtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 1.0,
+            "sides": 5,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_regular_polygon"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_handle_request_dispatches_polygon_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "disp", "workspace": str(tmp_path), "sketch_name": "Sk1"}
+    )
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_ADD_REGULAR_POLYGON,
+            "params": {
+                "document_id": "disp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sk1",
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 2.0,
+                "sides": 5,
+            },
+        }
+    )
+    assert response["ok"] is True
+    assert response["op"] == "sketch_add_regular_polygon"
+    assert response["result"]["edges_added"] == 5
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_ADD_POLYGON,
+            "params": {
+                "document_id": "disp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sk1",
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 1.0, "y": 0.0},
+                    {"x": 0.0, "y": 1.0},
+                ],
+            },
+        }
+    )
+    assert response["ok"] is True
+    assert response["op"] == "sketch_add_polygon"
+    assert response["result"]["edges_added"] == 3
+    assert response["result"]["total_edges"] == 8

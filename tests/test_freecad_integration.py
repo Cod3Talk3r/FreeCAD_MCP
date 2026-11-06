@@ -1497,3 +1497,143 @@ def test_real_freecad_sketch_triangle_ellipse_error_cases(tmp_path: Path) -> Non
             },
         )
     assert "Sketcher::SketchObject" in str(excinfo.value)
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_regular_polygon(tmp_path: Path) -> None:
+    """Add a regular hexagon; verify vertex count, circumradius, and persistence."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skreg", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skreg", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    poly = bridge.run(
+        "sketch_add_regular_polygon",
+        {
+            "document_id": "skreg",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 3.0,
+            "center_y": -2.0,
+            "radius": 4.0,
+            "sides": 6,
+        },
+    )
+    assert poly["sketch_name"] == "Sketch1"
+    assert poly["center_x"] == pytest.approx(3.0)
+    assert poly["center_y"] == pytest.approx(-2.0)
+    assert poly["radius"] == pytest.approx(4.0)
+    assert poly["sides"] == 6
+    assert poly["edges_added"] == 6
+    assert poly["total_edges"] == 6
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skreg", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 6
+
+    reopened = bridge.run("list_objects", {"document_id": "skreg", "workspace": workspace})["objects"]
+    assert reopened[0]["geometry_count"] == 6
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_custom_polygon(tmp_path: Path) -> None:
+    """Add a custom quadrilateral; verify ordered coordinates and persistence."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skcus", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skcus", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    poly = bridge.run(
+        "sketch_add_polygon",
+        {
+            "document_id": "skcus",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 2.0, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+            ],
+        },
+    )
+    assert poly["sketch_name"] == "Sketch1"
+    assert poly["edges_added"] == 4
+    assert poly["total_edges"] == 4
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skcus", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 4
+
+    reopened = bridge.run("list_objects", {"document_id": "skcus", "workspace": workspace})["objects"]
+    assert reopened[0]["geometry_count"] == 4
+
+
+@requires_freecad
+def test_real_freecad_sketch_mixed_polygon_geometry(tmp_path: Path) -> None:
+    """Rectangle, regular polygon, and custom polygon accumulate in one sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skmpoly", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skmpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skmpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 2.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_regular_polygon",
+        {
+            "document_id": "skmpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 3.0,
+            "center_y": 3.0,
+            "radius": 1.0,
+            "sides": 5,
+        },
+    )
+    poly = bridge.run(
+        "sketch_add_polygon",
+        {
+            "document_id": "skmpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "vertices": [
+                {"x": 5.0, "y": 0.0},
+                {"x": 6.0, "y": 0.0},
+                {"x": 5.5, "y": 1.0},
+            ],
+        },
+    )
+    assert poly["edges_added"] == 3
+    assert poly["total_edges"] == 12  # 4 + 5 + 3
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skmpoly", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 12

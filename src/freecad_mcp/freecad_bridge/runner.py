@@ -58,6 +58,13 @@ OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
 OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
 OP_SKETCH_ADD_ELLIPSE = "sketch_add_ellipse"
+OP_SKETCH_ADD_REGULAR_POLYGON = "sketch_add_regular_polygon"
+OP_SKETCH_ADD_POLYGON = "sketch_add_polygon"
+
+#: Upper bound on polygon sides to prevent accidental huge geometry creation.
+#: Enforced consistently in the runner, the parent-side validator, and the MCP
+#: parameter schema.  Raise this only after confirming real-FreeCAD performance.
+MAX_POLYGON_SIDES = 1000
 
 REQUEST_ENV = "FREECAD_MCP_REQUEST"
 RESPONSE_ENV = "FREECAD_MCP_RESPONSE"
@@ -2185,6 +2192,313 @@ def _op_sketch_add_ellipse(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_add_regular_polygon(params: dict[str, Any]) -> dict[str, Any]:
+    """Add a regular polygon (circumradius + sides + rotation) to a sketch.
+
+    Vertices lie on a circle centred at ``(center_x, center_y)`` on Z=0,
+    connected by ``Part.LineSegment`` edges and closed back to the first
+    vertex.  *rotation_deg* rotates the first vertex counter-clockwise from
+    the positive X axis.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    center_x = params.get("center_x")
+    center_y = params.get("center_y")
+    radius = params.get("radius")
+    sides = params.get("sides")
+    rotation_deg = params.get("rotation_deg", 0)
+    workspace_str = params.get("workspace") or ""
+
+    # Validate numeric inputs.
+    try:
+        cx_val = float(center_x)
+        cy_val = float(center_y)
+        radius_val = float(radius)
+        rotation_val = float(rotation_deg)
+        sides_val = int(sides)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_add_regular_polygon",
+            "error": "center_x, center_y, radius must be finite numbers and sides must be an integer.",
+        }
+    for name, val in (
+        ("center_x", cx_val),
+        ("center_y", cy_val),
+        ("radius", radius_val),
+        ("rotation_deg", rotation_val),
+    ):
+        if math.isnan(val) or math.isinf(val):
+            return {
+                "ok": False,
+                "op": "sketch_add_regular_polygon",
+                "error": f"{name} must be a finite number.",
+            }
+    if radius_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_add_regular_polygon",
+            "error": "radius must be a positive number.",
+        }
+    if sides_val < 3:
+        return {
+            "ok": False,
+            "op": "sketch_add_regular_polygon",
+            "error": "sides must be at least 3.",
+        }
+    if sides_val > MAX_POLYGON_SIDES:
+        return {
+            "ok": False,
+            "op": "sketch_add_regular_polygon",
+            "error": f"sides must not exceed {MAX_POLYGON_SIDES}.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_regular_polygon", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_regular_polygon", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_regular_polygon", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_regular_polygon", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part.LineSegment geometry for Sketcher
+        # Generate vertices on the circumcircle, rotating counter-clockwise from +X.
+        start_angle = math.radians(rotation_val)
+        vertices = []
+        for i in range(sides_val):
+            angle = start_angle + 2.0 * math.pi * i / sides_val
+            vertices.append(_FC.Vector(cx_val + radius_val * math.cos(angle), cy_val + radius_val * math.sin(angle), 0.0))
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add sketch geometry."
+            )
+
+        segments = []
+        for i in range(sides_val):
+            seg = Part.LineSegment(vertices[i], vertices[(i + 1) % sides_val])
+            segments.append(seg)
+            sketch.addGeometry(seg, False)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_regular_polygon",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "center_x": cx_val,
+            "center_y": cy_val,
+            "radius": radius_val,
+            "sides": sides_val,
+            "rotation_deg": rotation_val,
+            "edges_added": sides_val,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_add_polygon(params: dict[str, Any]) -> dict[str, Any]:
+    """Add a custom polygon from ordered ``{x, y}`` vertices to a sketch.
+
+    Each vertex is connected to the next and the last back to the first via
+    ``Part.LineSegment`` edges on Z=0.  Vertex order is preserved; no
+    reordering or repair is performed.  Consecutive duplicates, a repeated
+    final vertex equal to the first, and zero-area polygons are rejected.
+    Self-intersection is not validated.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    vertices_param = params.get("vertices")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate vertices is a list of {x, y} objects with finite numbers.
+    if not isinstance(vertices_param, list) or len(vertices_param) < 3:
+        return {
+            "ok": False,
+            "op": "sketch_add_polygon",
+            "error": "vertices must be a list of at least 3 {x, y} objects.",
+        }
+
+    vertex_coords = []
+    for idx, v in enumerate(vertices_param):
+        if not isinstance(v, dict):
+            return {
+                "ok": False,
+                "op": "sketch_add_polygon",
+                "error": f"vertices[{idx}] must be an object with 'x' and 'y'.",
+            }
+        try:
+            x_val = float(v.get("x"))
+            y_val = float(v.get("y"))
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "op": "sketch_add_polygon",
+                "error": f"vertices[{idx}] x and y must be finite numbers.",
+            }
+        if math.isnan(x_val) or math.isinf(x_val):
+            return {
+                "ok": False,
+                "op": "sketch_add_polygon",
+                "error": f"vertices[{idx}] x must be a finite number.",
+            }
+        if math.isnan(y_val) or math.isinf(y_val):
+            return {
+                "ok": False,
+                "op": "sketch_add_polygon",
+                "error": f"vertices[{idx}] y must be a finite number.",
+            }
+        vertex_coords.append((x_val, y_val))
+
+    # Reject consecutive duplicate vertices.
+    for i in range(len(vertex_coords) - 1):
+        if vertex_coords[i] == vertex_coords[i + 1]:
+            return {
+                "ok": False,
+                "op": "sketch_add_polygon",
+                "error": f"consecutive duplicate vertex at index {i+1}.",
+            }
+
+    # Reject a repeated final vertex equal to the first (closure is automatic).
+    if vertex_coords[-1] == vertex_coords[0]:
+        return {
+            "ok": False,
+            "op": "sketch_add_polygon",
+            "error": "final vertex duplicates the first; closure is automatic, do not repeat it.",
+        }
+
+    # Reject degenerate (zero area) polygons.
+    cross_sum = 0.0
+    for i in range(len(vertex_coords)):
+        x1, y1 = vertex_coords[i]
+        x2, y2 = vertex_coords[(i + 1) % len(vertex_coords)]
+        cross_sum += x1 * y2 - x2 * y1
+    if abs(cross_sum) <= 1e-12:
+        return {
+            "ok": False,
+            "op": "sketch_add_polygon",
+            "error": "polygon has zero area (degenerate or collinear vertices).",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_polygon", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_polygon", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_polygon", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_polygon", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part.LineSegment geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add sketch geometry."
+            )
+
+        vertices = [_FC.Vector(x, y, 0.0) for x, y in vertex_coords]
+        segments = []
+        n = len(vertices)
+        for i in range(n):
+            seg = Part.LineSegment(vertices[i], vertices[(i + 1) % n])
+            segments.append(seg)
+            sketch.addGeometry(seg, False)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_polygon",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "edges_added": n,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -2210,6 +2524,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,
     OP_SKETCH_ADD_TRIANGLE: _op_sketch_add_triangle,
     OP_SKETCH_ADD_ELLIPSE: _op_sketch_add_ellipse,
+    OP_SKETCH_ADD_REGULAR_POLYGON: _op_sketch_add_regular_polygon,
+    OP_SKETCH_ADD_POLYGON: _op_sketch_add_polygon,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

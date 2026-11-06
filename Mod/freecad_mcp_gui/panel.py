@@ -336,6 +336,66 @@ class MCPGuiPanel:
         ell_layout.addWidget(self._add_ell_button, 5, 0, 1, 2)
         layout.addWidget(ell_group)
 
+        # ---- Add Sketch Regular Polygon -----------------------------------
+        reg_group = QtWidgets.QGroupBox("Add Regular Polygon to Sketch")
+        reg_layout = QtWidgets.QGridLayout(reg_group)
+        self._reg_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        reg_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        reg_layout.addWidget(self._reg_sketch_input, 0, 1)
+        self._reg_cx_input = QtWidgets.QDoubleSpinBox()
+        self._reg_cy_input = QtWidgets.QDoubleSpinBox()
+        self._reg_radius_input = QtWidgets.QDoubleSpinBox()
+        self._reg_sides_input = QtWidgets.QSpinBox()
+        self._reg_rotation_input = QtWidgets.QDoubleSpinBox()
+        self._reg_radius_input.setRange(0.001, 100000.0)
+        self._reg_radius_input.setValue(5.0)
+        self._reg_radius_input.setDecimals(3)
+        self._reg_sides_input.setRange(3, 1000)
+        self._reg_sides_input.setValue(6)
+        self._reg_rotation_input.setRange(-360.0, 360.0)
+        self._reg_rotation_input.setValue(0.0)
+        self._reg_rotation_input.setDecimals(3)
+        for spin in (self._reg_cx_input, self._reg_cy_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        reg_layout.addWidget(QtWidgets.QLabel("Center X:"), 1, 0)
+        reg_layout.addWidget(self._reg_cx_input, 1, 1)
+        reg_layout.addWidget(QtWidgets.QLabel("Center Y:"), 2, 0)
+        reg_layout.addWidget(self._reg_cy_input, 2, 1)
+        reg_layout.addWidget(QtWidgets.QLabel("Radius:"), 3, 0)
+        reg_layout.addWidget(self._reg_radius_input, 3, 1)
+        reg_layout.addWidget(QtWidgets.QLabel("Sides:"), 4, 0)
+        reg_layout.addWidget(self._reg_sides_input, 4, 1)
+        reg_layout.addWidget(QtWidgets.QLabel("Rotation deg:"), 5, 0)
+        reg_layout.addWidget(self._reg_rotation_input, 5, 1)
+        note = QtWidgets.QLabel("Vertices on a circumcircle; rotation from +X axis; max 1000 sides.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        reg_layout.addWidget(note, 6, 0, 1, 2)
+        self._add_reg_button = QtWidgets.QPushButton("Add Regular Polygon")
+        self._add_reg_button.clicked.connect(self._on_sketch_add_regular_polygon)
+        reg_layout.addWidget(self._add_reg_button, 7, 0, 1, 2)
+        layout.addWidget(reg_group)
+
+        # ---- Add Sketch Custom Polygon ------------------------------------
+        cus_group = QtWidgets.QGroupBox("Add Custom Polygon to Sketch")
+        cus_layout = QtWidgets.QGridLayout(cus_group)
+        self._cus_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        cus_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        cus_layout.addWidget(self._cus_sketch_input, 0, 1)
+        self._cus_vertices_input = QtWidgets.QLineEdit('[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]')
+        cus_layout.addWidget(QtWidgets.QLabel("Vertices (JSON [{x,y},...]):"), 1, 0)
+        cus_layout.addWidget(self._cus_vertices_input, 1, 1)
+        note = QtWidgets.QLabel("At least 3 ordered vertices; closure is automatic; no self-intersection check.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        cus_layout.addWidget(note, 2, 0, 1, 2)
+        self._add_cus_button = QtWidgets.QPushButton("Add Custom Polygon")
+        self._add_cus_button.clicked.connect(self._on_sketch_add_polygon)
+        cus_layout.addWidget(self._add_cus_button, 3, 0, 1, 2)
+        layout.addWidget(cus_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -860,6 +920,106 @@ class MCPGuiPanel:
         self._objects_list.clear()
         self._set_status(
             f"Added ellipse (major {major_radius}, minor {minor_radius} at {center_x},{center_y}) "
+            f"to sketch '{sketch_name}' in workspace document '{document_id}' "
+            f"({total_edges} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Add Regular Polygon
+    # ------------------------------------------------------------------
+    def _on_sketch_add_regular_polygon(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._reg_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        center_x = self._reg_cx_input.value()
+        center_y = self._reg_cy_input.value()
+        radius = self._reg_radius_input.value()
+        sides = self._reg_sides_input.value()
+        rotation_deg = self._reg_rotation_input.value()
+        if radius <= 0:
+            self._set_status("Error: Radius must be positive.", error=True)
+            return
+        if sides < 3:
+            self._set_status("Error: Sides must be at least 3.", error=True)
+            return
+
+        response = self._run_operation(
+            "sketch_add_regular_polygon",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": radius,
+                "sides": sides,
+                "rotation_deg": rotation_deg,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        total_edges = (
+            result.get("total_edges", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Added regular polygon ({sides} sides, radius {radius} at {center_x},{center_y}, "
+            f"rotation {rotation_deg}deg) to sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' ({total_edges} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Add Custom Polygon
+    # ------------------------------------------------------------------
+    def _on_sketch_add_polygon(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._cus_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        vertices_text = self._cus_vertices_input.text().strip()
+        try:
+            import json as _json
+            vertices = _json.loads(vertices_text)
+        except Exception:
+            self._set_status("Error: Vertices must be valid JSON list of {x, y} objects.", error=True)
+            return
+
+        response = self._run_operation(
+            "sketch_add_polygon",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "vertices": vertices,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        total_edges = (
+            result.get("total_edges", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Added custom polygon ({len(vertices) if isinstance(vertices, list) else 0} vertices) "
             f"to sketch '{sketch_name}' in workspace document '{document_id}' "
             f"({total_edges} geometry).",
             error=False,

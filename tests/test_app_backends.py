@@ -123,6 +123,12 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("sketch_add_ellipse", {"center_x": 0, "center_y": 0, "major_radius": 0, "minor_radius": 1}, "major_radius must be positive"),
     ("sketch_add_ellipse", {"center_x": 0, "center_y": 0, "major_radius": 1, "minor_radius": -1}, "minor_radius must be positive"),
     ("sketch_add_ellipse", {"center_x": float("inf"), "center_y": 0, "major_radius": 1, "minor_radius": 1}, "must be a finite number"),
+    ("sketch_add_regular_polygon", {"center_x": 0, "center_y": 0, "radius": 0, "sides": 5}, "radius must be positive"),
+    ("sketch_add_regular_polygon", {"center_x": 0, "center_y": 0, "radius": 1, "sides": 2}, "sides must be at least 3"),
+    ("sketch_add_regular_polygon", {"center_x": 0, "center_y": 0, "radius": 1, "sides": 1001}, "sides must not exceed"),
+    ("sketch_add_regular_polygon", {"center_x": float("nan"), "center_y": 0, "radius": 1, "sides": 5}, "must be a finite number"),
+    ("sketch_add_polygon", {"vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}]}, "at least 3"),
+    ("sketch_add_polygon", {"vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": float("nan"), "y": 0}]}, "must be a finite number"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()
