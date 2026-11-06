@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from freecad_mcp.tools.modeling import TankParams, TubularCoilParams
+from freecad_mcp.tools.modeling import (
+    CreateSketchParams,
+    SketchAddCircleParams,
+    SketchAddRectangleParams,
+    TankParams,
+    TubularCoilParams,
+)
 
 
 def test_tank_params_valid():
@@ -60,3 +66,62 @@ def test_tubular_coil_params_negative_tube_radius():
     """Negative tube_radius is accepted by schema (validated manually in handler)."""
     tc = TubularCoilParams(document_id="mydoc", tube_radius=-5.0)
     assert tc.tube_radius == -5.0
+
+
+def test_create_sketch_params_valid():
+    """Valid CreateSketchParams should be accepted."""
+    p = CreateSketchParams(document_id="mydoc", sketch_name="MySketch")
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+
+
+def test_create_sketch_params_defaults():
+    """CreateSketchParams should default the sketch name."""
+    p = CreateSketchParams(document_id="mydoc")
+    assert p.sketch_name == "Sketch"
+
+
+def test_sketch_add_rectangle_params_valid():
+    """Valid SketchAddRectangleParams should be accepted."""
+    p = SketchAddRectangleParams(
+        document_id="mydoc", sketch_name="MySketch", x=1.0, y=2.0, width=10.0, height=5.0
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.x == 1.0
+    assert p.y == 2.0
+    assert p.width == 10.0
+    assert p.height == 5.0
+
+
+def test_sketch_add_rectangle_params_defaults():
+    """SketchAddRectangleParams should default x and y to zero."""
+    p = SketchAddRectangleParams(document_id="mydoc", sketch_name="MySketch", width=10.0, height=5.0)
+    assert p.x == 0.0
+    assert p.y == 0.0
+
+
+def test_sketch_add_circle_params_valid():
+    """Valid SketchAddCircleParams should be accepted."""
+    p = SketchAddCircleParams(document_id="mydoc", sketch_name="MySketch", center_x=1.0, center_y=2.0, radius=3.0)
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.center_x == 1.0
+    assert p.center_y == 2.0
+    assert p.radius == 3.0
+
+
+def test_sketch_add_circle_params_defaults():
+    """SketchAddCircleParams should default center to zero."""
+    p = SketchAddCircleParams(document_id="mydoc", sketch_name="MySketch", radius=3.0)
+    assert p.center_x == 0.0
+    assert p.center_y == 0.0
+
+
+def test_sketch_params_accept_zero_and_negative_at_schema_level():
+    """Invalid dimensions are accepted by the schema and rejected by the handler."""
+    p = SketchAddRectangleParams(document_id="mydoc", sketch_name="S", width=0, height=-5)
+    assert p.width == 0
+    assert p.height == -5
+    c = SketchAddCircleParams(document_id="mydoc", sketch_name="S", radius=0)
+    assert c.radius == 0

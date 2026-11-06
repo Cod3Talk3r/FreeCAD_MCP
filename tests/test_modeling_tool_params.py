@@ -41,6 +41,15 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
     ),
     (modeling.TankParams, {"document_id": "doc"}),
     (modeling.TubularCoilParams, {"document_id": "doc"}),
+    (modeling.CreateSketchParams, {"document_id": "doc", "sketch_name": "Sketch"}),
+    (
+        modeling.SketchAddRectangleParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "width": 1.0, "height": 1.0},
+    ),
+    (
+        modeling.SketchAddCircleParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "radius": 1.0},
+    ),
 )
 
 _MODELING_PARAMS_MODELS = tuple(model for model, _ in MODELING_PARAMS_CASES)

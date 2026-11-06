@@ -53,6 +53,9 @@ OP_BOOLEAN_CUT = "boolean_cut"
 OP_BOOLEAN_FUSE = "boolean_fuse"
 OP_BOOLEAN_COMMON = "boolean_common"
 OP_SET_PLACEMENT = "set_placement"
+OP_CREATE_SKETCH = "create_sketch"
+OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
+OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
 
 REQUEST_ENV = "FREECAD_MCP_REQUEST"
 RESPONSE_ENV = "FREECAD_MCP_RESPONSE"
@@ -502,6 +505,7 @@ def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:
         objects = []
         for obj in doc.Objects:
             obj_info = {"name": obj.Name, "type": obj.TypeId}
+            type_name = obj.TypeId.split("::")[-1]
             if hasattr(obj, "Shape") and obj.Shape is not None:
                 try:
                     obj_info["shape_type"] = obj.Shape.ShapeType
@@ -526,6 +530,12 @@ def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:
             if hasattr(obj, "Radius"):
                 try:
                     obj_info["radius"] = float(obj.Radius)
+                except Exception:
+                    pass
+            if type_name == "SketchObject":
+                try:
+                    obj_info["geometry_count"] = len(obj.Geometry)
+                    obj_info["constraint_count"] = len(obj.Constraints)
                 except Exception:
                     pass
             objects.append(obj_info)
@@ -575,6 +585,7 @@ def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "op": "inspect_object", "error": f"object '{object_name}' not found"}
 
         info = {"name": obj.Name, "type": obj.TypeId, "label": obj.Label}
+        type_name = obj.TypeId.split("::")[-1]
         if hasattr(obj, "Shape") and obj.Shape is not None:
             try:
                 info["shape_type"] = obj.Shape.ShapeType
@@ -601,6 +612,12 @@ def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
             info["material"] = obj.Material
         if hasattr(obj, "Color"):
             info["color"] = obj.Color
+        if type_name == "SketchObject":
+            try:
+                info["geometry_count"] = len(obj.Geometry)
+                info["constraint_count"] = len(obj.Constraints)
+            except Exception:
+                pass
     except Exception as exc:
         try:
             ws_mod.release_lock(lock_path, pid)
@@ -1615,6 +1632,306 @@ def _op_set_placement(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# New operation handlers for Milestone 9-A (Sketcher 2D geometry)
+# ---------------------------------------------------------------------------
+
+def _op_create_sketch(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a Sketcher::SketchObject on the XY plane in a document."""
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or "Sketch"
+    workspace_str = params.get("workspace") or ""
+
+    if not sketch_name.strip():
+        return {"ok": False, "op": "create_sketch", "error": "sketch_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "create_sketch", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "create_sketch", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "create_sketch", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    try:
+        import FreeCAD as _FC
+        import Sketcher  # noqa: F401,PLC0415 - register the Sketcher type with FreeCAD
+        doc = _open_or_create_document(_FC, wks, normalized)
+        obj_name = sketch_name
+        counter = 0
+        while doc.getObject(obj_name) is not None:
+            counter += 1
+            obj_name = f"{sketch_name}_{counter}"
+        sketch = doc.addObject("Sketcher::SketchObject", obj_name)
+        # Identity placement: the sketch plane coincides with the document XY plane.
+        sketch.Placement = _FC.Placement(_FC.Vector(0, 0, 0), _FC.Rotation())
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        # Increment revision after successful save
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_saved_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "create_sketch", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "create_sketch",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": obj_name,
+            "type": "Sketcher::SketchObject",
+            "plane": "XY",
+            "edges": 0,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_add_rectangle(params: dict[str, Any]) -> dict[str, Any]:
+    """Add four connected line segments forming a rectangle to an existing sketch.
+
+    The rectangle sides lie on the sketch XY plane (Z = 0), counter-clockwise
+    from the lower-left corner (x, y).  Segments share endpoints so the four
+    edges are topologically connected; no constraints are added.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    x = params.get("x")
+    y = params.get("y")
+    width = params.get("width")
+    height = params.get("height")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate numeric inputs: must be present, finite numbers (reject NaN/inf).
+    try:
+        x_val = float(x)
+        y_val = float(y)
+        width_val = float(width)
+        height_val = float(height)
+    except (TypeError, ValueError):
+        return {"ok": False, "op": "sketch_add_rectangle", "error": "x, y, width, and height must be numeric."}
+    for name, val in (("x", x_val), ("y", y_val), ("width", width_val), ("height", height_val)):
+        if math.isnan(val) or math.isinf(val):
+            return {"ok": False, "op": "sketch_add_rectangle", "error": f"{name} must be a finite number."}
+    if width_val <= 0:
+        return {"ok": False, "op": "sketch_add_rectangle", "error": "width must be a positive number."}
+    if height_val <= 0:
+        return {"ok": False, "op": "sketch_add_rectangle", "error": "height must be a positive number."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_rectangle", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_rectangle", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_rectangle", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_rectangle", "error": message}
+
+    try:
+        import FreeCAD as _FC
+        import Part  # noqa: F401,PLC0415 - Part.LineSegment geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add sketch geometry."
+            )
+
+        corners = [
+            _FC.Vector(x_val, y_val, 0.0),
+            _FC.Vector(x_val + width_val, y_val, 0.0),
+            _FC.Vector(x_val + width_val, y_val + height_val, 0.0),
+            _FC.Vector(x_val, y_val + height_val, 0.0),
+        ]
+        segments = [
+            Part.LineSegment(corners[0], corners[1]),
+            Part.LineSegment(corners[1], corners[2]),
+            Part.LineSegment(corners[2], corners[3]),
+            Part.LineSegment(corners[3], corners[0]),
+        ]
+        for segment in segments:
+            sketch.addGeometry(segment, False)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_rectangle",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "x": x_val,
+            "y": y_val,
+            "width": width_val,
+            "height": height_val,
+            "edges_added": 4,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_add_circle(params: dict[str, Any]) -> dict[str, Any]:
+    """Add a proper Sketcher circle geometry to an existing sketch.
+
+    The circle lies on the sketch XY plane (Z = 0).  No constraints are added.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    center_x = params.get("center_x")
+    center_y = params.get("center_y")
+    radius = params.get("radius")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate numeric inputs: must be present, finite numbers (reject NaN/inf).
+    try:
+        cx_val = float(center_x)
+        cy_val = float(center_y)
+        radius_val = float(radius)
+    except (TypeError, ValueError):
+        return {"ok": False, "op": "sketch_add_circle", "error": "center_x, center_y, and radius must be numeric."}
+    for name, val in (("center_x", cx_val), ("center_y", cy_val), ("radius", radius_val)):
+        if math.isnan(val) or math.isinf(val):
+            return {"ok": False, "op": "sketch_add_circle", "error": f"{name} must be a finite number."}
+    if radius_val <= 0:
+        return {"ok": False, "op": "sketch_add_circle", "error": "radius must be a positive number."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_circle", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_circle", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_circle", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_circle", "error": message}
+
+    try:
+        import FreeCAD as _FC
+        import Part  # noqa: F401,PLC0415 - Part.Circle geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add sketch geometry."
+            )
+
+        circle = Part.Circle(_FC.Vector(cx_val, cy_val, 0.0), _FC.Vector(0, 0, 1), radius_val)
+        sketch.addGeometry(circle, False)
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_circle",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "center_x": cx_val,
+            "center_y": cy_val,
+            "radius": radius_val,
+            "edges_added": 1,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -1635,6 +1952,9 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_BOOLEAN_FUSE: _op_boolean_fuse,
     OP_BOOLEAN_COMMON: _op_boolean_common,
     OP_SET_PLACEMENT: _op_set_placement,
+    OP_CREATE_SKETCH: _op_create_sketch,
+    OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
+    OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

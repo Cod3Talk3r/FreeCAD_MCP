@@ -184,6 +184,79 @@ class MCPGuiPanel:
         placement_layout.addWidget(self._set_placement_button, 4, 0, 1, 2)
         layout.addWidget(placement_group)
 
+        # ---- Create Sketch ----------------------------------------------
+        sketch_group = QtWidgets.QGroupBox("Create Sketch")
+        sketch_layout = QtWidgets.QGridLayout(sketch_group)
+        self._sketch_name_input = QtWidgets.QLineEdit("Sketch1")
+        sketch_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        sketch_layout.addWidget(self._sketch_name_input, 0, 1)
+        note = QtWidgets.QLabel("Sketch is created on the XY plane and starts empty.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        sketch_layout.addWidget(note, 1, 0, 1, 2)
+        self._create_sketch_button = QtWidgets.QPushButton("Create Sketch")
+        self._create_sketch_button.clicked.connect(self._on_create_sketch)
+        sketch_layout.addWidget(self._create_sketch_button, 2, 0, 1, 2)
+        layout.addWidget(sketch_group)
+
+        # ---- Add Sketch Rectangle ---------------------------------------
+        rect_group = QtWidgets.QGroupBox("Add Rectangle to Sketch")
+        rect_layout = QtWidgets.QGridLayout(rect_group)
+        self._rect_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        rect_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        rect_layout.addWidget(self._rect_sketch_input, 0, 1)
+        self._rect_x_input = QtWidgets.QDoubleSpinBox()
+        self._rect_y_input = QtWidgets.QDoubleSpinBox()
+        self._rect_width_input = QtWidgets.QDoubleSpinBox()
+        self._rect_height_input = QtWidgets.QDoubleSpinBox()
+        for spin in (self._rect_width_input, self._rect_height_input):
+            spin.setRange(0.001, 100000.0)
+            spin.setValue(10.0)
+            spin.setDecimals(3)
+        for spin in (self._rect_x_input, self._rect_y_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        rect_layout.addWidget(QtWidgets.QLabel("X:"), 1, 0)
+        rect_layout.addWidget(self._rect_x_input, 1, 1)
+        rect_layout.addWidget(QtWidgets.QLabel("Y:"), 2, 0)
+        rect_layout.addWidget(self._rect_y_input, 2, 1)
+        rect_layout.addWidget(QtWidgets.QLabel("Width:"), 3, 0)
+        rect_layout.addWidget(self._rect_width_input, 3, 1)
+        rect_layout.addWidget(QtWidgets.QLabel("Height:"), 4, 0)
+        rect_layout.addWidget(self._rect_height_input, 4, 1)
+        self._add_rect_button = QtWidgets.QPushButton("Add Rectangle")
+        self._add_rect_button.clicked.connect(self._on_sketch_add_rectangle)
+        rect_layout.addWidget(self._add_rect_button, 5, 0, 1, 2)
+        layout.addWidget(rect_group)
+
+        # ---- Add Sketch Circle ------------------------------------------
+        circ_group = QtWidgets.QGroupBox("Add Circle to Sketch")
+        circ_layout = QtWidgets.QGridLayout(circ_group)
+        self._circ_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        circ_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        circ_layout.addWidget(self._circ_sketch_input, 0, 1)
+        self._circ_cx_input = QtWidgets.QDoubleSpinBox()
+        self._circ_cy_input = QtWidgets.QDoubleSpinBox()
+        self._circ_radius_input = QtWidgets.QDoubleSpinBox()
+        self._circ_radius_input.setRange(0.001, 100000.0)
+        self._circ_radius_input.setValue(5.0)
+        self._circ_radius_input.setDecimals(3)
+        for spin in (self._circ_cx_input, self._circ_cy_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        circ_layout.addWidget(QtWidgets.QLabel("Center X:"), 1, 0)
+        circ_layout.addWidget(self._circ_cx_input, 1, 1)
+        circ_layout.addWidget(QtWidgets.QLabel("Center Y:"), 2, 0)
+        circ_layout.addWidget(self._circ_cy_input, 2, 1)
+        circ_layout.addWidget(QtWidgets.QLabel("Radius:"), 3, 0)
+        circ_layout.addWidget(self._circ_radius_input, 3, 1)
+        self._add_circle_button = QtWidgets.QPushButton("Add Circle")
+        self._add_circle_button.clicked.connect(self._on_sketch_add_circle)
+        circ_layout.addWidget(self._add_circle_button, 4, 0, 1, 2)
+        layout.addWidget(circ_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -479,6 +552,137 @@ class MCPGuiPanel:
         self._set_status(
             f"Set placement x={x}, y={y}, z={z} on object '{object_name}' "
             f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Create Sketch
+    # ------------------------------------------------------------------
+    def _on_create_sketch(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._sketch_name_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        response = self._run_operation(
+            "create_sketch",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        created_name = (
+            result.get("sketch_name", sketch_name) if isinstance(result, dict) else sketch_name
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Sketch '{created_name}' created on XY plane in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Add Rectangle
+    # ------------------------------------------------------------------
+    def _on_sketch_add_rectangle(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._rect_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        x = self._rect_x_input.value()
+        y = self._rect_y_input.value()
+        width = self._rect_width_input.value()
+        height = self._rect_height_input.value()
+        if width <= 0 or height <= 0:
+            self._set_status(
+                "Error: Width and height must be positive.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "sketch_add_rectangle",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        total_edges = (
+            result.get("total_edges", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Added rectangle ({width}x{height} at {x},{y}) to sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' ({total_edges} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Add Circle
+    # ------------------------------------------------------------------
+    def _on_sketch_add_circle(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._circ_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        center_x = self._circ_cx_input.value()
+        center_y = self._circ_cy_input.value()
+        radius = self._circ_radius_input.value()
+        if radius <= 0:
+            self._set_status("Error: Radius must be positive.", error=True)
+            return
+
+        response = self._run_operation(
+            "sketch_add_circle",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": radius,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        total_edges = (
+            result.get("total_edges", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Added circle (radius {radius} at {center_x},{center_y}) to sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' ({total_edges} geometry).",
             error=False,
         )
 

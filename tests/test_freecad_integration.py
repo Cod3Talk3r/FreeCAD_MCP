@@ -961,3 +961,300 @@ def test_real_freecad_set_placement_invalid_numeric(tmp_path: Path) -> None:
                 },
             )
         assert "finite" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_create_sketch_and_reopen(tmp_path: Path) -> None:
+    """Create a Sketcher::SketchObject on the XY plane; reopen from disk."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "sk1", "workspace": workspace})
+
+    sketch = bridge.run(
+        "create_sketch",
+        {"document_id": "sk1", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert sketch["sketch_name"] == "Sketch1"
+    assert sketch["type"] == "Sketcher::SketchObject"
+    assert sketch["plane"] == "XY"
+    assert sketch["edges"] == 0
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "sk1", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["type"] == "Sketcher::SketchObject"
+    assert info["geometry_count"] == 0
+    assert info["constraint_count"] == 0
+
+    reopened = bridge.run("list_objects", {"document_id": "sk1", "workspace": workspace})["objects"]
+    assert [obj["name"] for obj in reopened] == ["Sketch1"]
+    assert reopened[0]["geometry_count"] == 0
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_rectangle(tmp_path: Path) -> None:
+    """Add four connected line segments to a sketch; verify count and persistence."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skrect", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    rect = bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 10.0,
+            "y": 5.0,
+            "width": 20.0,
+            "height": 15.0,
+        },
+    )
+    assert rect["sketch_name"] == "Sketch1"
+    assert rect["x"] == pytest.approx(10.0)
+    assert rect["y"] == pytest.approx(5.0)
+    assert rect["width"] == pytest.approx(20.0)
+    assert rect["height"] == pytest.approx(15.0)
+    assert rect["edges_added"] == 4
+    assert rect["total_edges"] == 4
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skrect", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 4
+
+    # Reopen from disk (fresh FreeCAD process): geometry persists.
+    reopened = bridge.run("list_objects", {"document_id": "skrect", "workspace": workspace})["objects"]
+    assert [obj["name"] for obj in reopened] == ["Sketch1"]
+    assert reopened[0]["geometry_count"] == 4
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_circle(tmp_path: Path) -> None:
+    """Add a circle to a sketch; verify center/radius reporting and persistence."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skcirc", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    circle = bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 7.0,
+            "center_y": -3.0,
+            "radius": 4.0,
+        },
+    )
+    assert circle["sketch_name"] == "Sketch1"
+    assert circle["center_x"] == pytest.approx(7.0)
+    assert circle["center_y"] == pytest.approx(-3.0)
+    assert circle["radius"] == pytest.approx(4.0)
+    assert circle["edges_added"] == 1
+    assert circle["total_edges"] == 1
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skcirc", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 1
+
+    reopened = bridge.run("list_objects", {"document_id": "skcirc", "workspace": workspace})["objects"]
+    assert reopened[0]["geometry_count"] == 1
+
+
+@requires_freecad
+def test_real_freecad_multiple_geometries_same_sketch(tmp_path: Path) -> None:
+    """A rectangle and a circle accumulate in one sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skmulti", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skmulti", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skmulti",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 2.0,
+        },
+    )
+    circle = bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skmulti",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 1.0,
+            "center_y": 1.0,
+            "radius": 0.5,
+        },
+    )
+    assert circle["total_edges"] == 5
+
+    info = bridge.run(
+        "inspect_object",
+        {"document_id": "skmulti", "workspace": workspace, "object_name": "Sketch1"},
+    )["info"]
+    assert info["geometry_count"] == 5
+
+
+@requires_freecad
+def test_real_freecad_sketch_error_cases(tmp_path: Path) -> None:
+    """Missing sketch, wrong object type, and invalid dimensions are structured errors."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skerr", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skerr",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_rectangle",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "x": 0.0,
+                "y": 0.0,
+                "width": 2.0,
+                "height": 2.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type: a Part::Box is not a sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_rectangle",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "x": 0.0,
+                "y": 0.0,
+                "width": 2.0,
+                "height": 2.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Invalid dimensions.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_rectangle",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "x": 0.0,
+                "y": 0.0,
+                "width": 0.0,
+                "height": 2.0,
+            },
+        )
+    assert "width" in str(excinfo.value).lower()
+
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_circle",
+            {
+                "document_id": "skerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": -1.0,
+            },
+        )
+    assert "radius" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_save_reopen_and_existing_objects_unchanged(tmp_path: Path) -> None:
+    """Sketch geometry survives save/reopen and other objects in the document stay untouched."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skkeep", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skkeep",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skkeep", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skkeep",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 2.0,
+        },
+    )
+
+    # Fresh process reopen: box unchanged, sketch holds its geometry.
+    reopened = bridge.run("list_objects", {"document_id": "skkeep", "workspace": workspace})["objects"]
+    names = [obj["name"] for obj in reopened]
+    assert names == ["Box1", "Sketch1"]
+    box = next(obj for obj in reopened if obj["name"] == "Box1")
+    assert box["volume"] == pytest.approx(64.0)
+    sketch = next(obj for obj in reopened if obj["name"] == "Sketch1")
+    assert sketch["geometry_count"] == 4
+
+    box_info = bridge.run(
+        "inspect_object",
+        {"document_id": "skkeep", "workspace": workspace, "object_name": "Box1"},
+    )["info"]
+    assert box_info["Length"] == pytest.approx(4.0)
+    assert box_info["Width"] == pytest.approx(4.0)
+    assert box_info["Height"] == pytest.approx(4.0)

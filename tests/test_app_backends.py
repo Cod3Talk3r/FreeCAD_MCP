@@ -110,6 +110,15 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("tubular_coil", {"tube_radius": 0}, "tube_radius must be positive"),
     ("tubular_coil", {"num_turns": 0}, "num_turns must be positive"),
     ("tubular_coil", {"pitch": 0}, "pitch must be positive"),
+    ("create_sketch", {"sketch_name": ""}, "sketch_name must not be empty"),
+    ("create_sketch", {"sketch_name": "   "}, "sketch_name must not be empty"),
+    ("sketch_add_rectangle", {"x": 0, "y": 0, "width": 0, "height": 1}, "width must be positive"),
+    ("sketch_add_rectangle", {"x": 0, "y": 0, "width": 1, "height": -1}, "height must be positive"),
+    ("sketch_add_rectangle", {"x": float("nan"), "y": 0, "width": 1, "height": 1}, "must be a finite number"),
+    ("sketch_add_rectangle", {"x": 0, "y": 0, "width": float("inf"), "height": 1}, "must be a finite number"),
+    ("sketch_add_circle", {"center_x": 0, "center_y": 0, "radius": 0}, "radius must be positive"),
+    ("sketch_add_circle", {"center_x": 0, "center_y": 0, "radius": -1}, "radius must be positive"),
+    ("sketch_add_circle", {"center_x": float("nan"), "center_y": 0, "radius": 1}, "must be a finite number"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

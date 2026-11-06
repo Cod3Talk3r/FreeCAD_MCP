@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from freecad_mcp.freecad_bridge import FreeCadOperationError
@@ -39,6 +40,31 @@ def validate_direct_request(op: str, params: Any) -> None:
         for key, default in (("coil_radius", 10), ("tube_radius", 2), ("num_turns", 5), ("pitch", 5)):
             if params.get(key, default) <= 0:
                 raise ValueError(f"{key} must be positive")
+    elif op == "create_sketch":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+    elif op == "sketch_add_rectangle":
+        for key in ("x", "y", "width", "height"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+        if params["width"] <= 0:
+            raise ValueError("width must be positive")
+        if params["height"] <= 0:
+            raise ValueError("height must be positive")
+    elif op == "sketch_add_circle":
+        for key in ("center_x", "center_y", "radius"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+        if params["radius"] <= 0:
+            raise ValueError("radius must be positive")
 
 
 class DirectBackend:

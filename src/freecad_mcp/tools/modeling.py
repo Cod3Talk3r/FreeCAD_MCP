@@ -134,6 +134,45 @@ class BooleanCommonResult(BaseModel):
     height: Optional[float] = Field(default=None, description="Bounding-box height in mm.")
 
 
+class CreateSketchResult(BaseModel):
+    """Result of create_sketch."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the new Sketch object.")
+    type: str = Field(description="FreeCAD TypeId, 'Sketcher::SketchObject'.")
+    plane: str = Field(description="Initial sketch plane, e.g. 'XY'.")
+    edges: int = Field(description="Number of Sketcher geometries in the sketch (0 on creation).")
+
+
+class SketchAddRectangleResult(BaseModel):
+    """Result of sketch_add_rectangle."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the rectangle was added to.")
+    x: float = Field(description="X coordinate of the lower-left corner in millimetres.")
+    y: float = Field(description="Y coordinate of the lower-left corner in millimetres.")
+    width: float = Field(description="Rectangle width in millimetres.")
+    height: float = Field(description="Rectangle height in millimetres.")
+    edges_added: int = Field(description="Number of line segments added (4).")
+    total_edges: Optional[int] = Field(
+        default=None, description="Total Sketcher geometries in the sketch after adding the rectangle."
+    )
+
+
+class SketchAddCircleResult(BaseModel):
+    """Result of sketch_add_circle."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the circle was added to.")
+    center_x: float = Field(description="X coordinate of the circle centre in millimetres.")
+    center_y: float = Field(description="Y coordinate of the circle centre in millimetres.")
+    radius: float = Field(description="Circle radius in millimetres.")
+    edges_added: int = Field(description="Number of geometries added (1).")
+    total_edges: Optional[int] = Field(
+        default=None, description="Total Sketcher geometries in the sketch after adding the circle."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -203,6 +242,43 @@ class SetPlacementParams(BaseModel):
     x: float = Field(description="New X position in millimetres.")
     y: float = Field(description="New Y position in millimetres.")
     z: float = Field(description="New Z position in millimetres.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class CreateSketchParams(BaseModel):
+    """Parameters for creating a Sketcher::SketchObject."""
+
+    document_id: str = Field(description="Existing document to add the sketch to.")
+    sketch_name: str = Field(default="Sketch", description="Name for the new Sketch object.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddRectangleParams(BaseModel):
+    """Parameters for adding a rectangle to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the rectangle to.")
+    x: float = Field(default=0.0, description="X coordinate of the lower-left corner in millimetres.")
+    y: float = Field(default=0.0, description="Y coordinate of the lower-left corner in millimetres.")
+    width: float = Field(description="Rectangle width in millimetres (must be positive).")
+    height: float = Field(description="Rectangle height in millimetres (must be positive).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddCircleParams(BaseModel):
+    """Parameters for adding a circle to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the circle to.")
+    center_x: float = Field(default=0.0, description="X coordinate of the circle centre in millimetres.")
+    center_y: float = Field(default=0.0, description="Y coordinate of the circle centre in millimetres.")
+    radius: float = Field(description="Circle radius in millimetres (must be positive).")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -948,6 +1024,135 @@ def _register_tools(server: Any, settings: Settings) -> None:
             height=result.get("height"),
         )
 
+    # ------------------------------------------------------------------
+    # create_sketch
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="create_sketch",
+        title="Create sketch",
+        description=(
+            "Add a Sketcher::SketchObject to an existing document.  The sketch "
+            "lies on the XY plane and starts empty; use ``sketch_add_rectangle`` "
+            "or ``sketch_add_circle`` to add editable Sketcher geometry.  The "
+            "document is locked exclusively during the operation and saved "
+            "atomically."
+        ),
+        structured_output=True,
+    )
+    def create_sketch_tool(params: CreateSketchParams) -> CreateSketchResult:
+        """Create a sketch and return its info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "create_sketch", bridge_params)
+
+        return CreateSketchResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            type=result.get("type", "Sketcher::SketchObject"),
+            plane=result.get("plane", "XY"),
+            edges=result.get("edges", 0),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_rectangle
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_rectangle",
+        title="Add rectangle to sketch",
+        description=(
+            "Add four connected line segments forming a rectangle to an "
+            "existing Sketcher::SketchObject.  The rectangle lies on the "
+            "sketch XY plane (Z = 0), counter-clockwise from the lower-left "
+            "corner (*x*, *y*).  *width* and *height* must be positive "
+            "numbers (millimetres).  No constraints are added, so the "
+            "geometry stays editable.  The document is locked exclusively "
+            "during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_rectangle_tool(params: SketchAddRectangleParams) -> SketchAddRectangleResult:
+        """Add a rectangle to a sketch and return its info."""
+        # Manual finite-number / positive-dimension check before delegating.
+        validate_direct_request("sketch_add_rectangle", params.model_dump())
+        for name, value in (
+            ("x", params.x),
+            ("y", params.y),
+            ("width", params.width),
+            ("height", params.height),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "x": params.x,
+            "y": params.y,
+            "width": params.width,
+            "height": params.height,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_rectangle", bridge_params)
+
+        return SketchAddRectangleResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            x=result.get("x", params.x),
+            y=result.get("y", params.y),
+            width=result.get("width", params.width),
+            height=result.get("height", params.height),
+            edges_added=result.get("edges_added", 4),
+            total_edges=result.get("total_edges"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_circle
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_circle",
+        title="Add circle to sketch",
+        description=(
+            "Add a proper Sketcher circle geometry to an existing "
+            "Sketcher::SketchObject.  The circle lies on the sketch XY plane "
+            "(Z = 0) at (*center_x*, *center_y*) with *radius*.  *radius* "
+            "must be a positive number (millimetres).  No constraints are "
+            "added, so the geometry stays editable.  The document is locked "
+            "exclusively during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_circle_tool(params: SketchAddCircleParams) -> SketchAddCircleResult:
+        """Add a circle to a sketch and return its info."""
+        validate_direct_request("sketch_add_circle", params.model_dump())
+        for name, value in (("center_x", params.center_x), ("center_y", params.center_y), ("radius", params.radius)):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "center_x": params.center_x,
+            "center_y": params.center_y,
+            "radius": params.radius,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_circle", bridge_params)
+
+        return SketchAddCircleResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            center_x=result.get("center_x", params.center_x),
+            center_y=result.get("center_y", params.center_y),
+            radius=result.get("radius", params.radius),
+            edges_added=result.get("edges_added", 1),
+            total_edges=result.get("total_edges"),
+        )
 
 # ------------------------------------------------------------------
     # tank
