@@ -318,6 +318,28 @@ class SketchEditEllipseResult(BaseModel):
     )
 
 
+class SketchEditRectangleResult(BaseModel):
+    """Result of sketch_edit_rectangle."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the rectangle was edited in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the edited rectangle."
+    )
+    x: float = Field(description="New lower-left X coordinate in millimetres (before rotation).")
+    y: float = Field(description="New lower-left Y coordinate in millimetres (before rotation).")
+    width: float = Field(description="New rectangle width in millimetres.")
+    height: float = Field(description="New rectangle height in millimetres.")
+    rotation_deg: float = Field(description="Rotation around the rectangle centre, in degrees.")
+    geometry_count: int = Field(description="Number of geometries in the sketch after editing.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -555,6 +577,26 @@ class SketchEditEllipseParams(BaseModel):
     )
     rotation_deg: float = Field(
         default=0.0, description="Major-axis rotation counter-clockwise from +X, in degrees."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditRectangleParams(BaseModel):
+    """Parameters for editing rectangle geometry in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to edit the rectangle in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the rectangle to edit."
+    )
+    x: float = Field(default=0.0, description="New lower-left X coordinate in millimetres (before rotation).")
+    y: float = Field(default=0.0, description="New lower-left Y coordinate in millimetres (before rotation).")
+    width: float = Field(default=5.0, description="New rectangle width in millimetres (must be positive).")
+    height: float = Field(default=3.0, description="New rectangle height in millimetres (must be positive).")
+    rotation_deg: float = Field(
+        default=0.0, description="Rotation around the rectangle centre, in degrees."
     )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
@@ -1872,6 +1914,68 @@ def _register_tools(server: Any, settings: Settings) -> None:
             center_y=result.get("center_y", params.center_y),
             major_radius=result.get("major_radius", params.major_radius),
             minor_radius=result.get("minor_radius", params.minor_radius),
+            rotation_deg=result.get("rotation_deg", params.rotation_deg),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_rectangle
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_rectangle",
+        title="Edit rectangle geometry in sketch",
+        description=(
+            "Edit an existing rectangle (four connected LineSegment geometries) "
+            "in a Sketcher::SketchObject.  *geometry_index* is the index of the "
+            "first line of the rectangle; the rectangle occupies four consecutive "
+            "geometry slots.  *x*, *y* are the new lower-left corner before "
+            "rotation, and *width*, *height* are positive dimensions "
+            "(millimetres).  *rotation_deg* rotates the rectangle around its "
+            "centre (degrees; default 0 = axis-aligned).  Validates that the "
+            "four geometries actually form a connected rectangle, that all values "
+            "are finite, and that no constraints reference the geometry being "
+            "edited.  The document is locked exclusively during the operation, "
+            "recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_rectangle_tool(params: SketchEditRectangleParams) -> SketchEditRectangleResult:
+        """Edit rectangle geometry in a sketch and return its info."""
+        validate_direct_request("sketch_edit_rectangle", params.model_dump())
+        for name, value in (
+            ("x", params.x),
+            ("y", params.y),
+            ("width", params.width),
+            ("height", params.height),
+            ("rotation_deg", params.rotation_deg),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "x": params.x,
+            "y": params.y,
+            "width": params.width,
+            "height": params.height,
+            "rotation_deg": params.rotation_deg,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_edit_rectangle", bridge_params)
+
+        return SketchEditRectangleResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_index=result.get("geometry_index", params.geometry_index),
+            x=result.get("x", params.x),
+            y=result.get("y", params.y),
+            width=result.get("width", params.width),
+            height=result.get("height", params.height),
             rotation_deg=result.get("rotation_deg", params.rotation_deg),
             geometry_count=result.get("geometry_count", 0),
             constraint_count_before=result.get("constraint_count_before"),

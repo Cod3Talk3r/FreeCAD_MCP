@@ -3703,3 +3703,560 @@ def test_handle_request_dispatches_sketch_edit_ellipse(
     assert response["result"]["center_y"] == 4.0
     assert response["result"]["major_radius"] == 6.0
     assert response["result"]["minor_radius"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-C: Edit sketch rectangle geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def _make_rectangle(sketch, x=0.0, y=0.0, width=2.0, height=1.0):
+    """Add four connected LineSegment geometries forming an axis-aligned rectangle."""
+    sketch.Geometry.append(LineSegment(_FakePoint(x, y, 0), _FakePoint(x + width, y, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x + width, y, 0), _FakePoint(x + width, y + height, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x + width, y + height, 0), _FakePoint(x, y + height, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x, y + height, 0), _FakePoint(x, y, 0)))
+
+
+def test_sketch_edit_rectangle_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch, x=1.0, y=1.0, width=4.0, height=2.0)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 10.0,
+            "y": 20.0,
+            "width": 6.0,
+            "height": 4.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_rectangle"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["x"] == 10.0
+    assert result["result"]["y"] == 20.0
+    assert result["result"]["width"] == 6.0
+    assert result["result"]["height"] == 4.0
+    assert result["result"]["rotation_deg"] == 0.0
+    assert result["result"]["geometry_count"] == 4
+
+    # All four lines updated and still connected.
+    bottom, right, top, left = sketch.Geometry[0], sketch.Geometry[1], sketch.Geometry[2], sketch.Geometry[3]
+    assert bottom.StartPoint.x == 10.0 and bottom.StartPoint.y == 20.0
+    assert bottom.EndPoint.x == 16.0 and bottom.EndPoint.y == 20.0
+    assert right.StartPoint.x == 16.0 and right.StartPoint.y == 20.0
+    assert right.EndPoint.x == 16.0 and right.EndPoint.y == 24.0
+    assert top.StartPoint.x == 16.0 and top.StartPoint.y == 24.0
+    assert top.EndPoint.x == 10.0 and top.EndPoint.y == 24.0
+    assert left.StartPoint.x == 10.0 and left.StartPoint.y == 24.0
+    assert left.EndPoint.x == 10.0 and left.EndPoint.y == 20.0
+
+
+def test_sketch_edit_rectangle_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "rot", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch, x=0.0, y=0.0, width=2.0, height=2.0)
+
+    # 90-degree rotation around centre (1, 1).
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "rot",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 2.0,
+            "rotation_deg": 90.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["rotation_deg"] == 90.0
+    assert result["result"]["geometry_count"] == 4
+
+    # A 90-degree rotation of a square centred at (1,1) keeps the same axis-aligned
+    # bounding box; verify edges remain connected and perpendicular.
+    bottom, right, top, left = sketch.Geometry[0], sketch.Geometry[1], sketch.Geometry[2], sketch.Geometry[3]
+    assert bottom.EndPoint.x == right.StartPoint.x
+    assert bottom.EndPoint.y == right.StartPoint.y
+    assert right.EndPoint.x == top.StartPoint.x
+    assert right.EndPoint.y == top.StartPoint.y
+    assert top.EndPoint.x == left.StartPoint.x
+    assert top.EndPoint.y == left.StartPoint.y
+    assert left.EndPoint.x == bottom.StartPoint.x
+    assert left.EndPoint.y == bottom.StartPoint.y
+
+
+def test_sketch_edit_rectangle_mixed_sketch_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    _make_rectangle(sketch, x=5.0, y=5.0, width=2.0, height=1.0)
+    sketch.Geometry.append(LineSegment(_FakePoint(9, 9, 0), _FakePoint(10, 9, 0)))
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "x": 50.0,
+            "y": 50.0,
+            "width": 3.0,
+            "height": 2.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 6
+
+    # Unrelated geometry preserved.
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert isinstance(sketch.Geometry[5], LineSegment)
+    assert sketch.Geometry[5].StartPoint.x == 9.0
+
+    # Rectangle updated at indices 1-4.
+    rect = sketch.Geometry[1:5]
+    assert all(isinstance(g, LineSegment) for g in rect)
+    assert rect[0].StartPoint.x == 50.0 and rect[0].StartPoint.y == 50.0
+    assert rect[0].EndPoint.x == 53.0 and rect[0].EndPoint.y == 50.0
+
+
+def test_sketch_edit_rectangle_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    # Rectangle needs four slots; index 1 would need slots 1-4 but only 0-3 exist.
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "boolean" in result["error"].lower()
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editfloat", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editfloat",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "integer" in result["error"].lower()
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_edit_rectangle_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "editwtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editwtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_rectangle_rejects_non_rectangle_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnonrect", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    # Four lines that do NOT form a rectangle (disconnected / wrong angles).
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(5, 5, 0), _FakePoint(6, 5, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(9, 9, 0), _FakePoint(10, 9, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(0, 1, 0)))
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editnonrect",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "rectangle" in result["error"].lower()
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_non_line_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnonline", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+    sketch.Geometry.append(Circle(_FakePoint(1, 0, 0), 1.0))
+    sketch.Geometry.append(Circle(_FakePoint(1, 1, 0), 1.0))
+    sketch.Geometry.append(Circle(_FakePoint(0, 1, 0), 1.0))
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editnonline",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "LineSegment" in result["error"]
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnan", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    base = {
+        "document_id": "editnan",
+        "workspace": str(tmp_path),
+        "sketch_name": "Sketch1",
+        "geometry_index": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "width": 2.0,
+        "height": 1.0,
+    }
+    for bad_key, bad_value in (
+        ("x", float("nan")),
+        ("y", float("inf")),
+        ("width", float("nan")),
+        ("height", float("-inf")),
+        ("rotation_deg", float("nan")),
+    ):
+        bad = dict(base)
+        bad[bad_key] = bad_value
+        result = runner._op_sketch_edit_rectangle(bad)
+        assert result["ok"] is False, bad_key
+        assert result["op"] == "sketch_edit_rectangle"
+        assert "finite" in result["error"].lower()
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_zero_width(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editzero", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editzero",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 0.0,
+            "height": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "positive" in result["error"].lower()
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_negative_height(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": -1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "positive" in result["error"].lower()
+    assert len(sketch.Geometry) == 4
+
+
+def test_sketch_edit_rectangle_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch)
+
+    # Add a constraint that references geometry index 1 (second line of rectangle).
+    class _FakeConstraint:
+        First = -1
+        FirstPos = 1
+        Second = 1
+        SecondPos = 0
+        Third = -1
+        ThirdPos = 0
+
+    sketch.Constraints.append(_FakeConstraint())
+
+    result = runner._op_sketch_edit_rectangle(
+        {
+            "document_id": "editcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 2.0,
+            "y": 3.0,
+            "width": 4.0,
+            "height": 5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_rectangle"
+    assert "constraint" in result["error"].lower()
+    assert len(sketch.Geometry) == 4  # unchanged
+
+
+def test_handle_request_dispatches_sketch_edit_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editdisp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle(sketch, x=1.0, y=1.0, width=4.0, height=2.0)
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_EDIT_RECTANGLE,
+            "params": {
+                "document_id": "editdisp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "x": 3.0,
+                "y": 4.0,
+                "width": 6.0,
+                "height": 2.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_rectangle"
+    assert response["result"]["geometry_index"] == 0
+    assert response["result"]["x"] == 3.0
+    assert response["result"]["y"] == 4.0
+    assert response["result"]["width"] == 6.0
+    assert response["result"]["height"] == 2.0

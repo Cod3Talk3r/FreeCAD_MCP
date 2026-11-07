@@ -65,6 +65,7 @@ OP_SKETCH_DELETE_GEOMETRY = "sketch_delete_geometry"
 OP_SKETCH_EDIT_LINE = "sketch_edit_line"
 OP_SKETCH_EDIT_CIRCLE = "sketch_edit_circle"
 OP_SKETCH_EDIT_ELLIPSE = "sketch_edit_ellipse"
+OP_SKETCH_EDIT_RECTANGLE = "sketch_edit_rectangle"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -3512,6 +3513,357 @@ def _op_sketch_edit_ellipse(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_edit_rectangle(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit an existing rectangle (four connected LineSegment geometries) in a sketch.
+
+    ``geometry_index`` is the index of the *first* line of the rectangle; the
+    rectangle occupies four consecutive geometry slots (index through index+3).
+    The four lines are mutated in place and the full geometry list is reassigned
+    to ``sketch.Geometry``, preserving each geometry's index, construction state,
+    and geometry ID, as well as all unrelated geometry.
+
+    Parameters:
+        *x*, *y*: new lower-left corner before rotation (millimetres).
+        *width*, *height*: positive dimensions in millimetres.
+        *rotation_deg*: optional rotation around the rectangle centre, in
+            degrees (default 0 = axis-aligned).
+
+    The operation validates that the four consecutive geometries actually form a
+    connected rectangle before mutating anything, and rejects constraint-dependent
+    geometry following the same policy as sketch_edit_line/circle/ellipse.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    geometry_index_param = params.get("geometry_index")
+    x_param = params.get("x")
+    y_param = params.get("y")
+    width_param = params.get("width")
+    height_param = params.get("height")
+    rotation_deg_param = params.get("rotation_deg", 0)
+    workspace_str = params.get("workspace") or ""
+
+    # Validate geometry_index: must be an integer, not a boolean.
+    if isinstance(geometry_index_param, bool) or not isinstance(geometry_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_rectangle",
+            "error": "geometry_index must be an integer (boolean values are not accepted).",
+        }
+
+    geometry_index = geometry_index_param
+
+    # Validate all numeric inputs are finite numbers.
+    try:
+        x_val = float(x_param)
+        y_val = float(y_param)
+        width_val = float(width_param)
+        height_val = float(height_param)
+        rotation_val = float(rotation_deg_param)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_edit_rectangle",
+            "error": "x, y, width, height, and rotation_deg must be finite numbers.",
+        }
+    for name, val in (
+        ("x", x_val),
+        ("y", y_val),
+        ("width", width_val),
+        ("height", height_val),
+        ("rotation_deg", rotation_val),
+    ):
+        if math.isnan(val) or math.isinf(val):
+            return {
+                "ok": False,
+                "op": "sketch_edit_rectangle",
+                "error": f"{name} must be a finite number.",
+            }
+
+    # Reject zero or negative dimensions.
+    if width_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_edit_rectangle",
+            "error": "width must be a positive number.",
+        }
+    if height_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_edit_rectangle",
+            "error": "height must be a positive number.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_edit_rectangle", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_edit_rectangle", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_edit_rectangle", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_edit_rectangle", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot edit sketch geometry."
+            )
+
+        # Get current geometry count for range validation.
+        try:
+            geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_count = 0
+
+        # A rectangle occupies exactly four consecutive geometry slots.
+        last_index = geometry_index + 3
+        if geometry_index < 0 or last_index >= geometry_count:
+            return _fail(
+                f"geometry_index {geometry_index} is out of range for a rectangle "
+                f"(valid range: 0 to {geometry_count - 4})."
+            )
+
+        # Load the four candidate geometries.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        rect_geometries = [geometry_list[geometry_index + i] for i in range(4)]
+
+        # Verify all four are line segments.
+        geom_types = [type(g).__name__ for g in rect_geometries]
+        if any(gt != "LineSegment" for gt in geom_types):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a rectangle: "
+                f"found types {geom_types}; expected four LineSegment geometries."
+            )
+
+        # Verify the four lines form a connected, valid rectangle.
+        points: list[_FC.Vector] = []
+        try:
+            for seg in rect_geometries:
+                sp = getattr(seg, "StartPoint", None)
+                ep = getattr(seg, "EndPoint", None)
+                if sp is None or ep is None:
+                    return _fail(
+                        f"geometry at index {geometry_index} does not form a valid rectangle: "
+                        f"a line segment is missing StartPoint or EndPoint."
+                    )
+                points.append(_FC.Vector(float(sp.x), float(sp.y), float(sp.z)))
+                points.append(_FC.Vector(float(ep.x), float(ep.y), float(ep.z)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a valid rectangle: {exc}"
+            )
+
+        # points = [P0,P1, P1,P2, P2,P3, P3,P0] -> unique corners P0..P3
+        p0, p1, p2, p3 = points[0], points[1], points[3], points[5]
+        # Fourth point of last segment should equal p0.
+        eps = 1e-9
+
+        def _same_point(a: _FC.Vector, b: _FC.Vector) -> bool:
+            return (
+                abs(a.x - b.x) <= eps
+                and abs(a.y - b.y) <= eps
+                and abs(a.z - b.z) <= eps
+            )
+
+        # Connectivity: P1==P1, P2==P2, P3==P3, P0(last)==P0(first).
+        if not (_same_point(points[1], points[2]) and _same_point(points[3], points[4])):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a connected rectangle: "
+                f"line endpoints do not match."
+            )
+        if not _same_point(points[5], points[6]) or not _same_point(points[7], points[0]):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a connected rectangle: "
+                f"line endpoints do not match."
+            )
+
+        # Edge vectors.
+        e0x, e0y = p1.x - p0.x, p1.y - p0.y  # bottom
+        e1x, e1y = p2.x - p1.x, p2.y - p1.y  # right
+        e2x, e2y = p3.x - p2.x, p3.y - p2.y  # top
+        e3x, e3y = p0.x - p3.x, p0.y - p3.y  # left
+
+        def _dot(ax, ay, bx, by) -> float:
+            return ax * bx + ay * by
+
+        def _len2(ax, ay) -> float:
+            return ax * ax + ay * ay
+
+        # Right angles: adjacent edges perpendicular.
+        if (
+            abs(_dot(e0x, e0y, e1x, e1y)) > eps * max(1.0, _len2(e0x, e0y), _len2(e1x, e1y))
+            or abs(_dot(e1x, e1y, e2x, e2y)) > eps * max(1.0, _len2(e1x, e1y), _len2(e2x, e2y))
+            or abs(_dot(e2x, e2y, e3x, e3y)) > eps * max(1.0, _len2(e2x, e2y), _len2(e3x, e3y))
+            or abs(_dot(e3x, e3y, e0x, e0y)) > eps * max(1.0, _len2(e3x, e3y), _len2(e0x, e0y))
+        ):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a rectangle: "
+                f"adjacent edges are not perpendicular."
+            )
+        # Opposite edges equal length and parallel.
+        if (
+            abs(_len2(e0x, e0y) - _len2(e2x, e2y)) > eps * max(1.0, _len2(e0x, e0y), _len2(e2x, e2y))
+            or abs(_len2(e1x, e1y) - _len2(e3x, e3y)) > eps * max(1.0, _len2(e1x, e1y), _len2(e3x, e3y))
+        ):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a rectangle: "
+                f"opposite edges are not equal."
+            )
+        if _len2(e0x, e0y) <= eps or _len2(e1x, e1y) <= eps:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a rectangle: "
+                f"degenerate (zero-length) edge."
+            )
+
+        # Constraint safety: reject if any constraint references any of the four
+        # geometry indices.  FreeCAD Constraint.First/Second/Third are integer
+        # geometry indices, so we can check them directly.
+        constraint_references_geometry = False
+        constraint_count_before = None
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+            for constraint in getattr(sketch, "Constraints", []):
+                for i in range(4):
+                    idx = geometry_index + i
+                    if (
+                        getattr(constraint, "First", None) == idx
+                        or getattr(constraint, "Second", None) == idx
+                        or getattr(constraint, "Third", None) == idx
+                    ):
+                        constraint_references_geometry = True
+                        break
+                if constraint_references_geometry:
+                    break
+        except Exception:
+            pass
+
+        if constraint_references_geometry:
+            return _fail(
+                f"Cannot edit geometry at indices {geometry_index} through {last_index}: "
+                f"one or more lines are referenced by constraints. Remove the constraints first."
+            )
+
+        # Compute the rotated corners around the rectangle centre.
+        centre_x = x_val + width_val / 2.0
+        centre_y = y_val + height_val / 2.0
+        angle = math.radians(rotation_val)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+
+        # Local corners relative to centre: lower-left, lower-right,
+        # upper-right, upper-left.
+        local_corners = [
+            (-width_val / 2.0, -height_val / 2.0),
+            (width_val / 2.0, -height_val / 2.0),
+            (width_val / 2.0, height_val / 2.0),
+            (-width_val / 2.0, height_val / 2.0),
+        ]
+        corners: list[_FC.Vector] = []
+        for lx, ly in local_corners:
+            rx = centre_x + lx * cos_a - ly * sin_a
+            ry = centre_y + lx * sin_a + ly * cos_a
+            corners.append(_FC.Vector(rx, ry, 0.0))
+
+        # Mutate the four existing line geometries in place, preserving index,
+        # construction state, and geometry ID.  Reassign the full geometry list.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+            new_segments = [
+                (corners[0], corners[1]),  # bottom
+                (corners[1], corners[2]),  # right
+                (corners[2], corners[3]),  # top
+                (corners[3], corners[0]),  # left
+            ]
+            for i in range(4):
+                target_geometry = geometry_list[geometry_index + i]
+                start_pt, end_pt = new_segments[i]
+                target_geometry.StartPoint = start_pt
+                target_geometry.EndPoint = end_pt
+                geometry_list[geometry_index + i] = target_geometry
+            sketch.Geometry = geometry_list
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _fail(
+                f"FreeCAD Sketcher API does not support editing rectangle geometry: {exc}"
+            )
+
+        doc.recompute()
+
+        # Record constraint count after edit.
+        constraint_count_after = None
+        try:
+            constraint_count_after = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            pass
+
+        # Get updated geometry count.
+        updated_geometry_count = None
+        try:
+            updated_geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            pass
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_edit_rectangle",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "geometry_index": geometry_index,
+            "x": x_val,
+            "y": y_val,
+            "width": width_val,
+            "height": height_val,
+            "rotation_deg": rotation_val,
+            "geometry_count": updated_geometry_count if updated_geometry_count is not None else geometry_count,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": constraint_count_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -3544,6 +3896,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_EDIT_LINE: _op_sketch_edit_line,
     OP_SKETCH_EDIT_CIRCLE: _op_sketch_edit_circle,
     OP_SKETCH_EDIT_ELLIPSE: _op_sketch_edit_ellipse,
+    OP_SKETCH_EDIT_RECTANGLE: _op_sketch_edit_rectangle,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

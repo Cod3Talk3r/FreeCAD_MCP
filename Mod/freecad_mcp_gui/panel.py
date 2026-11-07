@@ -537,6 +537,50 @@ class MCPGuiPanel:
         edit_ell_layout.addWidget(self._edit_ellipse_button, 7, 0, 1, 2)
         layout.addWidget(edit_ell_group)
 
+        # ---- Edit Rectangle Geometry in Sketch ----------------------------------
+        edit_rect_group = QtWidgets.QGroupBox("Edit Rectangle Geometry in Sketch")
+        edit_rect_layout = QtWidgets.QGridLayout(edit_rect_group)
+        self._edit_rectangle_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_sketch_input, 0, 1)
+        self._edit_rectangle_index_input = QtWidgets.QSpinBox()
+        self._edit_rectangle_index_input.setRange(0, 1000000)
+        self._edit_rectangle_index_input.setValue(0)
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_index_input, 1, 1)
+        self._edit_rectangle_x_input = QtWidgets.QDoubleSpinBox()
+        self._edit_rectangle_y_input = QtWidgets.QDoubleSpinBox()
+        self._edit_rectangle_width_input = QtWidgets.QDoubleSpinBox()
+        self._edit_rectangle_height_input = QtWidgets.QDoubleSpinBox()
+        self._edit_rectangle_rotation_input = QtWidgets.QDoubleSpinBox()
+        self._edit_rectangle_width_input.setRange(0.001, 100000.0)
+        self._edit_rectangle_width_input.setValue(5.0)
+        self._edit_rectangle_width_input.setDecimals(3)
+        self._edit_rectangle_height_input.setRange(0.001, 100000.0)
+        self._edit_rectangle_height_input.setValue(3.0)
+        self._edit_rectangle_height_input.setDecimals(3)
+        self._edit_rectangle_rotation_input.setRange(-360.0, 360.0)
+        self._edit_rectangle_rotation_input.setValue(0.0)
+        self._edit_rectangle_rotation_input.setDecimals(3)
+        for spin in (self._edit_rectangle_x_input, self._edit_rectangle_y_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Lower-left X:"), 2, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_x_input, 2, 1)
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Lower-left Y:"), 3, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_y_input, 3, 1)
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Width:"), 4, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_width_input, 4, 1)
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Height:"), 5, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_height_input, 5, 1)
+        edit_rect_layout.addWidget(QtWidgets.QLabel("Rotation deg:"), 6, 0)
+        edit_rect_layout.addWidget(self._edit_rectangle_rotation_input, 6, 1)
+        self._edit_rectangle_button = QtWidgets.QPushButton("Edit Rectangle")
+        self._edit_rectangle_button.clicked.connect(self._on_sketch_edit_rectangle)
+        edit_rect_layout.addWidget(self._edit_rectangle_button, 7, 0, 1, 2)
+        layout.addWidget(edit_rect_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1407,6 +1451,57 @@ class MCPGuiPanel:
             f"Edited ellipse at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
             f"center=({center_x},{center_y}) major={major_radius} minor={minor_radius} "
+            f"rotation={rotation_deg}deg ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Edit Rectangle Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_edit_rectangle(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._edit_rectangle_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._edit_rectangle_index_input.value()
+        x = self._edit_rectangle_x_input.value()
+        y = self._edit_rectangle_y_input.value()
+        width = self._edit_rectangle_width_input.value()
+        height = self._edit_rectangle_height_input.value()
+        rotation_deg = self._edit_rectangle_rotation_input.value()
+
+        response = self._run_operation(
+            "sketch_edit_rectangle",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "rotation_deg": rotation_deg,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Edited rectangle at index {geometry_index} in sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' "
+            f"lower-left=({x},{y}) width={width} height={height} "
             f"rotation={rotation_deg}deg ({geometry_count} geometry).",
             error=False,
         )

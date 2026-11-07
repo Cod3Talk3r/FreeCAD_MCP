@@ -2621,3 +2621,201 @@ def test_real_freecad_sketch_edit_ellipse_errors(tmp_path: Path) -> None:
             },
         )
     assert "greater than or equal" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_rectangle(tmp_path: Path) -> None:
+    """Edit a rectangle in a sketch; verify dimensions, rotation, persistence, and mixed sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditrect", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add geometry: rectangle (4 lines) at indices 0-3.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skeditrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 1.0,
+            "y": 1.0,
+            "width": 4.0,
+            "height": 2.0,
+        },
+    )
+
+    # Inspect: should have 4 geometries (the rectangle's 4 lines).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 4
+    assert all(g["type"] == "LineSegment" for g in info["geometries"])
+
+    # Edit the rectangle (index 0) to new dimensions and rotation.
+    result = bridge.run(
+        "sketch_edit_rectangle",
+        {
+            "document_id": "skeditrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "x": 10.0,
+            "y": 20.0,
+            "width": 6.0,
+            "height": 4.0,
+            "rotation_deg": 30.0,
+        },
+    )
+    assert result["geometry_index"] == 0
+    assert result["x"] == pytest.approx(10.0)
+    assert result["y"] == pytest.approx(20.0)
+    assert result["width"] == pytest.approx(6.0)
+    assert result["height"] == pytest.approx(4.0)
+    assert result["rotation_deg"] == pytest.approx(30.0)
+    assert result["geometry_count"] == 4
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 4
+    assert len(info["geometries"]) == 4
+
+    # All four geometries should still be connected LineSegments.
+    geometries = info["geometries"]
+    assert all(g["type"] == "LineSegment" for g in geometries)
+
+    # Verify connectivity: end of each line == start of next, last end == first start.
+    for i in range(4):
+        end = geometries[i]["end_point"]
+        start = geometries[(i + 1) % 4]["start_point"]
+        assert end["x"] == pytest.approx(start["x"])
+        assert end["y"] == pytest.approx(start["y"])
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_rectangle_errors(tmp_path: Path) -> None:
+    """sketch_edit_rectangle returns structured errors for missing sketch, wrong type, non-rectangle, out-of-range, bad dimensions."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skederrect", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skederrect",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skederrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skederrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_rectangle",
+            {
+                "document_id": "skederrect",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 2.0,
+                "height": 1.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_rectangle",
+            {
+                "document_id": "skederrect",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 2.0,
+                "height": 1.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Out-of-range index (only 4 geometries, need 4 slots starting at index).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_rectangle",
+            {
+                "document_id": "skederrect",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 1,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 2.0,
+                "height": 1.0,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Zero width.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_rectangle",
+            {
+                "document_id": "skederrect",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 0.0,
+                "height": 1.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
+
+    # Negative height.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_rectangle",
+            {
+                "document_id": "skederrect",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "x": 0.0,
+                "y": 0.0,
+                "width": 2.0,
+                "height": -1.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()

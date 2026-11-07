@@ -150,6 +150,14 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("sketch_edit_ellipse", {"sketch_name": "S", "geometry_index": 0, "center_x": 0, "center_y": 0, "major_radius": 0, "minor_radius": 1}, "major_radius must be positive"),
     ("sketch_edit_ellipse", {"sketch_name": "S", "geometry_index": 0, "center_x": 0, "center_y": 0, "major_radius": 1, "minor_radius": -1}, "minor_radius must be positive"),
     ("sketch_edit_ellipse", {"sketch_name": "S", "geometry_index": 0, "center_x": 0, "center_y": 0, "major_radius": 2, "minor_radius": 5}, "greater than or equal"),
+    ("sketch_edit_rectangle", {"sketch_name": ""}, "sketch_name must not be empty"),
+    ("sketch_edit_rectangle", {"sketch_name": "   "}, "sketch_name must not be empty"),
+    ("sketch_edit_rectangle", {"sketch_name": "S", "geometry_index": True}, "boolean values are not accepted"),
+    ("sketch_edit_rectangle", {"sketch_name": "S", "geometry_index": 1.5}, "must be an integer"),
+    ("sketch_edit_rectangle", {"sketch_name": "S", "geometry_index": 0, "x": float("nan")}, "must be a finite number"),
+    ("sketch_edit_rectangle", {"sketch_name": "S", "geometry_index": 0, "x": 0, "y": 0, "width": float("inf")}, "must be a finite number"),
+    ("sketch_edit_rectangle", {"sketch_name": "S", "geometry_index": 0, "x": 0, "y": 0, "width": 0, "height": 1}, "width must be positive"),
+    ("sketch_edit_rectangle", {"sketch_name": "S", "geometry_index": 0, "x": 0, "y": 0, "width": 2, "height": -1}, "height must be positive"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()
