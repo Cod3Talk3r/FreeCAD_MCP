@@ -66,6 +66,7 @@ OP_SKETCH_EDIT_LINE = "sketch_edit_line"
 OP_SKETCH_EDIT_CIRCLE = "sketch_edit_circle"
 OP_SKETCH_EDIT_ELLIPSE = "sketch_edit_ellipse"
 OP_SKETCH_EDIT_RECTANGLE = "sketch_edit_rectangle"
+OP_SKETCH_EDIT_TRIANGLE = "sketch_edit_triangle"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -3864,6 +3865,328 @@ def _op_sketch_edit_rectangle(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_edit_triangle(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit an existing triangle (three connected LineSegment geometries) in a sketch.
+
+    ``geometry_index`` is the index of the *first* line of the triangle; the
+    triangle occupies three consecutive geometry slots (index through index+2).
+    The three lines are mutated in place and the full geometry list is reassigned
+    to ``sketch.Geometry``, preserving each geometry's index, construction state,
+    and geometry ID, as well as all unrelated geometry.
+
+    *vertices* is a list of exactly three ordered 2D vertices, each with *x* and *y*
+    keys.  Vertex ordering is preserved.  The three segments connect vertex 0->1,
+    1->2, and 2->0 (closing back to the start).
+
+    The operation validates that the three consecutive geometries actually form a
+    connected, non-degenerate triangle before mutating anything, and rejects
+    constraint-dependent geometry following the same policy as
+    sketch_edit_line/circle/ellipse/rectangle.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    geometry_index_param = params.get("geometry_index")
+    vertices_param = params.get("vertices")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate geometry_index: must be an integer, not a boolean.
+    if isinstance(geometry_index_param, bool) or not isinstance(geometry_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_triangle",
+            "error": "geometry_index must be an integer (boolean values are not accepted).",
+        }
+
+    geometry_index = geometry_index_param
+
+    # Validate vertices: must be a list/tuple of exactly three objects with x and y.
+    if not isinstance(vertices_param, (list, tuple)) or len(vertices_param) != 3:
+        return {
+            "ok": False,
+            "op": "sketch_edit_triangle",
+            "error": "vertices must be a list of exactly three {x, y} objects.",
+        }
+
+    verts = []
+    for i, v in enumerate(vertices_param):
+        if not isinstance(v, dict) or "x" not in v or "y" not in v:
+            return {
+                "ok": False,
+                "op": "sketch_edit_triangle",
+                "error": f"vertices[{i}] must be an object with 'x' and 'y' keys.",
+            }
+        try:
+            vx = float(v["x"])
+            vy = float(v["y"])
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "op": "sketch_edit_triangle",
+                "error": f"vertices[{i}] x and y must be finite numbers.",
+            }
+        if math.isnan(vx) or math.isinf(vx) or math.isnan(vy) or math.isinf(vy):
+            return {
+                "ok": False,
+                "op": "sketch_edit_triangle",
+                "error": f"vertices[{i}] x and y must be finite numbers.",
+            }
+        verts.append((vx, vy))
+
+    # Reject duplicate adjacent vertices (zero-length edge) and collinear /
+    # zero-area triangles via the signed area check.
+    (x1, y1), (x2, y2), (x3, y3) = verts
+
+    eps = 1e-9
+    def _same_point(ax, ay, bx, by) -> bool:
+        return abs(ax - bx) <= eps and abs(ay - by) <= eps
+
+    if (
+        _same_point(x1, y1, x2, y2)
+        or _same_point(x2, y2, x3, y3)
+        or _same_point(x3, y3, x1, y1)
+    ):
+        return {
+            "ok": False,
+            "op": "sketch_edit_triangle",
+            "error": "triangle vertices must be distinct; duplicate adjacent vertices produce a zero-length edge.",
+        }
+
+    # Reject collinear / zero-area triangles using signed area.
+    cross = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
+    scale_sq = max(
+        1.0,
+        (x2 - x1) ** 2 + (y2 - y1) ** 2,
+        (x3 - x2) ** 2 + (y3 - y2) ** 2,
+        (x1 - x3) ** 2 + (y1 - y3) ** 2,
+    )
+    if abs(cross) <= eps * scale_sq:
+        return {
+            "ok": False,
+            "op": "sketch_edit_triangle",
+            "error": "triangle is degenerate or collinear (zero signed area).",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_edit_triangle", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_edit_triangle", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_edit_triangle", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_edit_triangle", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot edit sketch geometry."
+            )
+
+        # Get current geometry count for range validation.
+        try:
+            geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_count = 0
+
+        # A triangle occupies exactly three consecutive geometry slots.
+        last_index = geometry_index + 2
+        if geometry_index < 0 or last_index >= geometry_count:
+            return _fail(
+                f"geometry_index {geometry_index} is out of range for a triangle "
+                f"(valid range: 0 to {geometry_count - 3})."
+            )
+
+        # Load the three candidate geometries.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        tri_geometries = [geometry_list[geometry_index + i] for i in range(3)]
+
+        # Verify all three are line segments.
+        geom_types = [type(g).__name__ for g in tri_geometries]
+        if any(gt != "LineSegment" for gt in geom_types):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a triangle: "
+                f"found types {geom_types}; expected three LineSegment geometries."
+            )
+
+        # Verify the three lines form a connected, valid triangle.
+        points: list[_FC.Vector] = []
+        try:
+            for seg in tri_geometries:
+                sp = getattr(seg, "StartPoint", None)
+                ep = getattr(seg, "EndPoint", None)
+                if sp is None or ep is None:
+                    return _fail(
+                        f"geometry at index {geometry_index} does not form a valid triangle: "
+                        f"a line segment is missing StartPoint or EndPoint."
+                    )
+                points.append(_FC.Vector(float(sp.x), float(sp.y), float(sp.z)))
+                points.append(_FC.Vector(float(ep.x), float(ep.y), float(ep.z)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a valid triangle: {exc}"
+            )
+
+        # points = [P0,P1, P1,P2, P2,P0] for a closed triangle where segment 2
+        # goes from vertex 2 back to vertex 0.
+        p0, p1, p2 = points[0], points[1], points[3]
+
+        # Connectivity: segment[1].start == segment[0].end, segment[2].start ==
+        # segment[1].end, segment[2].end == segment[0].start (closed loop).
+        if (
+            not _same_point(points[1].x, points[1].y, points[2].x, points[2].y)
+            or not _same_point(points[3].x, points[3].y, points[4].x, points[4].y)
+            or not _same_point(points[5].x, points[5].y, points[0].x, points[0].y)
+        ):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a connected triangle: "
+                f"line endpoints do not match."
+            )
+
+        # Edge vectors.
+        e0x, e0y = p1.x - p0.x, p1.y - p0.y  # edge 0->1
+        e1x, e1y = p2.x - p1.x, p2.y - p1.y  # edge 1->2
+        e2x, e2y = p0.x - p2.x, p0.y - p2.y  # edge 2->0
+
+        def _dot(ax, ay, bx, by) -> float:
+            return ax * bx + ay * by
+
+        def _len2(ax, ay) -> float:
+            return ax * ax + ay * ay
+
+        # Non-degenerate: cross product (signed area * 2) must be non-zero.
+        cross_existing = e0x * e1y - e0y * e1x
+        if abs(cross_existing) <= eps * max(1.0, _len2(e0x, e0y), _len2(e1x, e1y)):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a triangle: "
+                f"edges are collinear or degenerate (zero area)."
+            )
+
+        # Constraint safety: reject if any constraint references any of the three
+        # geometry indices.
+        constraint_references_geometry = False
+        constraint_count_before = None
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+            for constraint in getattr(sketch, "Constraints", []):
+                for i in range(3):
+                    idx = geometry_index + i
+                    if (
+                        getattr(constraint, "First", None) == idx
+                        or getattr(constraint, "Second", None) == idx
+                        or getattr(constraint, "Third", None) == idx
+                    ):
+                        constraint_references_geometry = True
+                        break
+                if constraint_references_geometry:
+                    break
+        except Exception:
+            pass
+
+        if constraint_references_geometry:
+            return _fail(
+                f"Cannot edit geometry at indices {geometry_index} through {last_index}: "
+                f"one or more lines are referenced by constraints. Remove the constraints first."
+            )
+
+        # Mutate the three existing line geometries in place, preserving index,
+        # construction state, and geometry ID.  Reassign the full geometry list.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+            new_segments = [
+                (_FC.Vector(x1, y1, 0.0), _FC.Vector(x2, y2, 0.0)),  # edge 0->1
+                (_FC.Vector(x2, y2, 0.0), _FC.Vector(x3, y3, 0.0)),  # edge 1->2
+                (_FC.Vector(x3, y3, 0.0), _FC.Vector(x1, y1, 0.0)),  # edge 2->0 (closing)
+            ]
+            for i in range(3):
+                target_geometry = geometry_list[geometry_index + i]
+                start_pt, end_pt = new_segments[i]
+                target_geometry.StartPoint = start_pt
+                target_geometry.EndPoint = end_pt
+                geometry_list[geometry_index + i] = target_geometry
+            sketch.Geometry = geometry_list
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _fail(
+                f"FreeCAD Sketcher API does not support editing triangle geometry: {exc}"
+            )
+
+        doc.recompute()
+
+        # Record constraint count after edit.
+        constraint_count_after = None
+        try:
+            constraint_count_after = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            pass
+
+        # Get updated geometry count.
+        updated_geometry_count = None
+        try:
+            updated_geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            pass
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_edit_triangle",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "geometry_index": geometry_index,
+            "vertices": [
+                {"x": x1, "y": y1},
+                {"x": x2, "y": y2},
+                {"x": x3, "y": y3},
+            ],
+            "geometry_count": updated_geometry_count if updated_geometry_count is not None else geometry_count,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": constraint_count_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
 #: The complete, explicit set of operations the bridge can perform.
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
@@ -3897,6 +4220,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_EDIT_CIRCLE: _op_sketch_edit_circle,
     OP_SKETCH_EDIT_ELLIPSE: _op_sketch_edit_ellipse,
     OP_SKETCH_EDIT_RECTANGLE: _op_sketch_edit_rectangle,
+    OP_SKETCH_EDIT_TRIANGLE: _op_sketch_edit_triangle,
 }
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:

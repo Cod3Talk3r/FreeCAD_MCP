@@ -223,6 +223,25 @@ def validate_direct_request(op: str, params: Any) -> None:
             raise ValueError("width must be positive")
         if converted["height"] <= 0:
             raise ValueError("height must be positive")
+    elif op == "sketch_edit_triangle":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        geometry_index = params.get("geometry_index")
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
+            raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
+        vertices = params.get("vertices")
+        if not isinstance(vertices, list) or len(vertices) != 3:
+            raise ValueError("vertices must be a list of exactly three {x, y} objects.")
+        for i, v in enumerate(vertices):
+            if not isinstance(v, dict) or "x" not in v or "y" not in v:
+                raise ValueError(f"vertices[{i}] must be an object with 'x' and 'y' keys.")
+            for name in ("x", "y"):
+                try:
+                    value = float(v[name])
+                except (TypeError, ValueError):
+                    raise ValueError(f"vertices[{i}].{name} must be a finite number.")
+                if not math.isfinite(value):
+                    raise ValueError(f"vertices[{i}].{name} must be a finite number.")
 
 
 class DirectBackend:

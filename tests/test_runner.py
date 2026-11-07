@@ -4260,3 +4260,529 @@ def test_handle_request_dispatches_sketch_edit_rectangle(
     assert response["result"]["y"] == 4.0
     assert response["result"]["width"] == 6.0
     assert response["result"]["height"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-D: Edit sketch triangle geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def _make_triangle(sketch, x1=0.0, y1=0.0, x2=4.0, y2=0.0, x3=2.0, y3=3.0):
+    """Add three connected LineSegment geometries forming a triangle."""
+    sketch.Geometry.append(LineSegment(_FakePoint(x1, y1, 0), _FakePoint(x2, y2, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x2, y2, 0), _FakePoint(x3, y3, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x3, y3, 0), _FakePoint(x1, y1, 0)))
+
+
+def test_sketch_edit_triangle_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch, x1=0.0, y1=0.0, x2=4.0, y2=0.0, x3=2.0, y3=3.0)
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 10.0, "y": 20.0},
+                {"x": 16.0, "y": 20.0},
+                {"x": 13.0, "y": 25.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_triangle"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["vertices"] == [
+        {"x": 10.0, "y": 20.0},
+        {"x": 16.0, "y": 20.0},
+        {"x": 13.0, "y": 25.0},
+    ]
+    assert result["result"]["geometry_count"] == 3
+
+    # All three lines updated and still connected/closed.
+    s0, s1, s2 = sketch.Geometry[0], sketch.Geometry[1], sketch.Geometry[2]
+    assert s0.StartPoint.x == 10.0 and s0.StartPoint.y == 20.0
+    assert s0.EndPoint.x == 16.0 and s0.EndPoint.y == 20.0
+    assert s1.StartPoint.x == 16.0 and s1.StartPoint.y == 20.0
+    assert s1.EndPoint.x == 13.0 and s1.EndPoint.y == 25.0
+    assert s2.StartPoint.x == 13.0 and s2.StartPoint.y == 25.0
+    assert s2.EndPoint.x == 10.0 and s2.EndPoint.y == 20.0
+
+
+def test_sketch_edit_triangle_mixed_sketch_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    _make_triangle(sketch, x1=5.0, y1=5.0, x2=7.0, y2=5.0, x3=6.0, y3=7.0)
+    sketch.Geometry.append(LineSegment(_FakePoint(9, 9, 0), _FakePoint(10, 9, 0)))
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "vertices": [
+                {"x": 50.0, "y": 50.0},
+                {"x": 54.0, "y": 50.0},
+                {"x": 52.0, "y": 55.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 5
+
+    # Unrelated geometry preserved.
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert isinstance(sketch.Geometry[4], LineSegment)
+    assert sketch.Geometry[4].StartPoint.x == 9.0
+
+    # Triangle updated at indices 1-3.
+    tri = sketch.Geometry[1:4]
+    assert all(isinstance(g, LineSegment) for g in tri)
+    assert tri[0].StartPoint.x == 50.0 and tri[0].StartPoint.y == 50.0
+    assert tri[0].EndPoint.x == 54.0 and tri[0].EndPoint.y == 50.0
+    assert tri[1].EndPoint.x == 52.0 and tri[1].EndPoint.y == 55.0
+    assert tri[2].EndPoint.x == 50.0 and tri[2].EndPoint.y == 50.0
+
+
+def test_sketch_edit_triangle_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    # Triangle needs three slots; index 1 would need slots 1-3 but only 0-2 exist.
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "boolean" in result["error"].lower()
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editfloat", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editfloat",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "integer" in result["error"].lower()
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_edit_triangle_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "editwtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editwtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_triangle_rejects_non_triangle_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnontri", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    # Three lines that do NOT form a connected triangle.
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(5, 5, 0), _FakePoint(6, 5, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(9, 9, 0), _FakePoint(10, 9, 0)))
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editnontri",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "triangle" in result["error"].lower()
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_non_line_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnonline", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+    sketch.Geometry.append(Circle(_FakePoint(1, 0, 0), 1.0))
+    sketch.Geometry.append(Circle(_FakePoint(0, 1, 0), 1.0))
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editnonline",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "LineSegment" in result["error"]
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_non_finite_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnan", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    base = {
+        "document_id": "editnan",
+        "workspace": str(tmp_path),
+        "sketch_name": "Sketch1",
+        "geometry_index": 0,
+        "vertices": [
+            {"x": 0.0, "y": 0.0},
+            {"x": 2.0, "y": 0.0},
+            {"x": 1.0, "y": 1.0},
+        ],
+    }
+    bad_cases = [
+        {**base, "vertices": [{"x": float("nan"), "y": 0.0}, {"x": 2.0, "y": 0.0}, {"x": 1.0, "y": 1.0}]},
+        {**base, "vertices": [{"x": 0.0, "y": float("inf")}, {"x": 2.0, "y": 0.0}, {"x": 1.0, "y": 1.0}]},
+        {**base, "vertices": [{"x": 0.0, "y": 0.0}, {"x": float("-inf"), "y": 0.0}, {"x": 1.0, "y": 1.0}]},
+    ]
+    for bad in bad_cases:
+        result = runner._op_sketch_edit_triangle(bad)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_edit_triangle"
+        assert "finite" in result["error"].lower()
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_duplicate_vertex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editdup", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    # Duplicate adjacent vertices: vertex 0 == vertex 1.
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editdup",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "duplicate" in result["error"].lower()
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_collinear_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editcoll", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    # Collinear vertices: all on a straight line.
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editcoll",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "collinear" in result["error"].lower() or "degenerate" in result["error"].lower()
+    assert len(sketch.Geometry) == 3
+
+
+def test_sketch_edit_triangle_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch)
+
+    # Add a constraint that references geometry index 1 (second line of triangle).
+    class _FakeConstraint:
+        First = -1
+        FirstPos = 1
+        Second = 1
+        SecondPos = 0
+        Third = -1
+        ThirdPos = 0
+
+    sketch.Constraints.append(_FakeConstraint())
+
+    result = runner._op_sketch_edit_triangle(
+        {
+            "document_id": "editcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 2.0, "y": 3.0},
+                {"x": 6.0, "y": 3.0},
+                {"x": 4.0, "y": 7.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_triangle"
+    assert "constraint" in result["error"].lower()
+    assert len(sketch.Geometry) == 3  # unchanged
+
+
+def test_handle_request_dispatches_sketch_edit_triangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editdisp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_triangle(sketch, x1=0.0, y1=0.0, x2=4.0, y2=0.0, x3=2.0, y3=3.0)
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_EDIT_TRIANGLE,
+            "params": {
+                "document_id": "editdisp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 3.0, "y": 4.0},
+                    {"x": 7.0, "y": 4.0},
+                    {"x": 5.0, "y": 7.0},
+                ],
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_triangle"
+    assert response["result"]["geometry_index"] == 0
+    assert response["result"]["vertices"] == [
+        {"x": 3.0, "y": 4.0},
+        {"x": 7.0, "y": 4.0},
+        {"x": 5.0, "y": 7.0},
+    ]

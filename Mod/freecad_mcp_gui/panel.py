@@ -581,6 +581,31 @@ class MCPGuiPanel:
         edit_rect_layout.addWidget(self._edit_rectangle_button, 7, 0, 1, 2)
         layout.addWidget(edit_rect_group)
 
+        # ---- Edit Triangle Geometry in Sketch ----------------------------------
+        edit_tri_group = QtWidgets.QGroupBox("Edit Triangle Geometry in Sketch")
+        edit_tri_layout = QtWidgets.QGridLayout(edit_tri_group)
+        self._edit_triangle_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        edit_tri_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        edit_tri_layout.addWidget(self._edit_triangle_sketch_input, 0, 1)
+        self._edit_triangle_index_input = QtWidgets.QSpinBox()
+        self._edit_triangle_index_input.setRange(0, 1000000)
+        self._edit_triangle_index_input.setValue(0)
+        edit_tri_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        edit_tri_layout.addWidget(self._edit_triangle_index_input, 1, 1)
+        self._edit_triangle_vertices_input = QtWidgets.QLineEdit(
+            '[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]'
+        )
+        edit_tri_layout.addWidget(QtWidgets.QLabel("Vertices (JSON [{x,y},...]):"), 2, 0)
+        edit_tri_layout.addWidget(self._edit_triangle_vertices_input, 2, 1)
+        note = QtWidgets.QLabel("Exactly three ordered vertices; the segments connect 0->1, 1->2, and 2->0.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        edit_tri_layout.addWidget(note, 3, 0, 1, 2)
+        self._edit_triangle_button = QtWidgets.QPushButton("Edit Triangle")
+        self._edit_triangle_button.clicked.connect(self._on_sketch_edit_triangle)
+        edit_tri_layout.addWidget(self._edit_triangle_button, 4, 0, 1, 2)
+        layout.addWidget(edit_tri_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1503,6 +1528,57 @@ class MCPGuiPanel:
             f"in workspace document '{document_id}' "
             f"lower-left=({x},{y}) width={width} height={height} "
             f"rotation={rotation_deg}deg ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Edit Triangle Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_edit_triangle(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._edit_triangle_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._edit_triangle_index_input.value()
+        vertices_text = self._edit_triangle_vertices_input.text().strip()
+        try:
+            import json as _json
+            vertices = _json.loads(vertices_text)
+        except Exception:
+            self._set_status(
+                "Error: Vertices must be valid JSON list of three {x, y} objects.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "sketch_edit_triangle",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+                "vertices": vertices,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        verts = result.get("vertices", vertices) if isinstance(result, dict) else vertices
+        self._set_status(
+            f"Edited triangle at index {geometry_index} in sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' "
+            f"vertices={verts} ({geometry_count} geometry).",
             error=False,
         )
 

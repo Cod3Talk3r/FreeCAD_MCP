@@ -2819,3 +2819,192 @@ def test_real_freecad_sketch_edit_rectangle_errors(tmp_path: Path) -> None:
             },
         )
     assert "positive" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_triangle(tmp_path: Path) -> None:
+    """Edit a triangle in a sketch; verify vertices, connectivity, persistence, and mixed sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skedittri", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skedittri", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add geometry: triangle (3 lines) at indices 0-2.
+    bridge.run(
+        "sketch_add_triangle",
+        {
+            "document_id": "skedittri",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x1": 1.0,
+            "y1": 1.0,
+            "x2": 5.0,
+            "y2": 1.0,
+            "x3": 3.0,
+            "y3": 4.0,
+        },
+    )
+
+    # Inspect: should have 3 geometries (the triangle's 3 lines).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skedittri", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 3
+    assert all(g["type"] == "LineSegment" for g in info["geometries"])
+
+    # Edit the triangle (index 0) to new vertices.
+    result = bridge.run(
+        "sketch_edit_triangle",
+        {
+            "document_id": "skedittri",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 10.0, "y": 20.0},
+                {"x": 16.0, "y": 20.0},
+                {"x": 13.0, "y": 25.0},
+            ],
+        },
+    )
+    assert result["geometry_index"] == 0
+    assert result["vertices"] == [
+        {"x": 10.0, "y": 20.0},
+        {"x": 16.0, "y": 20.0},
+        {"x": 13.0, "y": 25.0},
+    ]
+    assert result["geometry_count"] == 3
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skedittri", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 3
+    assert len(info["geometries"]) == 3
+
+    # All three geometries should still be connected LineSegments forming a closed loop.
+    geometries = info["geometries"]
+    assert all(g["type"] == "LineSegment" for g in geometries)
+
+    # Verify connectivity: end of each line == start of next, last end == first start.
+    for i in range(3):
+        end = geometries[i]["end_point"]
+        start = geometries[(i + 1) % 3]["start_point"]
+        assert end["x"] == pytest.approx(start["x"])
+        assert end["y"] == pytest.approx(start["y"])
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_triangle_errors(tmp_path: Path) -> None:
+    """sketch_edit_triangle returns structured errors for missing sketch, wrong type, non-triangle, out-of-range, bad/degenerate vertices."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skedertri", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skedertri",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skedertri", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_triangle",
+        {
+            "document_id": "skedertri",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x1": 0.0,
+            "y1": 0.0,
+            "x2": 2.0,
+            "y2": 0.0,
+            "x3": 1.0,
+            "y3": 1.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_triangle",
+            {
+                "document_id": "skedertri",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 2.0, "y": 0.0},
+                    {"x": 1.0, "y": 1.0},
+                ],
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_triangle",
+            {
+                "document_id": "skedertri",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 2.0, "y": 0.0},
+                    {"x": 1.0, "y": 1.0},
+                ],
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Out-of-range index (only 3 geometries, need 3 slots starting at index).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_triangle",
+            {
+                "document_id": "skedertri",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 1,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 2.0, "y": 0.0},
+                    {"x": 1.0, "y": 1.0},
+                ],
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Degenerate / collinear vertices.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_triangle",
+            {
+                "document_id": "skedertri",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 2.0, "y": 0.0},
+                    {"x": 4.0, "y": 0.0},
+                ],
+            },
+        )
+    assert "collinear" in str(excinfo.value).lower() or "degenerate" in str(excinfo.value).lower()

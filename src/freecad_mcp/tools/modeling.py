@@ -340,6 +340,26 @@ class SketchEditRectangleResult(BaseModel):
     )
 
 
+class SketchEditTriangleResult(BaseModel):
+    """Result of sketch_edit_triangle."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the triangle was edited in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the edited triangle."
+    )
+    vertices: list[dict[str, float]] = Field(
+        description="Three ordered vertices as [{x, y}, {x, y}, {x, y}] in millimetres."
+    )
+    geometry_count: int = Field(description="Number of geometries in the sketch after editing.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -597,6 +617,22 @@ class SketchEditRectangleParams(BaseModel):
     height: float = Field(default=3.0, description="New rectangle height in millimetres (must be positive).")
     rotation_deg: float = Field(
         default=0.0, description="Rotation around the rectangle centre, in degrees."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditTriangleParams(BaseModel):
+    """Parameters for editing triangle geometry in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to edit the triangle in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the triangle to edit."
+    )
+    vertices: list[dict[str, float]] = Field(
+        description="Three ordered vertices as [{x, y}, {x, y}, {x, y}] in millimetres."
     )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
@@ -1977,6 +2013,57 @@ def _register_tools(server: Any, settings: Settings) -> None:
             width=result.get("width", params.width),
             height=result.get("height", params.height),
             rotation_deg=result.get("rotation_deg", params.rotation_deg),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_triangle
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_triangle",
+        title="Edit triangle geometry in sketch",
+        description=(
+            "Edit an existing triangle (three connected LineSegment geometries) "
+            "in a Sketcher::SketchObject.  *geometry_index* is the index of the "
+            "first line of the triangle; the triangle occupies three consecutive "
+            "geometry slots.  *vertices* is a list of exactly three ordered "
+            "{x, y} vertices in millimetres; vertex ordering is preserved and the "
+            "three segments connect vertex 0->1, 1->2, and 2->0 (closing back to "
+            "the start).  Validates that the three geometries actually form a "
+            "connected, non-degenerate triangle, that all coordinates are finite, "
+            "and that no constraints reference the geometry being edited.  The "
+            "document is locked exclusively during the operation, recomputed, "
+            "saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_triangle_tool(params: SketchEditTriangleParams) -> SketchEditTriangleResult:
+        """Edit triangle geometry in a sketch and return its info."""
+        validate_direct_request("sketch_edit_triangle", params.model_dump())
+        for i, v in enumerate(params.vertices):
+            if not isinstance(v, dict) or "x" not in v or "y" not in v:
+                raise ValueError(f"vertices[{i}] must be an object with 'x' and 'y' keys.")
+            for name in ("x", "y"):
+                if math.isnan(v[name]) or math.isinf(v[name]):
+                    raise ValueError(f"vertices[{i}].{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "vertices": params.vertices,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_edit_triangle", bridge_params)
+
+        return SketchEditTriangleResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_index=result.get("geometry_index", params.geometry_index),
+            vertices=result.get("vertices", params.vertices),
             geometry_count=result.get("geometry_count", 0),
             constraint_count_before=result.get("constraint_count_before"),
             constraint_count_after=result.get("constraint_count_after"),
