@@ -493,6 +493,50 @@ class MCPGuiPanel:
         edit_circ_layout.addWidget(self._edit_circle_button, 5, 0, 1, 2)
         layout.addWidget(edit_circ_group)
 
+        # ---- Edit Ellipse Geometry in Sketch ----------------------------------
+        edit_ell_group = QtWidgets.QGroupBox("Edit Ellipse Geometry in Sketch")
+        edit_ell_layout = QtWidgets.QGridLayout(edit_ell_group)
+        self._edit_ellipse_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_sketch_input, 0, 1)
+        self._edit_ellipse_index_input = QtWidgets.QSpinBox()
+        self._edit_ellipse_index_input.setRange(0, 1000000)
+        self._edit_ellipse_index_input.setValue(0)
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_index_input, 1, 1)
+        self._edit_ellipse_cx_input = QtWidgets.QDoubleSpinBox()
+        self._edit_ellipse_cy_input = QtWidgets.QDoubleSpinBox()
+        self._edit_ellipse_major_input = QtWidgets.QDoubleSpinBox()
+        self._edit_ellipse_minor_input = QtWidgets.QDoubleSpinBox()
+        self._edit_ellipse_rotation_input = QtWidgets.QDoubleSpinBox()
+        self._edit_ellipse_major_input.setRange(0.001, 100000.0)
+        self._edit_ellipse_major_input.setValue(5.0)
+        self._edit_ellipse_major_input.setDecimals(3)
+        self._edit_ellipse_minor_input.setRange(0.001, 100000.0)
+        self._edit_ellipse_minor_input.setValue(3.0)
+        self._edit_ellipse_minor_input.setDecimals(3)
+        self._edit_ellipse_rotation_input.setRange(-360.0, 360.0)
+        self._edit_ellipse_rotation_input.setValue(0.0)
+        self._edit_ellipse_rotation_input.setDecimals(3)
+        for spin in (self._edit_ellipse_cx_input, self._edit_ellipse_cy_input):
+            spin.setRange(-100000.0, 100000.0)
+            spin.setValue(0.0)
+            spin.setDecimals(3)
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Center X:"), 2, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_cx_input, 2, 1)
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Center Y:"), 3, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_cy_input, 3, 1)
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Major radius:"), 4, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_major_input, 4, 1)
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Minor radius:"), 5, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_minor_input, 5, 1)
+        edit_ell_layout.addWidget(QtWidgets.QLabel("Rotation deg:"), 6, 0)
+        edit_ell_layout.addWidget(self._edit_ellipse_rotation_input, 6, 1)
+        self._edit_ellipse_button = QtWidgets.QPushButton("Edit Ellipse")
+        self._edit_ellipse_button.clicked.connect(self._on_sketch_edit_ellipse)
+        edit_ell_layout.addWidget(self._edit_ellipse_button, 7, 0, 1, 2)
+        layout.addWidget(edit_ell_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1313,6 +1357,57 @@ class MCPGuiPanel:
             f"Edited circle at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
             f"center=({center_x},{center_y}) radius={radius} ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Edit Ellipse Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_edit_ellipse(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._edit_ellipse_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._edit_ellipse_index_input.value()
+        center_x = self._edit_ellipse_cx_input.value()
+        center_y = self._edit_ellipse_cy_input.value()
+        major_radius = self._edit_ellipse_major_input.value()
+        minor_radius = self._edit_ellipse_minor_input.value()
+        rotation_deg = self._edit_ellipse_rotation_input.value()
+
+        response = self._run_operation(
+            "sketch_edit_ellipse",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+                "center_x": center_x,
+                "center_y": center_y,
+                "major_radius": major_radius,
+                "minor_radius": minor_radius,
+                "rotation_deg": rotation_deg,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Edited ellipse at index {geometry_index} in sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' "
+            f"center=({center_x},{center_y}) major={major_radius} minor={minor_radius} "
+            f"rotation={rotation_deg}deg ({geometry_count} geometry).",
             error=False,
         )
 

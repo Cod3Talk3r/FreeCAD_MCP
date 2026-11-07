@@ -162,6 +162,38 @@ def validate_direct_request(op: str, params: Any) -> None:
                 raise ValueError(f"{key} must be a finite number.")
         if params["radius"] <= 0:
             raise ValueError("radius must be positive")
+    elif op == "sketch_edit_ellipse":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        geometry_index = params.get("geometry_index")
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
+            raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
+        converted = {}
+        for key in ("center_x", "center_y", "major_radius", "minor_radius"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+            converted[key] = value
+        # rotation_deg defaults to 0 when omitted.
+        raw_rotation = params.get("rotation_deg", 0)
+        if raw_rotation is None:
+            raw_rotation = 0
+        try:
+            rotation_val = float(raw_rotation)
+        except (TypeError, ValueError):
+            raise ValueError("rotation_deg must be a finite number.")
+        if not math.isfinite(rotation_val):
+            raise ValueError("rotation_deg must be a finite number.")
+        converted["rotation_deg"] = rotation_val
+        if converted["major_radius"] <= 0:
+            raise ValueError("major_radius must be positive")
+        if converted["minor_radius"] <= 0:
+            raise ValueError("minor_radius must be positive")
+        if converted["major_radius"] < converted["minor_radius"]:
+            raise ValueError("major_radius must be greater than or equal to minor_radius")
 
 
 class DirectBackend:

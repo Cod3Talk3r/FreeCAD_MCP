@@ -298,6 +298,26 @@ class SketchEditCircleResult(BaseModel):
     )
 
 
+class SketchEditEllipseResult(BaseModel):
+    """Result of sketch_edit_ellipse."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the ellipse was edited in.")
+    geometry_index: int = Field(description="Zero-based index of the edited ellipse geometry.")
+    center_x: float = Field(description="New center X coordinate in millimetres.")
+    center_y: float = Field(description="New center Y coordinate in millimetres.")
+    major_radius: float = Field(description="New major (semi-axis) radius in millimetres.")
+    minor_radius: float = Field(description="New minor (semi-axis) radius in millimetres.")
+    rotation_deg: float = Field(description="Major-axis rotation counter-clockwise from +X, in degrees.")
+    geometry_count: int = Field(description="Number of geometries in the sketch after editing.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -514,6 +534,28 @@ class SketchEditCircleParams(BaseModel):
     center_x: float = Field(default=0.0, description="New center X coordinate in millimetres.")
     center_y: float = Field(default=0.0, description="New center Y coordinate in millimetres.")
     radius: float = Field(default=5.0, description="New circle radius in millimetres (must be positive).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditEllipseParams(BaseModel):
+    """Parameters for editing ellipse geometry in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to edit the ellipse in.")
+    geometry_index: int = Field(description="Zero-based index of the ellipse geometry to edit.")
+    center_x: float = Field(default=0.0, description="New center X coordinate in millimetres.")
+    center_y: float = Field(default=0.0, description="New center Y coordinate in millimetres.")
+    major_radius: float = Field(
+        default=5.0, description="New major (semi-axis) radius in millimetres (must be positive)."
+    )
+    minor_radius: float = Field(
+        default=3.0, description="New minor (semi-axis) radius in millimetres (must be positive)."
+    )
+    rotation_deg: float = Field(
+        default=0.0, description="Major-axis rotation counter-clockwise from +X, in degrees."
+    )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1770,6 +1812,67 @@ def _register_tools(server: Any, settings: Settings) -> None:
             center_x=result.get("center_x", params.center_x),
             center_y=result.get("center_y", params.center_y),
             radius=result.get("radius", params.radius),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_ellipse
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_ellipse",
+        title="Edit ellipse geometry in sketch",
+        description=(
+            "Edit an existing ellipse geometry in a Sketcher::SketchObject by its "
+            "zero-based geometry index.  *major_radius* and *minor_radius* are "
+            "semi-axis lengths (millimetres); both must be positive and "
+            "major_radius must be >= minor_radius.  Validates that the geometry "
+            "is an ellipse, that all values are finite, and that no constraints "
+            "reference the geometry being edited.  *rotation_deg* rotates the "
+            "major axis counter-clockwise from the sketch +X direction "
+            "(degrees; default 0 = axis-aligned).  The document is locked "
+            "exclusively during the operation, recomputed, saved atomically, "
+            "and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_ellipse_tool(params: SketchEditEllipseParams) -> SketchEditEllipseResult:
+        """Edit ellipse geometry in a sketch and return its info."""
+        validate_direct_request("sketch_edit_ellipse", params.model_dump())
+        for name, value in (
+            ("center_x", params.center_x),
+            ("center_y", params.center_y),
+            ("major_radius", params.major_radius),
+            ("minor_radius", params.minor_radius),
+            ("rotation_deg", params.rotation_deg),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "center_x": params.center_x,
+            "center_y": params.center_y,
+            "major_radius": params.major_radius,
+            "minor_radius": params.minor_radius,
+            "rotation_deg": params.rotation_deg,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_edit_ellipse", bridge_params)
+
+        return SketchEditEllipseResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_index=result.get("geometry_index", params.geometry_index),
+            center_x=result.get("center_x", params.center_x),
+            center_y=result.get("center_y", params.center_y),
+            major_radius=result.get("major_radius", params.major_radius),
+            minor_radius=result.get("minor_radius", params.minor_radius),
+            rotation_deg=result.get("rotation_deg", params.rotation_deg),
             geometry_count=result.get("geometry_count", 0),
             constraint_count_before=result.get("constraint_count_before"),
             constraint_count_after=result.get("constraint_count_after"),

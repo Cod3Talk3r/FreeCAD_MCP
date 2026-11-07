@@ -132,7 +132,9 @@ class _FakeVector:
 
 
 class _FakeRotation:
-    pass
+    def __init__(self, axis: object | None = None, angle: float = 0.0) -> None:
+        self.Axis = axis
+        self.Angle = angle
 
 
 class _FakePlacement:
@@ -204,9 +206,26 @@ class Ellipse:
         self.center = center
         self.major_radius = major_radius
         self.minor_radius = minor_radius
-        self.MajorDirection = major_dir or _FakePoint(1, 0, 0)
-        self.MinorDirection = minor_dir or _FakePoint(0, 1, 0)
+        self.AngleXU = 0.0
+        self.XAxis = major_dir or _FakePoint(1, 0, 0)
+        self.YAxis = minor_dir or _FakePoint(0, 1, 0)
+        # Kept for inspect_sketch fake coverage; real FreeCAD 1.1.4 does not
+        # expose these attributes on Part.Ellipse.
+        self.MajorDirection = self.XAxis
+        self.MinorDirection = self.YAxis
         self.Construction = construction
+
+    def rotate(self, placement: _FakePlacement) -> None:
+        """Mirror Part.Ellipse.rotate(): Placement angle is in degrees."""
+        self.Center = placement.Base
+        self.center = placement.Base
+        self.AngleXU += math.radians(placement.Rotation.Angle)
+        cos_a = math.cos(self.AngleXU)
+        sin_a = math.sin(self.AngleXU)
+        self.XAxis = _FakePoint(cos_a, sin_a, 0.0)
+        self.YAxis = _FakePoint(-sin_a, cos_a, 0.0)
+        self.MajorDirection = self.XAxis
+        self.MinorDirection = self.YAxis
 
 
 class _FakeUnknownGeom:
@@ -3093,3 +3112,594 @@ def test_handle_request_dispatches_sketch_edit_circle(
     assert response["result"]["center_x"] == 3.0
     assert response["result"]["center_y"] == 4.0
     assert response["result"]["radius"] == 6.0
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-B3: Edit sketch ellipse geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_edit_ellipse_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(1.0, 1.0, 0), 5.0, 3.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "major_radius": 7.5,
+            "minor_radius": 4.0,
+            "rotation_deg": 30.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_ellipse"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["center_x"] == 10.0
+    assert result["result"]["center_y"] == 20.0
+    assert result["result"]["major_radius"] == 7.5
+    assert result["result"]["minor_radius"] == 4.0
+    assert result["result"]["rotation_deg"] == 30.0
+    assert result["result"]["geometry_count"] == 1
+
+    # Ellipse was modified in place.
+    ellipse = sketch.Geometry[0]
+    assert ellipse.Center.x == 10.0
+    assert ellipse.Center.y == 20.0
+    assert ellipse.MajorRadius == 7.5
+    assert ellipse.MinorRadius == 4.0
+    assert ellipse.AngleXU == pytest.approx(math.radians(30.0))
+    assert ellipse.XAxis.x == pytest.approx(math.cos(math.radians(30.0)))
+    assert ellipse.XAxis.y == pytest.approx(math.sin(math.radians(30.0)))
+
+
+def test_sketch_edit_ellipse_mixed_sketch_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(Ellipse(_FakePoint(2, 2, 0), 4.0, 2.0))
+    sketch.Geometry.append(LineSegment(_FakePoint(4, 4, 0), _FakePoint(5, 4, 0)))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "center_x": 99.0,
+            "center_y": 88.0,
+            "major_radius": 6.0,
+            "minor_radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 3
+
+    # Other geometries preserved.
+    assert isinstance(sketch.Geometry[0], LineSegment)
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert isinstance(sketch.Geometry[2], LineSegment)
+    assert sketch.Geometry[2].StartPoint.x == 4.0
+
+    # Edited ellipse updated.
+    edited = sketch.Geometry[1]
+    assert isinstance(edited, Ellipse)
+    assert edited.Center.x == 99.0
+    assert edited.Center.y == 88.0
+    assert edited.MajorRadius == 6.0
+    assert edited.MinorRadius == 2.0
+
+
+def test_sketch_edit_ellipse_rotation_defaults_to_axis_aligned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "rot", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 4.0, 2.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "rot",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 4.0,
+            "minor_radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["rotation_deg"] == 0.0
+    ellipse = sketch.Geometry[0]
+    # Default rotation leaves axis-aligned directions.
+    assert ellipse.MajorDirection.x == 1.0
+    assert ellipse.MajorDirection.y == 0.0
+    assert ellipse.MinorDirection.x == 0.0
+    assert ellipse.MinorDirection.y == 1.0
+
+
+def test_sketch_edit_ellipse_rotation_is_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "rotabs", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 4.0, 2.0))
+
+    for rotation_deg in (30.0, 0.0, 45.0):
+        result = runner._op_sketch_edit_ellipse(
+            {
+                "document_id": "rotabs",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 4.0,
+                "minor_radius": 2.0,
+                "rotation_deg": rotation_deg,
+            }
+        )
+        assert result["ok"] is True
+        assert sketch.Geometry[0].AngleXU == pytest.approx(math.radians(rotation_deg))
+
+
+def test_sketch_edit_ellipse_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 5,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "out of range" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "boolean" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editfloat", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editfloat",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "integer" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_edit_ellipse_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "editwtype", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editwtype",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_ellipse_rejects_non_ellipse_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnonell", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editnonell",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 1.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "Ellipse" in result["error"]
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editnan", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    base = {
+        "document_id": "editnan",
+        "workspace": str(tmp_path),
+        "sketch_name": "Sketch1",
+        "geometry_index": 0,
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "major_radius": 1.0,
+        "minor_radius": 1.0,
+    }
+    for bad_key, bad_value in (
+        ("center_x", float("nan")),
+        ("center_y", float("inf")),
+        ("major_radius", float("nan")),
+        ("minor_radius", float("-inf")),
+        ("rotation_deg", float("nan")),
+    ):
+        bad = dict(base)
+        bad[bad_key] = bad_value
+        result = runner._op_sketch_edit_ellipse(bad)
+        assert result["ok"] is False, bad_key
+        assert result["op"] == "sketch_edit_ellipse"
+        assert "finite" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_zero_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editzero", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editzero",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 0.0,
+            "minor_radius": 1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "positive" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_negative_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 1.0, 1.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 5.0,
+            "minor_radius": -1.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "positive" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_rejects_major_less_than_minor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editorder", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 5.0, 3.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editorder",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "major_radius": 2.0,
+            "minor_radius": 5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "greater than or equal" in result["error"].lower()
+    assert len(sketch.Geometry) == 1
+
+
+def test_sketch_edit_ellipse_accepts_equal_radii(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editeq", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 3.0, 3.0))
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editeq",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 1.0,
+            "center_y": 2.0,
+            "major_radius": 3.0,
+            "minor_radius": 3.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_ellipse"
+
+
+def test_sketch_edit_ellipse_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(0, 0, 0), 5.0, 3.0))
+
+    # Add a constraint that references geometry index 0.
+    class _FakeConstraint:
+        First = 0
+        FirstPos = 1
+        Second = -1
+        SecondPos = 0
+        Third = -1
+        ThirdPos = 0
+
+    sketch.Constraints.append(_FakeConstraint())
+
+    result = runner._op_sketch_edit_ellipse(
+        {
+            "document_id": "editcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 2.0,
+            "center_y": 3.0,
+            "major_radius": 6.0,
+            "minor_radius": 4.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_ellipse"
+    assert "constraint" in result["error"].lower()
+    assert len(sketch.Geometry) == 1  # unchanged
+
+
+def test_handle_request_dispatches_sketch_edit_ellipse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "editdisp", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(Ellipse(_FakePoint(1.0, 1.0, 0), 5.0, 3.0))
+
+    response = runner.handle_request(
+        {
+            "op": runner.OP_SKETCH_EDIT_ELLIPSE,
+            "params": {
+                "document_id": "editdisp",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 3.0,
+                "center_y": 4.0,
+                "major_radius": 6.0,
+                "minor_radius": 2.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_ellipse"
+    assert response["result"]["geometry_index"] == 0
+    assert response["result"]["center_x"] == 3.0
+    assert response["result"]["center_y"] == 4.0
+    assert response["result"]["major_radius"] == 6.0
+    assert response["result"]["minor_radius"] == 2.0

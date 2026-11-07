@@ -2367,3 +2367,257 @@ def test_real_freecad_sketch_edit_circle_errors(tmp_path: Path) -> None:
             },
         )
     assert "positive" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_ellipse(tmp_path: Path) -> None:
+    """Edit an ellipse in a sketch; verify center, radii, rotation, persistence, and mixed sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditell", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditell", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add geometry: rectangle (4 lines) + circle + ellipse.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skeditell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skeditell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 2.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_ellipse",
+        {
+            "document_id": "skeditell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 8.0,
+            "center_y": 8.0,
+            "major_radius": 4.0,
+            "minor_radius": 2.0,
+        },
+    )
+
+    # Inspect: should have 6 geometries (4 lines + 1 circle + 1 ellipse).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditell", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 6
+
+    # Edit the ellipse (index 5) to new center, radii, and rotation.
+    result = bridge.run(
+        "sketch_edit_ellipse",
+        {
+            "document_id": "skeditell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 5,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "major_radius": 7.5,
+            "minor_radius": 3.0,
+            "rotation_deg": 30.0,
+        },
+    )
+    assert result["geometry_index"] == 5
+    assert result["center_x"] == pytest.approx(10.0)
+    assert result["center_y"] == pytest.approx(20.0)
+    assert result["major_radius"] == pytest.approx(7.5)
+    assert result["minor_radius"] == pytest.approx(3.0)
+    assert result["rotation_deg"] == pytest.approx(30.0)
+    assert result["geometry_count"] == 6
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditell", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 6
+    assert len(info["geometries"]) == 6
+
+    # Sixth geometry should now be an ellipse with the new parameters.
+    sixth_geo = info["geometries"][5]
+    assert sixth_geo["type"] == "Ellipse"
+    assert sixth_geo["center"]["x"] == pytest.approx(10.0)
+    assert sixth_geo["center"]["y"] == pytest.approx(20.0)
+    assert sixth_geo["major_radius"] == pytest.approx(7.5)
+    assert sixth_geo["minor_radius"] == pytest.approx(3.0)
+
+    # Other geometries preserved: 4 lines + 1 circle.
+    line_types = [g for g in info["geometries"] if g["type"] == "LineSegment"]
+    circle_types = [g for g in info["geometries"] if g["type"] == "Circle"]
+    ellipse_types = [g for g in info["geometries"] if g["type"] == "Ellipse"]
+    assert len(line_types) == 4
+    assert len(circle_types) == 1
+    assert len(ellipse_types) == 1
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_ellipse_errors(tmp_path: Path) -> None:
+    """sketch_edit_ellipse returns structured errors for missing sketch, wrong type, non-ellipse, out-of-range, bad radii, ordering."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skederrell", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skederrell",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skederrell", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skederrell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 2.0,
+            "height": 1.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_ellipse",
+        {
+            "document_id": "skederrell",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "major_radius": 4.0,
+            "minor_radius": 2.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_ellipse",
+            {
+                "document_id": "skederrell",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 1.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_ellipse",
+            {
+                "document_id": "skederrell",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 1.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Non-ellipse geometry (line at index 0).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_ellipse",
+            {
+                "document_id": "skederrell",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 1.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "Ellipse" in str(excinfo.value)
+
+    # Out-of-range index (only 5 geometries).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_ellipse",
+            {
+                "document_id": "skederrell",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 99,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 1.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Zero major radius.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_ellipse",
+            {
+                "document_id": "skederrell",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 4,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 0.0,
+                "minor_radius": 1.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
+
+    # major_radius less than minor_radius.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_ellipse",
+            {
+                "document_id": "skederrell",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 4,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "major_radius": 2.0,
+                "minor_radius": 5.0,
+            },
+        )
+    assert "greater than or equal" in str(excinfo.value).lower()
