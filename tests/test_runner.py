@@ -4786,3 +4786,1175 @@ def test_handle_request_dispatches_sketch_edit_triangle(
         {"x": 7.0, "y": 4.0},
         {"x": 5.0, "y": 7.0},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-E: Edit sketch regular polygon geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+def _make_regular_polygon(sketch, center_x=0.0, center_y=0.0, radius=5.0, sides=5, rotation_deg=0.0):
+    """Add ``sides`` connected LineSegment geometries forming a regular polygon.
+
+    Vertices lie on the circumcircle centred at (center_x, center_y), rotated
+    counter-clockwise from +X by rotation_deg, matching sketch_add_regular_polygon.
+    """
+    import math as _math
+    start_angle = _math.radians(rotation_deg)
+    vertices = []
+    for i in range(sides):
+        angle = start_angle + 2.0 * _math.pi * i / sides
+        vertices.append(_FakePoint(center_x + radius * _math.cos(angle), center_y + radius * _math.sin(angle), 0))
+    for i in range(sides):
+        sketch.Geometry.append(LineSegment(vertices[i], vertices[(i + 1) % sides]))
+
+
+def test_sketch_edit_regular_polygon_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, center_x=0.0, center_y=0.0, radius=5.0, sides=5, rotation_deg=0.0)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "radius": 8.0,
+            "sides": 5,
+            "rotation_deg": 30.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["center_x"] == 10.0
+    assert result["result"]["center_y"] == 20.0
+    assert result["result"]["radius"] == 8.0
+    assert result["result"]["sides"] == 5
+    assert result["result"]["rotation_deg"] == 30.0
+    assert result["result"]["geometry_count"] == 5
+
+    # All five edges updated; closed loop preserved.
+    for i in range(5):
+        seg = sketch.Geometry[i]
+        next_seg = sketch.Geometry[(i + 1) % 5]
+        assert seg.EndPoint.x == pytest.approx(next_seg.StartPoint.x)
+        assert seg.EndPoint.y == pytest.approx(next_seg.StartPoint.y)
+
+    # Vertex 0 should be at rotation 30deg on the new circumcircle.
+    import math as _math
+    v0 = sketch.Geometry[0].StartPoint
+    assert v0.x == pytest.approx(10.0 + 8.0 * _math.cos(_math.radians(30.0)))
+    assert v0.y == pytest.approx(20.0 + 8.0 * _math.sin(_math.radians(30.0)))
+
+
+def test_sketch_edit_regular_polygon_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    _make_regular_polygon(sketch, center_x=5.0, center_y=5.0, radius=2.0, sides=4, rotation_deg=0.0)
+    sketch.Geometry.append(LineSegment(_FakePoint(9, 9, 0), _FakePoint(10, 9, 0)))
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "center_x": 50.0,
+            "center_y": 50.0,
+            "radius": 3.0,
+            "sides": 4,
+            "rotation_deg": 0.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 6
+
+    # Unrelated geometry preserved.
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert sketch.Geometry[5].StartPoint.x == 9.0
+
+    # Polygon updated at indices 1-4.
+    for i in range(4):
+        seg = sketch.Geometry[1 + i]
+        next_seg = sketch.Geometry[1 + (i + 1) % 4]
+        assert seg.EndPoint.x == pytest.approx(next_seg.StartPoint.x)
+        assert seg.EndPoint.y == pytest.approx(next_seg.StartPoint.y)
+
+
+def test_sketch_edit_regular_polygon_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "integer" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_rejects_wrong_side_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, center_x=0.0, center_y=0.0, radius=5.0, sides=4, rotation_deg=0.0)
+
+    # Ask to edit as a 5-sided polygon but only 4 edges exist at that index.
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 5,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_rejects_non_regular_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    # Connected lines but NOT a regular polygon (unequal edge lengths).
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(4, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(4, 0, 0), _FakePoint(5, 1, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(5, 1, 0), _FakePoint(1, 1, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(1, 1, 0), _FakePoint(0, 0, 0)))
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 2.0,
+            "center_y": 0.5,
+            "radius": 2.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+
+
+def test_sketch_edit_regular_polygon_rejects_non_finite_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    import math as _math
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": _math.nan,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "finite" in result["error"].lower()
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": _math.inf,
+            "sides": 4,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "finite" in result["error"].lower()
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": -1.0,
+            "sides": 4,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_rejects_invalid_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 2,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "at least 3" in result["error"].lower()
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": True,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "integer" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_edit_regular_polygon_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    # Add a box (non-sketch object) to the document.
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_regular_polygon_rejects_non_line_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    # Put a Circle where the first line segment should be, then 3 more lines.
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+    sketch.Geometry.append(LineSegment(_FakePoint(1, 0, 0), _FakePoint(2, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(2, 0, 0), _FakePoint(3, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(3, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "LineSegment" in result["error"]
+
+
+def test_sketch_edit_regular_polygon_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, sides=4)
+
+    # Reference index 1 with a constraint.
+    class _FakeConstraint:
+        def __init__(self, First=None, Second=None, Third=None):
+            self.First = First
+            self.Second = Second
+            self.Third = Third
+
+    sketch.Constraints.append(_FakeConstraint(First=1))
+
+    result = runner._op_sketch_edit_regular_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_regular_polygon"
+    assert "constraint" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_edit_regular_polygon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_regular_polygon(sketch, center_x=0.0, center_y=0.0, radius=5.0, sides=4, rotation_deg=0.0)
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_edit_regular_polygon",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 10.0,
+                "center_y": 20.0,
+                "radius": 8.0,
+                "sides": 4,
+                "rotation_deg": 45.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_regular_polygon"
+    assert response["result"]["geometry_index"] == 0
+    assert len(response["result"]["vertices"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-E: Edit sketch custom polygon geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+def _make_polygon(sketch, vertices):
+    """Add connected LineSegment geometries forming a closed polygon from vertices."""
+    n = len(vertices)
+    pts = [_FakePoint(x, y, 0) for x, y in vertices]
+    for i in range(n):
+        sketch.Geometry.append(LineSegment(pts[i], pts[(i + 1) % n]))
+
+
+def test_sketch_edit_polygon_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 10.0, "y": 10.0},
+                {"x": 16.0, "y": 10.0},
+                {"x": 16.0, "y": 15.0},
+                {"x": 10.0, "y": 15.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_polygon"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["geometry_index"] == 0
+    assert result["result"]["vertices"] == [
+        {"x": 10.0, "y": 10.0},
+        {"x": 16.0, "y": 10.0},
+        {"x": 16.0, "y": 15.0},
+        {"x": 10.0, "y": 15.0},
+    ]
+    assert result["result"]["geometry_count"] == 4
+
+    # Closed loop preserved: last edge connects back to first vertex.
+    for i in range(4):
+        seg = sketch.Geometry[i]
+        next_seg = sketch.Geometry[(i + 1) % 4]
+        assert seg.EndPoint.x == pytest.approx(next_seg.StartPoint.x)
+        assert seg.EndPoint.y == pytest.approx(next_seg.StartPoint.y)
+    assert sketch.Geometry[3].EndPoint.x == pytest.approx(sketch.Geometry[0].StartPoint.x)
+    assert sketch.Geometry[3].EndPoint.y == pytest.approx(sketch.Geometry[0].StartPoint.y)
+
+
+def test_sketch_edit_polygon_preserves_other_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mixed", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    _make_polygon(sketch, [(5.0, 5.0), (7.0, 5.0), (7.0, 7.0), (5.0, 7.0)])
+    sketch.Geometry.append(LineSegment(_FakePoint(9, 9, 0), _FakePoint(10, 9, 0)))
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "mixed",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "vertices": [
+                {"x": 50.0, "y": 50.0},
+                {"x": 54.0, "y": 50.0},
+                {"x": 54.0, "y": 54.0},
+                {"x": 50.0, "y": 54.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["geometry_count"] == 6
+
+    # Unrelated geometry preserved.
+    assert sketch.Geometry[0].StartPoint.x == 0.0
+    assert sketch.Geometry[5].StartPoint.x == 9.0
+
+
+def test_sketch_edit_polygon_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": -1,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": True,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_float_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 1.5,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "integer" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_mismatched_vertex_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    # Existing polygon has 4 edges; supplying 5 vertices exceeds the geometry range.
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+                {"x": 2.0, "y": 1.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_fewer_than_three_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "at least 3" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_duplicate_vertex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "duplicate" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_repeated_final_vertex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+                {"x": 0.0, "y": 0.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "duplicates the first" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_non_finite_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    import math as _math
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": _math.nan, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "finite" in result["error"].lower()
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": _math.inf, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "finite" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_collinear_vertices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 2.0, "y": 0.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "zero area" in result["error"].lower() or "degenerate" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_edit_polygon_rejects_non_line_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    # Put a Circle where a line segment should be, then 2 more lines (3 total).
+    sketch.Geometry.append(Circle(_FakePoint(0, 0, 0), 1.0))
+    sketch.Geometry.append(LineSegment(_FakePoint(1, 0, 0), _FakePoint(2, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(2, 0, 0), _FakePoint(1, 0, 0)))
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "LineSegment" in result["error"]
+
+
+def test_sketch_edit_polygon_rejects_malformed_existing_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    # Lines that do NOT form a connected closed loop.
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(2, 0, 0), _FakePoint(3, 0, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(4, 0, 0), _FakePoint(5, 0, 0)))
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "connected" in result["error"].lower()
+
+
+def test_sketch_edit_polygon_rejects_constrained_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    class _FakeConstraint:
+        def __init__(self, First=None, Second=None, Third=None):
+            self.First = First
+            self.Second = Second
+            self.Third = Third
+
+    sketch.Constraints.append(_FakeConstraint(First=2))
+
+    result = runner._op_sketch_edit_polygon(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_polygon"
+    assert "constraint" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_edit_polygon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_polygon(sketch, [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)])
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_edit_polygon",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 10.0, "y": 10.0},
+                    {"x": 16.0, "y": 10.0},
+                    {"x": 16.0, "y": 15.0},
+                    {"x": 10.0, "y": 15.0},
+                ],
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_edit_polygon"
+    assert response["result"]["geometry_index"] == 0
+    assert len(response["result"]["vertices"]) == 4

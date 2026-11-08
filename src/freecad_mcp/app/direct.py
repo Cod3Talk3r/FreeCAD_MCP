@@ -242,6 +242,57 @@ def validate_direct_request(op: str, params: Any) -> None:
                     raise ValueError(f"vertices[{i}].{name} must be a finite number.")
                 if not math.isfinite(value):
                     raise ValueError(f"vertices[{i}].{name} must be a finite number.")
+    elif op == "sketch_edit_regular_polygon":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        geometry_index = params.get("geometry_index")
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
+            raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
+        converted = {}
+        for key in ("center_x", "center_y", "radius"):
+            try:
+                value = float(params.get(key))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a finite number.")
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number.")
+            converted[key] = value
+        raw_rotation = params.get("rotation_deg", 0)
+        if raw_rotation is None:
+            raw_rotation = 0
+        try:
+            rotation_val = float(raw_rotation)
+        except (TypeError, ValueError):
+            raise ValueError("rotation_deg must be a finite number.")
+        if not math.isfinite(rotation_val):
+            raise ValueError("rotation_deg must be a finite number.")
+        converted["rotation_deg"] = rotation_val
+        if converted["radius"] <= 0:
+            raise ValueError("radius must be positive")
+        sides = params.get("sides")
+        if isinstance(sides, bool) or not isinstance(sides, int):
+            raise ValueError("sides must be an integer (boolean values are not accepted).")
+        if sides < 3:
+            raise ValueError("sides must be at least 3.")
+    elif op == "sketch_edit_polygon":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        geometry_index = params.get("geometry_index")
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
+            raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
+        vertices = params.get("vertices")
+        if not isinstance(vertices, list) or len(vertices) < 3:
+            raise ValueError("vertices must be a list of at least 3 {x, y} objects.")
+        for i, v in enumerate(vertices):
+            if not isinstance(v, dict) or "x" not in v or "y" not in v:
+                raise ValueError(f"vertices[{i}] must be an object with 'x' and 'y' keys.")
+            for name in ("x", "y"):
+                try:
+                    value = float(v[name])
+                except (TypeError, ValueError):
+                    raise ValueError(f"vertices[{i}].{name} must be a finite number.")
+                if not math.isfinite(value):
+                    raise ValueError(f"vertices[{i}].{name} must be a finite number.")
 
 
 class DirectBackend:

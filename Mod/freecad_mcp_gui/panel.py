@@ -606,6 +606,76 @@ class MCPGuiPanel:
         edit_tri_layout.addWidget(self._edit_triangle_button, 4, 0, 1, 2)
         layout.addWidget(edit_tri_group)
 
+        # ---- Edit Regular Polygon Geometry in Sketch ----------------------------------
+        edit_reg_poly_group = QtWidgets.QGroupBox("Edit Regular Polygon Geometry in Sketch")
+        edit_reg_poly_layout = QtWidgets.QGridLayout(edit_reg_poly_group)
+        self._edit_regular_polygon_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_sketch_input, 0, 1)
+        self._edit_regular_polygon_index_input = QtWidgets.QSpinBox()
+        self._edit_regular_polygon_index_input.setRange(0, 1000000)
+        self._edit_regular_polygon_index_input.setValue(0)
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_index_input, 1, 1)
+        self._edit_regular_polygon_center_x_input = QtWidgets.QDoubleSpinBox()
+        self._edit_regular_polygon_center_y_input = QtWidgets.QDoubleSpinBox()
+        self._edit_regular_polygon_radius_input = QtWidgets.QDoubleSpinBox()
+        self._edit_regular_polygon_sides_input = QtWidgets.QSpinBox()
+        self._edit_regular_polygon_rotation_input = QtWidgets.QDoubleSpinBox()
+        self._edit_regular_polygon_center_x_input.setRange(-100000.0, 100000.0)
+        self._edit_regular_polygon_center_x_input.setValue(0.0)
+        self._edit_regular_polygon_center_x_input.setDecimals(3)
+        self._edit_regular_polygon_center_y_input.setRange(-100000.0, 100000.0)
+        self._edit_regular_polygon_center_y_input.setValue(0.0)
+        self._edit_regular_polygon_center_y_input.setDecimals(3)
+        self._edit_regular_polygon_radius_input.setRange(0.001, 100000.0)
+        self._edit_regular_polygon_radius_input.setValue(5.0)
+        self._edit_regular_polygon_radius_input.setDecimals(3)
+        self._edit_regular_polygon_sides_input.setRange(3, 1000)
+        self._edit_regular_polygon_sides_input.setValue(5)
+        self._edit_regular_polygon_rotation_input.setRange(-360.0, 360.0)
+        self._edit_regular_polygon_rotation_input.setValue(0.0)
+        self._edit_regular_polygon_rotation_input.setDecimals(3)
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Center X:"), 2, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_center_x_input, 2, 1)
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Center Y:"), 3, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_center_y_input, 3, 1)
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Radius:"), 4, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_radius_input, 4, 1)
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Sides:"), 5, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_sides_input, 5, 1)
+        edit_reg_poly_layout.addWidget(QtWidgets.QLabel("Rotation deg:"), 6, 0)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_rotation_input, 6, 1)
+        self._edit_regular_polygon_button = QtWidgets.QPushButton("Edit Regular Polygon")
+        self._edit_regular_polygon_button.clicked.connect(self._on_sketch_edit_regular_polygon)
+        edit_reg_poly_layout.addWidget(self._edit_regular_polygon_button, 7, 0, 1, 2)
+        layout.addWidget(edit_reg_poly_group)
+
+        # ---- Edit Polygon Geometry in Sketch ----------------------------------
+        edit_poly_group = QtWidgets.QGroupBox("Edit Polygon Geometry in Sketch")
+        edit_poly_layout = QtWidgets.QGridLayout(edit_poly_group)
+        self._edit_polygon_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        edit_poly_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        edit_poly_layout.addWidget(self._edit_polygon_sketch_input, 0, 1)
+        self._edit_polygon_index_input = QtWidgets.QSpinBox()
+        self._edit_polygon_index_input.setRange(0, 1000000)
+        self._edit_polygon_index_input.setValue(0)
+        edit_poly_layout.addWidget(QtWidgets.QLabel("Geometry index:"), 1, 0)
+        edit_poly_layout.addWidget(self._edit_polygon_index_input, 1, 1)
+        self._edit_polygon_vertices_input = QtWidgets.QLineEdit(
+            '[{"x":0,"y":0},{"x":1,"y":0},{"x":1,"y":1},{"x":0,"y":1}]'
+        )
+        edit_poly_layout.addWidget(QtWidgets.QLabel("Vertices (JSON [{x,y},...]):"), 2, 0)
+        edit_poly_layout.addWidget(self._edit_polygon_vertices_input, 2, 1)
+        note = QtWidgets.QLabel("Ordered vertices; the final edge connects the last back to the first.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        edit_poly_layout.addWidget(note, 3, 0, 1, 2)
+        self._edit_polygon_button = QtWidgets.QPushButton("Edit Polygon")
+        self._edit_polygon_button.clicked.connect(self._on_sketch_edit_polygon)
+        edit_poly_layout.addWidget(self._edit_polygon_button, 4, 0, 1, 2)
+        layout.addWidget(edit_poly_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1577,6 +1647,108 @@ class MCPGuiPanel:
         verts = result.get("vertices", vertices) if isinstance(result, dict) else vertices
         self._set_status(
             f"Edited triangle at index {geometry_index} in sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' "
+            f"vertices={verts} ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Edit Regular Polygon Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_edit_regular_polygon(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._edit_regular_polygon_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._edit_regular_polygon_index_input.value()
+        center_x = self._edit_regular_polygon_center_x_input.value()
+        center_y = self._edit_regular_polygon_center_y_input.value()
+        radius = self._edit_regular_polygon_radius_input.value()
+        sides = self._edit_regular_polygon_sides_input.value()
+        rotation_deg = self._edit_regular_polygon_rotation_input.value()
+
+        response = self._run_operation(
+            "sketch_edit_regular_polygon",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+                "center_x": center_x,
+                "center_y": center_y,
+                "radius": radius,
+                "sides": sides,
+                "rotation_deg": rotation_deg,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Edited regular polygon at index {geometry_index} in sketch '{sketch_name}' "
+            f"in workspace document '{document_id}' "
+            f"center=({center_x},{center_y}) radius={radius} sides={sides} "
+            f"rotation={rotation_deg}deg ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Edit Polygon Geometry
+    # ------------------------------------------------------------------
+    def _on_sketch_edit_polygon(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._edit_polygon_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        geometry_index = self._edit_polygon_index_input.value()
+        vertices_text = self._edit_polygon_vertices_input.text().strip()
+        try:
+            import json as _json
+            vertices = _json.loads(vertices_text)
+        except Exception:
+            self._set_status(
+                "Error: Vertices must be valid JSON list of {x, y} objects.", error=True
+            )
+            return
+
+        response = self._run_operation(
+            "sketch_edit_polygon",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "geometry_index": geometry_index,
+                "vertices": vertices,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        geometry_count = (
+            result.get("geometry_count", 0) if isinstance(result, dict) else 0
+        )
+        self.refresh_document_label()
+        self._objects_list.clear()
+        verts = result.get("vertices", vertices) if isinstance(result, dict) else vertices
+        self._set_status(
+            f"Edited polygon at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
             f"vertices={verts} ({geometry_count} geometry).",
             error=False,

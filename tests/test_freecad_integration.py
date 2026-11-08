@@ -3008,3 +3008,385 @@ def test_real_freecad_sketch_edit_triangle_errors(tmp_path: Path) -> None:
             },
         )
     assert "collinear" in str(excinfo.value).lower() or "degenerate" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_regular_polygon(tmp_path: Path) -> None:
+    """Edit a regular polygon: change center, radius, sides via rotation; verify vertices, connectivity, regularity."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditregpoly", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditregpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add a regular pentagon (5 sides) at index 0-4.
+    bridge.run(
+        "sketch_add_regular_polygon",
+        {
+            "document_id": "skeditregpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 5,
+            "rotation_deg": 0.0,
+        },
+    )
+
+    # Inspect: should have 5 geometries, all LineSegment.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditregpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+    assert all(g["type"] == "LineSegment" for g in info["geometries"])
+
+    # Edit the regular polygon: new center, radius, rotation.
+    result = bridge.run(
+        "sketch_edit_regular_polygon",
+        {
+            "document_id": "skeditregpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "center_x": 10.0,
+            "center_y": 20.0,
+            "radius": 8.0,
+            "sides": 5,
+            "rotation_deg": 30.0,
+        },
+    )
+    assert result["geometry_index"] == 0
+    assert result["center_x"] == 10.0
+    assert result["center_y"] == 20.0
+    assert result["radius"] == 8.0
+    assert result["sides"] == 5
+    assert result["rotation_deg"] == 30.0
+    assert result["geometry_count"] == 5
+    assert len(result["vertices"]) == 5
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditregpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 5
+
+    # All five geometries are connected LineSegments forming a closed loop.
+    geometries = info["geometries"]
+    assert all(g["type"] == "LineSegment" for g in geometries)
+    for i in range(5):
+        end = geometries[i]["end_point"]
+        start = geometries[(i + 1) % 5]["start_point"]
+        assert end["x"] == pytest.approx(start["x"])
+        assert end["y"] == pytest.approx(start["y"])
+
+    # Vertex 0 should be at rotation 30deg on the new circumcircle.
+    import math as _math
+    v0 = geometries[0]["start_point"]
+    assert v0["x"] == pytest.approx(10.0 + 8.0 * _math.cos(_math.radians(30.0)))
+    assert v0["y"] == pytest.approx(20.0 + 8.0 * _math.sin(_math.radians(30.0)))
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_regular_polygon_errors(tmp_path: Path) -> None:
+    """sketch_edit_regular_polygon returns structured errors for missing sketch, wrong type, wrong side count, non-regular geometry, bad params."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditregpolyerr", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skeditregpolyerr",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditregpolyerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_regular_polygon",
+        {
+            "document_id": "skeditregpolyerr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 5.0,
+            "sides": 4,
+            "rotation_deg": 0.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_regular_polygon",
+            {
+                "document_id": "skeditregpolyerr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 5.0,
+                "sides": 4,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_regular_polygon",
+            {
+                "document_id": "skeditregpolyerr",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 5.0,
+                "sides": 4,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Wrong side count (ask for 5 sides but only 4 edges exist).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_regular_polygon",
+            {
+                "document_id": "skeditregpolyerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": 5.0,
+                "sides": 5,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Negative radius.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_regular_polygon",
+            {
+                "document_id": "skeditregpolyerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "radius": -1.0,
+                "sides": 4,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_polygon(tmp_path: Path) -> None:
+    """Edit a custom polygon: change vertices; verify connectivity, closure, vertex order preservation."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditpoly", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add a custom square (4 vertices) at index 0-3.
+    bridge.run(
+        "sketch_add_polygon",
+        {
+            "document_id": "skeditpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        },
+    )
+
+    # Inspect: should have 4 geometries, all LineSegment.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 4
+    assert all(g["type"] == "LineSegment" for g in info["geometries"])
+
+    # Edit the polygon with new ordered vertices.
+    result = bridge.run(
+        "sketch_edit_polygon",
+        {
+            "document_id": "skeditpoly",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "geometry_index": 0,
+            "vertices": [
+                {"x": 10.0, "y": 10.0},
+                {"x": 16.0, "y": 10.0},
+                {"x": 16.0, "y": 15.0},
+                {"x": 10.0, "y": 15.0},
+            ],
+        },
+    )
+    assert result["geometry_index"] == 0
+    assert result["vertices"] == [
+        {"x": 10.0, "y": 10.0},
+        {"x": 16.0, "y": 10.0},
+        {"x": 16.0, "y": 15.0},
+        {"x": 10.0, "y": 15.0},
+    ]
+    assert result["geometry_count"] == 4
+
+    # Verify edit persisted.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skeditpoly", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["geometry_count"] == 4
+
+    # All geometries connected in a closed loop, vertex order preserved.
+    geometries = info["geometries"]
+    assert all(g["type"] == "LineSegment" for g in geometries)
+    for i in range(4):
+        end = geometries[i]["end_point"]
+        start = geometries[(i + 1) % 4]["start_point"]
+        assert end["x"] == pytest.approx(start["x"])
+        assert end["y"] == pytest.approx(start["y"])
+    assert geometries[3]["end_point"]["x"] == pytest.approx(geometries[0]["start_point"]["x"])
+    assert geometries[3]["end_point"]["y"] == pytest.approx(geometries[0]["start_point"]["y"])
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_polygon_errors(tmp_path: Path) -> None:
+    """sketch_edit_polygon returns structured errors for missing sketch, wrong type, mismatched count, degenerate vertices, non-finite coords."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skeditpolyerr", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skeditpolyerr",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skeditpolyerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_polygon",
+        {
+            "document_id": "skeditpolyerr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "vertices": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 4.0, "y": 0.0},
+                {"x": 4.0, "y": 3.0},
+                {"x": 0.0, "y": 3.0},
+            ],
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_polygon",
+            {
+                "document_id": "skeditpolyerr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 4.0, "y": 0.0},
+                    {"x": 4.0, "y": 3.0},
+                    {"x": 0.0, "y": 3.0},
+                ],
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_polygon",
+            {
+                "document_id": "skeditpolyerr",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 4.0, "y": 0.0},
+                    {"x": 4.0, "y": 3.0},
+                    {"x": 0.0, "y": 3.0},
+                ],
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Mismatched vertex count (5 vertices for 4-edge polygon).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_polygon",
+            {
+                "document_id": "skeditpolyerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 4.0, "y": 0.0},
+                    {"x": 4.0, "y": 3.0},
+                    {"x": 0.0, "y": 3.0},
+                    {"x": 2.0, "y": 1.0},
+                ],
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Collinear / zero-area vertices.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_polygon",
+            {
+                "document_id": "skeditpolyerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "geometry_index": 0,
+                "vertices": [
+                    {"x": 0.0, "y": 0.0},
+                    {"x": 2.0, "y": 0.0},
+                    {"x": 4.0, "y": 0.0},
+                    {"x": 2.0, "y": 0.0},
+                ],
+            },
+        )
+    assert "zero area" in str(excinfo.value).lower() or "degenerate" in str(excinfo.value).lower()

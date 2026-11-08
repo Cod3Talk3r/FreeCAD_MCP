@@ -67,6 +67,8 @@ OP_SKETCH_EDIT_CIRCLE = "sketch_edit_circle"
 OP_SKETCH_EDIT_ELLIPSE = "sketch_edit_ellipse"
 OP_SKETCH_EDIT_RECTANGLE = "sketch_edit_rectangle"
 OP_SKETCH_EDIT_TRIANGLE = "sketch_edit_triangle"
+OP_SKETCH_EDIT_REGULAR_POLYGON = "sketch_edit_regular_polygon"
+OP_SKETCH_EDIT_POLYGON = "sketch_edit_polygon"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -4187,7 +4189,672 @@ def _op_sketch_edit_triangle(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: The complete, explicit set of operations the bridge can perform.
+def _op_sketch_edit_regular_polygon(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit an existing regular polygon (sides connected LineSegment geometries) in a sketch.
+
+    ``geometry_index`` is the index of the *first* line of the polygon; the
+    polygon occupies ``sides`` consecutive geometry slots (index through
+    index+sides-1).  The segments are mutated in place and the full geometry
+    list is reassigned to ``sketch.Geometry``, preserving each geometry's index,
+    construction state, and geometry ID, as well as all unrelated geometry.
+
+    Vertices lie on a circle centred at ``(center_x, center_y)`` on Z=0.
+    *rotation_deg* rotates the first vertex counter-clockwise from the positive
+    X axis, matching ``sketch_add_regular_polygon`` exactly.
+
+    Before mutating, the operation validates that the ``sides`` consecutive
+    geometries actually form a regular polygon: all LineSegment, connected in a
+    closed loop, all vertices at equal distance from the centre, equal edge
+    lengths, non-degenerate.  Constraint-dependent geometry is rejected.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    geometry_index_param = params.get("geometry_index")
+    center_x = params.get("center_x")
+    center_y = params.get("center_y")
+    radius = params.get("radius")
+    sides = params.get("sides")
+    rotation_deg = params.get("rotation_deg", 0)
+    workspace_str = params.get("workspace") or ""
+
+    # Validate geometry_index: must be an integer, not a boolean.
+    if isinstance(geometry_index_param, bool) or not isinstance(geometry_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_regular_polygon",
+            "error": "geometry_index must be an integer (boolean values are not accepted).",
+        }
+    geometry_index = geometry_index_param
+
+    # Validate centre and radius.
+    try:
+        cx_val = float(center_x)
+        cy_val = float(center_y)
+        radius_val = float(radius)
+        rotation_val = float(rotation_deg)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_edit_regular_polygon",
+            "error": "center_x, center_y, radius must be finite numbers and rotation_deg must be a finite number.",
+        }
+    for name, val in (("center_x", cx_val), ("center_y", cy_val), ("radius", radius_val), ("rotation_deg", rotation_val)):
+        if math.isnan(val) or math.isinf(val):
+            return {
+                "ok": False,
+                "op": "sketch_edit_regular_polygon",
+                "error": f"{name} must be a finite number.",
+            }
+    if radius_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_edit_regular_polygon",
+            "error": "radius must be a positive number.",
+        }
+
+    # Validate sides: must be an integer (not bool), at least 3.
+    if isinstance(sides, bool) or not isinstance(sides, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_regular_polygon",
+            "error": "sides must be an integer (boolean values are not accepted).",
+        }
+    sides_val = sides
+    if sides_val < 3:
+        return {
+            "ok": False,
+            "op": "sketch_edit_regular_polygon",
+            "error": "sides must be at least 3.",
+        }
+    if sides_val > MAX_POLYGON_SIDES:
+        return {
+            "ok": False,
+            "op": "sketch_edit_regular_polygon",
+            "error": f"sides must not exceed {MAX_POLYGON_SIDES}.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_edit_regular_polygon", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_edit_regular_polygon", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_edit_regular_polygon", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_edit_regular_polygon", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part.LineSegment geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot edit sketch geometry."
+            )
+
+        # Get current geometry count for range validation.
+        try:
+            geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_count = 0
+
+        # A regular polygon occupies exactly ``sides_val`` consecutive geometry slots.
+        last_index = geometry_index + sides_val - 1
+        if geometry_index < 0 or last_index >= geometry_count:
+            return _fail(
+                f"geometry_index {geometry_index} is out of range for a {sides_val}-sided polygon "
+                f"(valid range: 0 to {geometry_count - sides_val})."
+            )
+
+        # Load the candidate geometries.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        poly_geometries = [geometry_list[geometry_index + i] for i in range(sides_val)]
+
+        # Verify all are line segments.
+        geom_types = [type(g).__name__ for g in poly_geometries]
+        if any(gt != "LineSegment" for gt in geom_types):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a regular polygon: "
+                f"found types {geom_types}; expected {sides_val} LineSegment geometries."
+            )
+
+        # Read segment endpoints.
+        eps = 1e-9
+
+        def _same_point(ax, ay, bx, by) -> bool:
+            return abs(ax - bx) <= eps and abs(ay - by) <= eps
+
+        try:
+            seg_pts = []
+            for seg in poly_geometries:
+                sp = getattr(seg, "StartPoint", None)
+                ep = getattr(seg, "EndPoint", None)
+                if sp is None or ep is None:
+                    return _fail(
+                        f"geometry at index {geometry_index} does not form a valid regular polygon: "
+                        f"a line segment is missing StartPoint or EndPoint."
+                    )
+                seg_pts.append((_FC.Vector(float(sp.x), float(sp.y), float(sp.z)), _FC.Vector(float(ep.x), float(ep.y), float(ep.z))))
+        except (TypeError, ValueError, AttributeError) as exc:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a valid regular polygon: {exc}"
+            )
+
+        # Vertices: v[i] = seg[i].start.  Connectivity requires seg[i].end == seg[(i+1)%n].start.
+        vertices = [seg_pts[i][0] for i in range(sides_val)]
+        for i in range(sides_val):
+            end_pt = seg_pts[i][1]
+            next_start = seg_pts[(i + 1) % sides_val][0]
+            if not _same_point(end_pt.x, end_pt.y, next_start.x, next_start.y):
+                return _fail(
+                    f"geometry at index {geometry_index} does not form a connected closed polygon: "
+                    f"line {i} endpoint does not match line {(i + 1) % sides_val} start."
+                )
+
+        # Non-degenerate: signed area must be non-zero.
+        cross_sum = 0.0
+        for i in range(sides_val):
+            x1, y1 = vertices[i].x, vertices[i].y
+            x2, y2 = vertices[(i + 1) % sides_val].x, vertices[(i + 1) % sides_val].y
+            cross_sum += x1 * y2 - x2 * y1
+        scale_sq = max(
+            1.0,
+            max(
+                (vertices[(i + 1) % sides_val].x - vertices[i].x) ** 2
+                + (vertices[(i + 1) % sides_val].y - vertices[i].y) ** 2
+                for i in range(sides_val)
+            ),
+        )
+        if abs(cross_sum) <= eps * scale_sq:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a regular polygon: "
+                f"edges are collinear or degenerate (zero area)."
+            )
+
+        # Regularity: all vertices at equal distance from the existing centre;
+        # all edges equal length.  The centre is the existing polygon's centroid
+        # (which equals the circumcentre for a regular polygon), not the new
+        # centre_x/center_y/radius parameters (those describe the target shape).
+        cx_exist = sum(v.x for v in vertices) / sides_val
+        cy_exist = sum(v.y for v in vertices) / sides_val
+        dists = [math.hypot(v.x - cx_exist, v.y - cy_exist) for v in vertices]
+        edge_lens = [
+            math.hypot(vertices[(i + 1) % sides_val].x - vertices[i].x,
+                       vertices[(i + 1) % sides_val].y - vertices[i].y)
+            for i in range(sides_val)
+        ]
+        max_dist = max(dists)
+        max_edge = max(edge_lens)
+        dist_tol = max(1e-9, 1e-6 * max_dist)
+        edge_tol = max(1e-9, 1e-6 * max_edge)
+        for i, d in enumerate(dists):
+            if abs(d - dists[0]) > dist_tol:
+                return _fail(
+                    f"geometry at index {geometry_index} does not form a regular polygon: "
+                    f"vertex {i} distance from existing centre ({d:.6f}) differs from vertex 0 "
+                    f"({dists[0]:.6f})."
+                )
+        for i, e in enumerate(edge_lens):
+            if abs(e - edge_lens[0]) > edge_tol:
+                return _fail(
+                    f"geometry at index {geometry_index} does not form a regular polygon: "
+                    f"edge {i} length ({e:.6f}) differs from edge 0 length ({edge_lens[0]:.6f})."
+                )
+
+        # Constraint safety: reject if any constraint references any of the polygon geometry indices.
+        constraint_references_geometry = False
+        constraint_count_before = None
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+            for constraint in getattr(sketch, "Constraints", []):
+                for i in range(sides_val):
+                    idx = geometry_index + i
+                    if (
+                        getattr(constraint, "First", None) == idx
+                        or getattr(constraint, "Second", None) == idx
+                        or getattr(constraint, "Third", None) == idx
+                    ):
+                        constraint_references_geometry = True
+                        break
+                if constraint_references_geometry:
+                    break
+        except Exception:
+            pass
+
+        if constraint_references_geometry:
+            return _fail(
+                f"Cannot edit geometry at indices {geometry_index} through {last_index}: "
+                f"one or more lines are referenced by constraints. Remove the constraints first."
+            )
+
+        # Generate new vertices on the circumcircle, rotating counter-clockwise from +X,
+        # matching sketch_add_regular_polygon exactly.
+        start_angle = math.radians(rotation_val)
+        new_vertices = []
+        for i in range(sides_val):
+            angle = start_angle + 2.0 * math.pi * i / sides_val
+            new_vertices.append(
+                _FC.Vector(cx_val + radius_val * math.cos(angle), cy_val + radius_val * math.sin(angle), 0.0)
+            )
+
+        # Mutate the existing line geometries in place, preserving index,
+        # construction state, and geometry ID.  Reassign the full geometry list.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+            for i in range(sides_val):
+                target_geometry = geometry_list[geometry_index + i]
+                start_pt = new_vertices[i]
+                end_pt = new_vertices[(i + 1) % sides_val]
+                target_geometry.StartPoint = start_pt
+                target_geometry.EndPoint = end_pt
+                geometry_list[geometry_index + i] = target_geometry
+            sketch.Geometry = geometry_list
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _fail(
+                f"FreeCAD Sketcher API does not support editing regular polygon geometry: {exc}"
+            )
+
+        doc.recompute()
+
+        # Record constraint count after edit.
+        constraint_count_after = None
+        try:
+            constraint_count_after = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            pass
+
+        # Get updated geometry count.
+        updated_geometry_count = None
+        try:
+            updated_geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            pass
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_edit_regular_polygon",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "geometry_index": geometry_index,
+            "center_x": cx_val,
+            "center_y": cy_val,
+            "radius": radius_val,
+            "sides": sides_val,
+            "rotation_deg": rotation_val,
+            "vertices": [
+                {"x": new_vertices[i].x, "y": new_vertices[i].y} for i in range(sides_val)
+            ],
+            "geometry_count": updated_geometry_count if updated_geometry_count is not None else geometry_count,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": constraint_count_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_edit_polygon(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit an existing custom polygon (connected LineSegment geometries) in a sketch.
+
+    ``geometry_index`` is the index of the *first* line of the polygon; the
+    polygon occupies ``len(vertices)`` consecutive geometry slots.  The number of
+    supplied vertices must match the existing polygon's number of edges.  Vertex
+    ordering is preserved; no reordering or repair is performed.
+
+    Segments are mutated in place and the full geometry list is reassigned to
+    ``sketch.Geometry``, preserving each geometry's index, construction state,
+    and geometry ID, as well as all unrelated geometry.  The final edge connects
+    the last vertex back to the first (closed loop).
+
+    Before mutating, the operation validates that the selected geometries form a
+    valid closed polygon: all LineSegment, connected, at least three edges,
+    non-degenerate (non-zero area).  Constraint-dependent geometry is rejected.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    geometry_index_param = params.get("geometry_index")
+    vertices_param = params.get("vertices")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate geometry_index: must be an integer, not a boolean.
+    if isinstance(geometry_index_param, bool) or not isinstance(geometry_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_polygon",
+            "error": "geometry_index must be an integer (boolean values are not accepted).",
+        }
+    geometry_index = geometry_index_param
+
+    # Validate vertices: must be a list of at least 3 objects with x and y.
+    if not isinstance(vertices_param, list) or len(vertices_param) < 3:
+        return {
+            "ok": False,
+            "op": "sketch_edit_polygon",
+            "error": "vertices must be a list of at least 3 {x, y} objects.",
+        }
+
+    vertex_coords = []
+    for idx, v in enumerate(vertices_param):
+        if not isinstance(v, dict) or "x" not in v or "y" not in v:
+            return {
+                "ok": False,
+                "op": "sketch_edit_polygon",
+                "error": f"vertices[{idx}] must be an object with 'x' and 'y' keys.",
+            }
+        try:
+            vx = float(v["x"])
+            vy = float(v["y"])
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "op": "sketch_edit_polygon",
+                "error": f"vertices[{idx}] x and y must be finite numbers.",
+            }
+        if math.isnan(vx) or math.isinf(vx) or math.isnan(vy) or math.isinf(vy):
+            return {
+                "ok": False,
+                "op": "sketch_edit_polygon",
+                "error": f"vertices[{idx}] x and y must be finite numbers.",
+            }
+        vertex_coords.append((vx, vy))
+
+    n_vertices = len(vertex_coords)
+
+    # Reject consecutive duplicate vertices.
+    for i in range(n_vertices - 1):
+        if vertex_coords[i] == vertex_coords[i + 1]:
+            return {
+                "ok": False,
+                "op": "sketch_edit_polygon",
+                "error": f"consecutive duplicate vertex at index {i+1}.",
+            }
+
+    # Reject a repeated final vertex equal to the first (closure is automatic).
+    if vertex_coords[-1] == vertex_coords[0]:
+        return {
+            "ok": False,
+            "op": "sketch_edit_polygon",
+            "error": "final vertex duplicates the first; closure is automatic, do not repeat it.",
+        }
+
+    # Reject degenerate (zero area) polygons via signed area.
+    cross_sum = 0.0
+    for i in range(n_vertices):
+        x1, y1 = vertex_coords[i]
+        x2, y2 = vertex_coords[(i + 1) % n_vertices]
+        cross_sum += x1 * y2 - x2 * y1
+    edge_scale_sq = max(
+        1.0,
+        max(
+            (vertex_coords[(i + 1) % n_vertices][0] - vertex_coords[i][0]) ** 2
+            + (vertex_coords[(i + 1) % n_vertices][1] - vertex_coords[i][1]) ** 2
+            for i in range(n_vertices)
+        ),
+    )
+    if abs(cross_sum) <= 1e-9 * edge_scale_sq:
+        return {
+            "ok": False,
+            "op": "sketch_edit_polygon",
+            "error": "polygon has zero area (degenerate or collinear vertices).",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_edit_polygon", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_edit_polygon", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_edit_polygon", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_edit_polygon", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part.LineSegment geometry for Sketcher
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot edit sketch geometry."
+            )
+
+        # Get current geometry count for range validation.
+        try:
+            geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_count = 0
+
+        # The polygon occupies exactly n_vertices consecutive geometry slots.
+        last_index = geometry_index + n_vertices - 1
+        if geometry_index < 0 or last_index >= geometry_count:
+            return _fail(
+                f"geometry_index {geometry_index} is out of range for a {n_vertices}-vertex polygon "
+                f"(valid range: 0 to {geometry_count - n_vertices})."
+            )
+
+        # Load the candidate geometries.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        poly_geometries = [geometry_list[geometry_index + i] for i in range(n_vertices)]
+
+        # Verify all are line segments.
+        geom_types = [type(g).__name__ for g in poly_geometries]
+        if any(gt != "LineSegment" for gt in geom_types):
+            return _fail(
+                f"geometry at index {geometry_index} does not form a polygon: "
+                f"found types {geom_types}; expected {n_vertices} LineSegment geometries."
+            )
+
+        # Read segment endpoints.
+        eps = 1e-9
+
+        def _same_point(ax, ay, bx, by) -> bool:
+            return abs(ax - bx) <= eps and abs(ay - by) <= eps
+
+        try:
+            seg_pts = []
+            for seg in poly_geometries:
+                sp = getattr(seg, "StartPoint", None)
+                ep = getattr(seg, "EndPoint", None)
+                if sp is None or ep is None:
+                    return _fail(
+                        f"geometry at index {geometry_index} does not form a valid polygon: "
+                        f"a line segment is missing StartPoint or EndPoint."
+                    )
+                seg_pts.append((_FC.Vector(float(sp.x), float(sp.y), float(sp.z)), _FC.Vector(float(ep.x), float(ep.y), float(ep.z))))
+        except (TypeError, ValueError, AttributeError) as exc:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a valid polygon: {exc}"
+            )
+
+        # Vertices: v[i] = seg[i].start.  Connectivity requires seg[i].end ==
+        # seg[(i+1)%n].start (closed loop).
+        existing_vertices = [seg_pts[i][0] for i in range(n_vertices)]
+        for i in range(n_vertices):
+            end_pt = seg_pts[i][1]
+            next_start = seg_pts[(i + 1) % n_vertices][0]
+            if not _same_point(end_pt.x, end_pt.y, next_start.x, next_start.y):
+                return _fail(
+                    f"geometry at index {geometry_index} does not form a connected closed polygon: "
+                    f"line {i} endpoint does not match line {(i + 1) % n_vertices} start."
+                )
+
+        # Non-degenerate: signed area of existing geometry must be non-zero.
+        existing_cross = 0.0
+        for i in range(n_vertices):
+            x1, y1 = existing_vertices[i].x, existing_vertices[i].y
+            x2, y2 = existing_vertices[(i + 1) % n_vertices].x, existing_vertices[(i + 1) % n_vertices].y
+            existing_cross += x1 * y2 - x2 * y1
+        existing_scale_sq = max(
+            1.0,
+            max(
+                (existing_vertices[(i + 1) % n_vertices].x - existing_vertices[i].x) ** 2
+                + (existing_vertices[(i + 1) % n_vertices].y - existing_vertices[i].y) ** 2
+                for i in range(n_vertices)
+            ),
+        )
+        if abs(existing_cross) <= 1e-9 * existing_scale_sq:
+            return _fail(
+                f"geometry at index {geometry_index} does not form a valid polygon: "
+                f"existing geometry is degenerate or collinear (zero area)."
+            )
+
+        # Constraint safety: reject if any constraint references any polygon geometry index.
+        constraint_references_geometry = False
+        constraint_count_before = None
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+            for constraint in getattr(sketch, "Constraints", []):
+                for i in range(n_vertices):
+                    idx = geometry_index + i
+                    if (
+                        getattr(constraint, "First", None) == idx
+                        or getattr(constraint, "Second", None) == idx
+                        or getattr(constraint, "Third", None) == idx
+                    ):
+                        constraint_references_geometry = True
+                        break
+                if constraint_references_geometry:
+                    break
+        except Exception:
+            pass
+
+        if constraint_references_geometry:
+            return _fail(
+                f"Cannot edit geometry at indices {geometry_index} through {last_index}: "
+                f"one or more lines are referenced by constraints. Remove the constraints first."
+            )
+
+        # Mutate the existing line geometries in place, preserving index,
+        # construction state, and geometry ID.  Reassign the full geometry list.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+            new_vertices = [_FC.Vector(x, y, 0.0) for x, y in vertex_coords]
+            for i in range(n_vertices):
+                target_geometry = geometry_list[geometry_index + i]
+                start_pt = new_vertices[i]
+                end_pt = new_vertices[(i + 1) % n_vertices]
+                target_geometry.StartPoint = start_pt
+                target_geometry.EndPoint = end_pt
+                geometry_list[geometry_index + i] = target_geometry
+            sketch.Geometry = geometry_list
+        except (AttributeError, TypeError, ValueError) as exc:
+            return _fail(
+                f"FreeCAD Sketcher API does not support editing polygon geometry: {exc}"
+            )
+
+        doc.recompute()
+
+        # Record constraint count after edit.
+        constraint_count_after = None
+        try:
+            constraint_count_after = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            pass
+
+        # Get updated geometry count.
+        updated_geometry_count = None
+        try:
+            updated_geometry_count = len(getattr(sketch, "Geometry", []))
+        except Exception:
+            pass
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_edit_polygon",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "geometry_index": geometry_index,
+            "vertices": [
+                {"x": new_vertices[i].x, "y": new_vertices[i].y} for i in range(n_vertices)
+            ],
+            "geometry_count": updated_geometry_count if updated_geometry_count is not None else geometry_count,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": constraint_count_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -4221,7 +4888,10 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_EDIT_ELLIPSE: _op_sketch_edit_ellipse,
     OP_SKETCH_EDIT_RECTANGLE: _op_sketch_edit_rectangle,
     OP_SKETCH_EDIT_TRIANGLE: _op_sketch_edit_triangle,
+    OP_SKETCH_EDIT_REGULAR_POLYGON: _op_sketch_edit_regular_polygon,
+    OP_SKETCH_EDIT_POLYGON: _op_sketch_edit_polygon,
 }
+
 
 def _canonical_envelope(op: str, handler_result: Any) -> dict[str, Any]:
     """Return a canonical response envelope for a handler's return value.

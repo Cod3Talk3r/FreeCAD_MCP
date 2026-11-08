@@ -360,6 +360,51 @@ class SketchEditTriangleResult(BaseModel):
     )
 
 
+class SketchEditRegularPolygonResult(BaseModel):
+    """Result of sketch_edit_regular_polygon."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the regular polygon was edited in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the edited regular polygon."
+    )
+    center_x: float = Field(description="New centre X coordinate in millimetres.")
+    center_y: float = Field(description="New centre Y coordinate in millimetres.")
+    radius: float = Field(description="New circumradius in millimetres (must be positive).")
+    sides: int = Field(description="Number of sides of the regular polygon.")
+    rotation_deg: float = Field(description="Rotation of the first vertex counter-clockwise from +X, in degrees.")
+    vertices: list[dict[str, float]] = Field(
+        description="Ordered vertices as [{x, y}, ...] in millimetres, on the circumcircle."
+    )
+    geometry_count: int = Field(description="Number of geometries in the sketch after editing.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+
+
+class SketchEditPolygonResult(BaseModel):
+    """Result of sketch_edit_polygon."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the polygon was edited in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the edited polygon."
+    )
+    vertices: list[dict[str, float]] = Field(
+        description="Ordered vertices as [{x, y}, ...] in millimetres."
+    )
+    geometry_count: int = Field(description="Number of geometries in the sketch after editing.")
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -633,6 +678,42 @@ class SketchEditTriangleParams(BaseModel):
     )
     vertices: list[dict[str, float]] = Field(
         description="Three ordered vertices as [{x, y}, {x, y}, {x, y}] in millimetres."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditRegularPolygonParams(BaseModel):
+    """Parameters for editing regular polygon geometry in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to edit the regular polygon in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the regular polygon to edit."
+    )
+    center_x: float = Field(default=0.0, description="New centre X coordinate in millimetres.")
+    center_y: float = Field(default=0.0, description="New centre Y coordinate in millimetres.")
+    radius: float = Field(default=5.0, description="New circumradius in millimetres (must be positive).")
+    sides: int = Field(default=5, description="Number of sides of the regular polygon.")
+    rotation_deg: float = Field(
+        default=0.0, description="Rotation of the first vertex counter-clockwise from +X, in degrees."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditPolygonParams(BaseModel):
+    """Parameters for editing custom polygon geometry in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to edit the polygon in.")
+    geometry_index: int = Field(
+        description="Zero-based index of the first line of the polygon to edit."
+    )
+    vertices: list[dict[str, float]] = Field(
+        description="Ordered vertices as [{x, y}, ...] in millimetres."
     )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
@@ -2060,6 +2141,122 @@ def _register_tools(server: Any, settings: Settings) -> None:
         result = _run_bridge_op(bridge, "sketch_edit_triangle", bridge_params)
 
         return SketchEditTriangleResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_index=result.get("geometry_index", params.geometry_index),
+            vertices=result.get("vertices", params.vertices),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_regular_polygon
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_regular_polygon",
+        title="Edit regular polygon geometry in sketch",
+        description=(
+            "Edit an existing regular polygon (``sides`` connected LineSegment "
+            "geometries) in a Sketcher::SketchObject.  *geometry_index* is the "
+            "index of the first line of the polygon; the polygon occupies "
+            "*sides* consecutive geometry slots.  Vertices lie on a circle "
+            "centred at *center_x*, *center_y* with *radius* circumradius, and "
+            "*rotation_deg* rotates the first vertex counter-clockwise from +X, "
+            "matching sketch_add_regular_polygon exactly.  Validates that the "
+            "selected geometries form a regular polygon (equal edge lengths, "
+            "equal distance from centre, connected closed loop, non-degenerate), "
+            "that all values are finite, and that no constraints reference the "
+            "geometry being edited.  The document is locked exclusively during "
+            "the operation, recomputed, saved atomically, and its revision is "
+            "bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_regular_polygon_tool(params: SketchEditRegularPolygonParams) -> SketchEditRegularPolygonResult:
+        """Edit regular polygon geometry in a sketch and return its info."""
+        validate_direct_request("sketch_edit_regular_polygon", params.model_dump())
+        for name, value in (
+            ("center_x", params.center_x),
+            ("center_y", params.center_y),
+            ("radius", params.radius),
+            ("rotation_deg", params.rotation_deg),
+        ):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "center_x": params.center_x,
+            "center_y": params.center_y,
+            "radius": params.radius,
+            "sides": params.sides,
+            "rotation_deg": params.rotation_deg,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_edit_regular_polygon", bridge_params)
+
+        return SketchEditRegularPolygonResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_index=result.get("geometry_index", params.geometry_index),
+            center_x=result.get("center_x", params.center_x),
+            center_y=result.get("center_y", params.center_y),
+            radius=result.get("radius", params.radius),
+            sides=result.get("sides", params.sides),
+            rotation_deg=result.get("rotation_deg", params.rotation_deg),
+            vertices=result.get("vertices", []),
+            geometry_count=result.get("geometry_count", 0),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_polygon
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_polygon",
+        title="Edit polygon geometry in sketch",
+        description=(
+            "Edit an existing custom polygon (connected LineSegment geometries) "
+            "in a Sketcher::SketchObject.  *geometry_index* is the index of the "
+            "first line of the polygon; the polygon occupies "
+            "len(vertices) consecutive geometry slots.  The number of supplied "
+            "vertices must match the existing polygon's number of edges.  Vertex "
+            "ordering is preserved; no reordering or repair is performed.  The "
+            "final edge connects the last vertex back to the first (closed "
+            "loop).  Validates that the selected geometries form a valid closed "
+            "polygon, that all coordinates are finite, and that no constraints "
+            "reference the geometry being edited.  The document is locked "
+            "exclusively during the operation, recomputed, saved atomically, "
+            "and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_polygon_tool(params: SketchEditPolygonParams) -> SketchEditPolygonResult:
+        """Edit polygon geometry in a sketch and return its info."""
+        validate_direct_request("sketch_edit_polygon", params.model_dump())
+        for i, v in enumerate(params.vertices):
+            if not isinstance(v, dict) or "x" not in v or "y" not in v:
+                raise ValueError(f"vertices[{i}] must be an object with 'x' and 'y' keys.")
+            for name in ("x", "y"):
+                if math.isnan(v[name]) or math.isinf(v[name]):
+                    raise ValueError(f"vertices[{i}].{name} must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "geometry_index": params.geometry_index,
+            "vertices": params.vertices,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_edit_polygon", bridge_params)
+
+        return SketchEditPolygonResult(
             document_id=params.document_id,
             sketch_name=result.get("sketch_name", params.sketch_name),
             geometry_index=result.get("geometry_index", params.geometry_index),
