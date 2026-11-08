@@ -405,6 +405,28 @@ class SketchEditPolygonResult(BaseModel):
     )
 
 
+class SketchPadResult(BaseModel):
+    """Result of sketch_pad."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch used as the Pad profile.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Pad.")
+    pad_name: str = Field(description="Name of the created PartDesign::Pad.")
+    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    length: float = Field(description="Extrusion length in millimetres.")
+    reversed: bool = Field(description="Whether the extrusion direction is reversed.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -715,6 +737,22 @@ class SketchEditPolygonParams(BaseModel):
     vertices: list[dict[str, float]] = Field(
         description="Ordered vertices as [{x, y}, ...] in millimetres."
     )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchPadParams(BaseModel):
+    """Parameters for creating a PartDesign::Pad from an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to use as the Pad profile.")
+    length: float = Field(default=10.0, description="Extrusion length in millimetres (must be positive).")
+    reversed: bool = Field(
+        default=False, description="Whether to extrude in the reversed direction."
+    )
+    pad_name: str = Field(default="Pad", description="Name for the new PartDesign::Pad object.")
+    body_name: str = Field(default="Body", description="Name for the PartDesign::Body (created if needed).")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -2264,6 +2302,56 @@ def _register_tools(server: Any, settings: Settings) -> None:
             geometry_count=result.get("geometry_count", 0),
             constraint_count_before=result.get("constraint_count_before"),
             constraint_count_after=result.get("constraint_count_after"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_pad
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_pad",
+        title="Create a PartDesign Pad from a sketch",
+        description=(
+            "Create a native PartDesign::Pad that extrudes an existing "
+            "Sketcher::SketchObject into a 3D solid.  A PartDesign::Body is "
+            "created if the sketch is not already inside one; otherwise the "
+            "existing Body is reused.  The sketch is added to the Body via "
+            "body.addObject(sketch), preserving its identity, geometry, and "
+            "parametric editability.  The Pad profile is set to the sketch, "
+            "and *length* and *reversed* are applied.  The document is "
+            "recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_pad_tool(params: SketchPadParams) -> SketchPadResult:
+        """Create a PartDesign Pad from a sketch and return its info."""
+        validate_direct_request("sketch_pad", params.model_dump())
+        if math.isnan(params.length) or math.isinf(params.length):
+            raise ValueError("length must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "length": params.length,
+            "reversed": params.reversed,
+            "pad_name": params.pad_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_pad", bridge_params)
+
+        return SketchPadResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            body_name=result.get("body_name", params.body_name),
+            pad_name=result.get("pad_name", params.pad_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            length=result.get("length", params.length),
+            reversed=result.get("reversed", params.reversed),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
         )
 
     # ------------------------------------------------------------------

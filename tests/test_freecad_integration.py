@@ -3390,3 +3390,175 @@ def test_real_freecad_sketch_edit_polygon_errors(tmp_path: Path) -> None:
             },
         )
     assert "zero area" in str(excinfo.value).lower() or "degenerate" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_pad_from_rectangle(tmp_path: Path) -> None:
+    """Create a Pad from a rectangle sketch; verify Body, Pad, length, reversed, and solid."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skpadrect", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpadrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skpadrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 4.0,
+            "height": 3.0,
+        },
+    )
+
+    result = bridge.run(
+        "sketch_pad",
+        {
+            "document_id": "skpadrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": False,
+        },
+    )
+    assert result["sketch_name"] == "Sketch1"
+    assert result["body_name"] == "Body"
+    assert result["pad_name"] == "Pad"
+    assert result["profile_name"] == "Sketch1"
+    assert result["length"] == 10.0
+    assert result["reversed"] is False
+    assert result["solids_count"] == 1
+    assert result["volume"] is not None
+    assert result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_sketch_pad_from_circle(tmp_path: Path) -> None:
+    """Create a Pad from a circle sketch; verify reversed direction."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skpadcirc", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpadcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skpadcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 0.0,
+            "center_y": 0.0,
+            "radius": 2.0,
+        },
+    )
+
+    result = bridge.run(
+        "sketch_pad",
+        {
+            "document_id": "skpadcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+            "reversed": True,
+        },
+    )
+    assert result["length"] == 5.0
+    assert result["reversed"] is True
+    assert result["solids_count"] == 1
+    assert result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_sketch_pad_errors(tmp_path: Path) -> None:
+    """sketch_pad returns structured errors for missing sketch, wrong type, invalid length, invalid reversed."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skpaderr", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "skpaderr",
+            "workspace": workspace,
+            "object_name": "Box1",
+            "length": 4.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpaderr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skpaderr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 4.0,
+            "height": 3.0,
+        },
+    )
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pad",
+            {
+                "document_id": "skpaderr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "length": 10.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Wrong object type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pad",
+            {
+                "document_id": "skpaderr",
+                "workspace": workspace,
+                "sketch_name": "Box1",
+                "length": 10.0,
+            },
+        )
+    assert "Sketcher::SketchObject" in str(excinfo.value)
+
+    # Zero length.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pad",
+            {
+                "document_id": "skpaderr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "length": 0.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
+
+    # Negative length.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pad",
+            {
+                "document_id": "skpaderr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "length": -5.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()

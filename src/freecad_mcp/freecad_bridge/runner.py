@@ -69,6 +69,7 @@ OP_SKETCH_EDIT_RECTANGLE = "sketch_edit_rectangle"
 OP_SKETCH_EDIT_TRIANGLE = "sketch_edit_triangle"
 OP_SKETCH_EDIT_REGULAR_POLYGON = "sketch_edit_regular_polygon"
 OP_SKETCH_EDIT_POLYGON = "sketch_edit_polygon"
+OP_SKETCH_PAD = "sketch_pad"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -4855,6 +4856,275 @@ def _op_sketch_edit_polygon(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a PartDesign::Pad that extrudes an existing sketch into a 3D solid.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::Pad`` (not
+    ``Part::Extrusion``).  If the sketch already belongs to a Body, that Body
+    is reused.  Otherwise a new Body is created and the sketch is added to it
+    via ``body.addObject(sketch)``, preserving the sketch's identity, geometry,
+    and parametric editability.
+
+    The Pad profile is set to the existing sketch, and the requested length
+    and reversed direction are applied.  After recompute, the resulting Pad
+    shape is validated (non-null solid with positive volume).  The document is
+    locked, recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the on-disk
+    document is left unmodified (rollback via the established save-on-success
+    pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    length = params.get("length")
+    reversed_param = params.get("reversed", False)
+    pad_name = params.get("pad_name") or "Pad"
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    # Validate sketch_name.
+    if not sketch_name.strip():
+        return {
+            "ok": False,
+            "op": "sketch_pad",
+            "error": "sketch_name must not be empty.",
+        }
+
+    # Validate length: finite and positive.
+    try:
+        length_val = float(length)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_pad",
+            "error": "length must be a finite number.",
+        }
+    if math.isnan(length_val) or math.isinf(length_val):
+        return {
+            "ok": False,
+            "op": "sketch_pad",
+            "error": "length must be a finite number.",
+        }
+    if length_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_pad",
+            "error": "length must be a positive number.",
+        }
+
+    # Validate reversed: must be a boolean (not an int/float that looks like one).
+    if not isinstance(reversed_param, bool):
+        return {
+            "ok": False,
+            "op": "sketch_pad",
+            "error": "reversed must be a boolean (true/false).",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_pad", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_pad", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_pad", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_pad", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Find the sketch and verify it is a Sketcher::SketchObject.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot create a Pad from it."
+            )
+
+        # Determine the Body: reuse an existing Body that contains the sketch,
+        # or create a new Body and add the sketch to it.
+        body = None
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    # Check if the sketch is already a feature of this Body.
+                    try:
+                        if sketch in getattr(obj, "Group", []) or sketch in getattr(obj, "outList", []):
+                            body = obj
+                            break
+                    except Exception:
+                        pass
+        except Exception:
+            body = None
+
+        if body is None:
+            # No existing Body contains the sketch.  Create a new Body.
+            # Avoid name clashes.
+            counter = 0
+            desired_body_name = body_name
+            while doc.getObject(desired_body_name) is not None:
+                counter += 1
+                desired_body_name = f"{body_name}_{counter}"
+            try:
+                body = doc.addObject("PartDesign::Body", desired_body_name)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not create a PartDesign::Body: {exc}"
+                )
+            # Add the sketch to the Body.  This preserves the sketch's identity,
+            # geometry, and parametric editability.
+            try:
+                body.addObject(sketch)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not add sketch to Body: {exc}.  The sketch may already "
+                    f"belong to another Body or may not be suitable for PartDesign."
+                )
+
+        body_name_used = getattr(body, "Name", body_name)
+
+        # Create the Pad.  Avoid name clashes.
+        counter = 0
+        desired_pad_name = pad_name
+        while doc.getObject(desired_pad_name) is not None:
+            counter += 1
+            desired_pad_name = f"{pad_name}_{counter}"
+        try:
+            pad = doc.addObject("PartDesign::Pad", desired_pad_name)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Pad: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Pad profile to the existing sketch.
+        try:
+            pad.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pad profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Apply length and reversed direction.
+        try:
+            pad.Length = length_val
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pad length: {exc}"
+            )
+        try:
+            pad.Reversed = reversed_param
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pad reversed direction: {exc}"
+            )
+
+        # Recompute the document so FreeCAD evaluates the Pad feature tree.
+        doc.recompute()
+
+        # Validate the resulting Pad: it must have a valid, non-null solid shape.
+        shape = getattr(pad, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"Pad '{desired_pad_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate."
+            )
+        try:
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"Pad '{desired_pad_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Pad '{desired_pad_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"Pad '{desired_pad_name}' produced no solid.  The sketch profile may be "
+                f"open or not suitable for a single-solid Pad."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_pad",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "body_name": body_name_used,
+            "pad_name": desired_pad_name,
+            "profile_name": sketch_name,
+            "length": length_val,
+            "reversed": reversed_param,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -4890,6 +5160,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_EDIT_TRIANGLE: _op_sketch_edit_triangle,
     OP_SKETCH_EDIT_REGULAR_POLYGON: _op_sketch_edit_regular_polygon,
     OP_SKETCH_EDIT_POLYGON: _op_sketch_edit_polygon,
+    OP_SKETCH_PAD: _op_sketch_pad,
 }
 
 

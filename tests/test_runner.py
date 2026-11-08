@@ -273,9 +273,65 @@ class _FakeSketch:
         del self.Geometry[index]
 
 
+class _FakeBoundBox:
+    """Minimal stand-in for a FreeCAD BoundBox."""
+
+    def __init__(self, xmin=0.0, ymin=0.0, zmin=0.0, xmax=10.0, ymax=10.0, zmax=10.0):
+        self.XMin = xmin
+        self.YMin = ymin
+        self.ZMin = zmin
+        self.XMax = xmax
+        self.YMax = ymax
+        self.ZMax = zmax
+
+
+class _FakeShape:
+    """Minimal stand-in for a FreeCAD shape with a valid solid."""
+
+    def __init__(self, volume: float = 100.0) -> None:
+        self.Volume = volume
+        self._volume = volume
+        self.Solids = [SimpleNamespace(Volume=volume)]
+        self.BoundBox = _FakeBoundBox()
+
+    def isValid(self) -> bool:
+        return True
+
+
+class _FakeBody:
+    """Minimal stand-in for a PartDesign::Body."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Body"
+        self.Group: list = []
+        self.outList: list = []
+
+    def addObject(self, obj: object) -> None:
+        self.Group.append(obj)
+
+
+class _FakePad:
+    """Minimal stand-in for a PartDesign::Pad."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Pad"
+        self.Profile: object = None
+        self.Length: float = 0.0
+        self.Reversed: bool = False
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
+
+    @property
+    def Objects(self) -> list:
+        return list(self.objects.values())
 
     def getObject(self, name: str) -> object | None:
         return self.objects.get(name)
@@ -283,6 +339,10 @@ class _FakeDoc:
     def addObject(self, type_id: str, name: str) -> object:
         if type_id == "Sketcher::SketchObject":
             obj: object = _FakeSketch(name)
+        elif type_id == "PartDesign::Body":
+            obj: object = _FakeBody(name)
+        elif type_id == "PartDesign::Pad":
+            obj: object = _FakePad(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -501,6 +561,8 @@ def _install_fake_freecad(
     monkeypatch.setitem(sys.modules, "Part", part)
     sketcher = types.ModuleType("Sketcher")
     monkeypatch.setitem(sys.modules, "Sketcher", sketcher)
+    partdesign = types.ModuleType("PartDesign")
+    monkeypatch.setitem(sys.modules, "PartDesign", partdesign)
 
 
 def test_create_sketch_creates_empty_sketch_on_xy_plane(
@@ -5958,3 +6020,365 @@ def test_handle_request_dispatches_sketch_edit_polygon(
     assert response["op"] == "sketch_edit_polygon"
     assert response["result"]["geometry_index"] == 0
     assert len(response["result"]["vertices"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# Milestone 10-A: Sketch-based Pad (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+def _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0):
+    """Add a closed rectangle sketch (4 LineSegments)."""
+    sketch.Geometry.append(LineSegment(_FakePoint(x, y, 0), _FakePoint(x + width, y, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x + width, y, 0), _FakePoint(x + width, y + height, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x + width, y + height, 0), _FakePoint(x, y + height, 0)))
+    sketch.Geometry.append(LineSegment(_FakePoint(x, y + height, 0), _FakePoint(x, y, 0)))
+
+
+def _make_circle_sketch(sketch, cx=0.0, cy=0.0, radius=2.0):
+    """Add a closed circle sketch (1 Circle geometry)."""
+    sketch.Geometry.append(Circle(_FakePoint(cx, cy, 0), radius))
+
+
+def test_sketch_pad_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": False,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pad"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["pad_name"] == "Pad"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["length"] == 10.0
+    assert result["result"]["reversed"] is False
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    # Verify objects were created.
+    assert doc.getObject("Body") is not None
+    assert doc.getObject("Pad") is not None
+    pad = doc.objects["Pad"]
+    assert pad.Profile is sketch
+    assert pad.Length == 10.0
+    assert pad.Reversed is False
+    assert pad.Shape is not None
+    assert pad.Shape.isValid() is True
+
+
+def test_sketch_pad_successful_from_circle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_circle_sketch(sketch, cx=0.0, cy=0.0, radius=2.0)
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+            "reversed": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pad"
+    assert result["result"]["length"] == 5.0
+    assert result["result"]["reversed"] is True
+    assert result["result"]["solids_count"] == 1
+
+    pad = doc.objects["Pad"]
+    assert pad.Length == 5.0
+    assert pad.Reversed is True
+    assert pad.Profile is sketch
+
+
+def test_sketch_pad_standalone_sketch_integrated_into_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone sketch (not in any Body) should be added to a new Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    # Verify sketch is NOT in any Body before the pad.
+    assert len(doc.objects) == 1  # only the sketch
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["body_name"] == "Body"
+
+    # Verify sketch was added to the Body.
+    body = doc.objects["Body"]
+    assert sketch in body.Group
+
+
+def test_sketch_pad_reuses_existing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the sketch already belongs to a Body, that Body is reused."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    # Create a Body and add the sketch to it first.
+    body = doc.addObject("PartDesign::Body", "MyBody")
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+    body.addObject(sketch)
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "body_name": "MyBody",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["body_name"] == "MyBody"
+
+    # Verify the same Body was reused (no new Body created).
+    body_count = sum(
+        1 for obj in doc.objects.values() if getattr(obj, "TypeId", "") == "PartDesign::Body"
+    )
+    assert body_count == 1
+
+
+def test_sketch_pad_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_pad_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    # Add a box (non-sketch object) to the document after the sketch is saved.
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_pad_invalid_length_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_pad_invalid_length_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": -5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_pad_invalid_length_non_finite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    import math as _math
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": _math.nan,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "finite" in result["error"].lower()
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": _math.inf,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "finite" in result["error"].lower()
+
+
+def test_sketch_pad_invalid_reversed_not_bool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": 1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_pad_empty_sketch_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_pad(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_pad",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "length": 7.5,
+                "reversed": True,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_pad"
+    assert response["result"]["length"] == 7.5
+    assert response["result"]["reversed"] is True
+    assert response["result"]["solids_count"] == 1

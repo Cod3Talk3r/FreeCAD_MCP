@@ -676,6 +676,32 @@ class MCPGuiPanel:
         edit_poly_layout.addWidget(self._edit_polygon_button, 4, 0, 1, 2)
         layout.addWidget(edit_poly_group)
 
+        # ---- Sketch Pad ------------------------------------------------
+        pad_group = QtWidgets.QGroupBox("Sketch Pad (PartDesign)")
+        pad_layout = QtWidgets.QGridLayout(pad_group)
+        self._pad_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        pad_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        pad_layout.addWidget(self._pad_sketch_input, 0, 1)
+        self._pad_name_input = QtWidgets.QLineEdit("Pad")
+        pad_layout.addWidget(QtWidgets.QLabel("Pad name:"), 1, 0)
+        pad_layout.addWidget(self._pad_name_input, 1, 1)
+        self._pad_body_name_input = QtWidgets.QLineEdit("Body")
+        pad_layout.addWidget(QtWidgets.QLabel("Body name:"), 2, 0)
+        pad_layout.addWidget(self._pad_body_name_input, 2, 1)
+        self._pad_length_input = QtWidgets.QDoubleSpinBox()
+        self._pad_length_input.setRange(0.001, 100000.0)
+        self._pad_length_input.setValue(10.0)
+        self._pad_length_input.setDecimals(3)
+        pad_layout.addWidget(QtWidgets.QLabel("Length (mm):"), 3, 0)
+        pad_layout.addWidget(self._pad_length_input, 3, 1)
+        self._pad_reversed_input = QtWidgets.QCheckBox("Reversed direction")
+        self._pad_reversed_input.setChecked(False)
+        pad_layout.addWidget(self._pad_reversed_input, 4, 0, 1, 2)
+        self._pad_button = QtWidgets.QPushButton("Create Pad")
+        self._pad_button.clicked.connect(self._on_sketch_pad)
+        pad_layout.addWidget(self._pad_button, 5, 0, 1, 2)
+        layout.addWidget(pad_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1751,6 +1777,50 @@ class MCPGuiPanel:
             f"Edited polygon at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
             f"vertices={verts} ({geometry_count} geometry).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Create Pad
+    # ------------------------------------------------------------------
+    def _on_sketch_pad(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._pad_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        pad_name = self._pad_name_input.text().strip() or "Pad"
+        body_name = self._pad_body_name_input.text().strip() or "Body"
+        length = self._pad_length_input.value()
+        reversed_direction = self._pad_reversed_input.isChecked()
+
+        response = self._run_operation(
+            "sketch_pad",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "length": length,
+                "reversed": reversed_direction,
+                "pad_name": pad_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Pad '{result.get('pad_name', pad_name)}' from sketch "
+            f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
+            f"length={length}mm reversed={reversed_direction} "
+            f"in workspace document '{document_id}'.",
             error=False,
         )
 
