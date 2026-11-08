@@ -702,6 +702,32 @@ class MCPGuiPanel:
         pad_layout.addWidget(self._pad_button, 5, 0, 1, 2)
         layout.addWidget(pad_group)
 
+        # ---- Sketch Pocket ------------------------------------------------
+        pocket_group = QtWidgets.QGroupBox("Sketch Pocket (PartDesign)")
+        pocket_layout = QtWidgets.QGridLayout(pocket_group)
+        self._pocket_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        pocket_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        pocket_layout.addWidget(self._pocket_sketch_input, 0, 1)
+        self._pocket_name_input = QtWidgets.QLineEdit("Pocket")
+        pocket_layout.addWidget(QtWidgets.QLabel("Pocket name:"), 1, 0)
+        pocket_layout.addWidget(self._pocket_name_input, 1, 1)
+        self._pocket_body_name_input = QtWidgets.QLineEdit("Body")
+        pocket_layout.addWidget(QtWidgets.QLabel("Body name:"), 2, 0)
+        pocket_layout.addWidget(self._pocket_body_name_input, 2, 1)
+        self._pocket_length_input = QtWidgets.QDoubleSpinBox()
+        self._pocket_length_input.setRange(0.001, 100000.0)
+        self._pocket_length_input.setValue(10.0)
+        self._pocket_length_input.setDecimals(3)
+        pocket_layout.addWidget(QtWidgets.QLabel("Length (mm):"), 3, 0)
+        pocket_layout.addWidget(self._pocket_length_input, 3, 1)
+        self._pocket_reversed_input = QtWidgets.QCheckBox("Reversed direction")
+        self._pocket_reversed_input.setChecked(False)
+        pocket_layout.addWidget(self._pocket_reversed_input, 4, 0, 1, 2)
+        self._pocket_button = QtWidgets.QPushButton("Create Pocket")
+        self._pocket_button.clicked.connect(self._on_sketch_pocket)
+        pocket_layout.addWidget(self._pocket_button, 5, 0, 1, 2)
+        layout.addWidget(pocket_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1818,6 +1844,50 @@ class MCPGuiPanel:
         self._objects_list.clear()
         self._set_status(
             f"Created Pad '{result.get('pad_name', pad_name)}' from sketch "
+            f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
+            f"length={length}mm reversed={reversed_direction} "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch: Create Pocket
+    # ------------------------------------------------------------------
+    def _on_sketch_pocket(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._pocket_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        pocket_name = self._pocket_name_input.text().strip() or "Pocket"
+        body_name = self._pocket_body_name_input.text().strip() or "Body"
+        length = self._pocket_length_input.value()
+        reversed_direction = self._pocket_reversed_input.isChecked()
+
+        response = self._run_operation(
+            "sketch_pocket",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "length": length,
+                "reversed": reversed_direction,
+                "pocket_name": pocket_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Pocket '{result.get('pocket_name', pocket_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
             f"length={length}mm reversed={reversed_direction} "
             f"in workspace document '{document_id}'.",

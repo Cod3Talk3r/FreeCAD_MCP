@@ -325,6 +325,19 @@ class _FakePad:
         self.Shape: object = _FakeShape()
 
 
+class _FakePocket:
+    """Minimal stand-in for a PartDesign::Pocket."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Pocket"
+        self.Profile: object = None
+        self.Length: float = 0.0
+        self.Reversed: bool = False
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
@@ -343,6 +356,8 @@ class _FakeDoc:
             obj: object = _FakeBody(name)
         elif type_id == "PartDesign::Pad":
             obj: object = _FakePad(name)
+        elif type_id == "PartDesign::Pocket":
+            obj: object = _FakePocket(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -6381,4 +6396,438 @@ def test_handle_request_dispatches_sketch_pad(
     assert response["op"] == "sketch_pad"
     assert response["result"]["length"] == 7.5
     assert response["result"]["reversed"] is True
+    assert response["result"]["solids_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Milestone 10-B: Sketch-based Pocket (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+def test_sketch_pocket_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Create a Pocket from a rectangle sketch inside a Body with a base Box solid."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    # Create a base Box solid first (simulating a preceding feature in the Body).
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    # Create a Body containing both the Box and the sketch.
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.addObject(sketch)
+    # Set Body Tip to the Box (preceding solid feature).
+    body.Tip = box
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+            "reversed": False,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pocket"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["pocket_name"] == "Pocket"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["length"] == 5.0
+    assert result["result"]["reversed"] is False
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    pocket = doc.objects["Pocket"]
+    assert pocket.Profile is sketch
+    assert pocket.Length == 5.0
+    assert pocket.Reversed is False
+    assert pocket.Shape is not None
+    assert pocket.Shape.isValid() is True
+
+
+def test_sketch_pocket_successful_from_circle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Create a Pocket from a circle sketch with reversed direction."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_circle_sketch(sketch, cx=0.0, cy=0.0, radius=2.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.addObject(sketch)
+    body.Tip = box
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 3.0,
+            "reversed": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pocket"
+    assert result["result"]["length"] == 3.0
+    assert result["result"]["reversed"] is True
+    assert result["result"]["solids_count"] == 1
+
+    pocket = doc.objects["Pocket"]
+    assert pocket.Length == 3.0
+    assert pocket.Reversed is True
+    assert pocket.Profile is sketch
+
+
+def test_sketch_pocket_standalone_sketch_uses_unambiguous_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone sketch should use the single unambiguous Body in the document."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    # Body exists but sketch is not yet in it.
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.Tip = box
+
+    # Verify sketch is NOT in any Body before the pocket.
+    assert sketch not in body.Group
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["body_name"] == "Body"
+
+    # Verify sketch was added to the Body.
+    assert sketch in body.Group
+
+
+def test_sketch_pocket_missing_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone sketch with no Body in the document must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "body" in result["error"].lower()
+
+
+def test_sketch_pocket_ambiguous_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone sketch with multiple Bodies must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    # Two Bodies -> ambiguous.
+    doc.addObject("PartDesign::Body", "Body")
+    doc.addObject("PartDesign::Body", "Body2")
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "cannot determine" in result["error"].lower()
+
+
+def test_sketch_pocket_no_base_solid_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Body with no preceding solid feature must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    # No Tip set, no preceding solid feature.
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "has no shape" in result["error"].lower() or "valid solid" in result["error"].lower()
+
+
+def test_sketch_pocket_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_pocket_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "Sketcher::SketchObject" in result["error"]
+
+
+def test_sketch_pocket_invalid_length_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_pocket_invalid_length_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": -5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_pocket_invalid_length_non_finite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    import math as _math
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": _math.nan,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "finite" in result["error"].lower()
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": _math.inf,
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "finite" in result["error"].lower()
+
+
+def test_sketch_pocket_invalid_reversed_not_bool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": 1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_pocket_empty_sketch_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_pocket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.addObject(sketch)
+    body.Tip = box
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_pocket",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "length": 6.0,
+                "reversed": False,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_pocket"
+    assert response["result"]["length"] == 6.0
+    assert response["result"]["reversed"] is False
     assert response["result"]["solids_count"] == 1

@@ -188,6 +188,14 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("sketch_pad", {"sketch_name": "S", "length": -5.0}, "length must be positive"),
     ("sketch_pad", {"sketch_name": "S", "length": 10.0, "reversed": 1}, "reversed must be a boolean."),
     ("sketch_pad", {"sketch_name": "S", "length": 10.0, "reversed": "yes"}, "reversed must be a boolean."),
+    ("sketch_pocket", {"sketch_name": ""}, "sketch_name must not be empty"),
+    ("sketch_pocket", {"sketch_name": "   "}, "sketch_name must not be empty"),
+    ("sketch_pocket", {"sketch_name": "S", "length": float("nan")}, "must be a finite number"),
+    ("sketch_pocket", {"sketch_name": "S", "length": float("inf")}, "must be a finite number"),
+    ("sketch_pocket", {"sketch_name": "S", "length": 0.0}, "length must be positive"),
+    ("sketch_pocket", {"sketch_name": "S", "length": -5.0}, "length must be positive"),
+    ("sketch_pocket", {"sketch_name": "S", "length": 10.0, "reversed": 1}, "reversed must be a boolean."),
+    ("sketch_pocket", {"sketch_name": "S", "length": 10.0, "reversed": "yes"}, "reversed must be a boolean."),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

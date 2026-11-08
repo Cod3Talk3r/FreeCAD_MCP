@@ -8,6 +8,7 @@ specific console executable.
 from __future__ import annotations
 
 import math
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from freecad_mcp.freecad_bridge import (
     find_freecad_executable,
 )
 from freecad_mcp.tools.freecad import collect_freecad_status
+from freecad_mcp.pathing import for_target
 
 _DISCOVERED = find_freecad_executable()
 
@@ -30,6 +32,29 @@ requires_freecad = pytest.mark.skipif(
 
 def _settings() -> Settings:
     return Settings(freecad_executable=str(_DISCOVERED), freecad_timeout_seconds=120)
+
+
+def _assert_pocket_tree(workspace: Path, document_id: str, cut_z: float, solid_z: float) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / f"{document_id}.fcstd", target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, sketch, pocket = (doc.getObject(name) for name in ('Body', 'Pad', 'Sketch2', 'Pocket'))
+assert all(obj in body.Group for obj in (pad, sketch, pocket))
+assert body.Tip == pocket
+assert pocket.Profile[0] == sketch
+assert pocket.BaseFeature == pad
+assert not pocket.Shape.isNull() and pocket.Shape.isValid() and len(pocket.Shape.Solids) == 1
+assert not pocket.Shape.isInside(App.Vector(2, 2, {cut_z!r}), 1e-7, True)
+assert pocket.Shape.isInside(App.Vector(2, 2, {solid_z!r}), 1e-7, True)
+print('POCKET_TREE_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "POCKET_TREE_OK" in process.stdout, process.stdout + process.stderr
 
 
 @requires_freecad
@@ -3559,6 +3584,275 @@ def test_real_freecad_sketch_pad_errors(tmp_path: Path) -> None:
                 "workspace": workspace,
                 "sketch_name": "Sketch1",
                 "length": -5.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_sketch_pocket_from_rectangle(tmp_path: Path) -> None:
+    """Create a Pocket from a rectangle sketch inside a Body with a Pad base solid.
+
+    Setup:
+      1. Sketch1: rectangle on XY plane at Z=0.
+      2. Pad: extrude Sketch1 downward -> solid Z in [-10,0].
+      3. Sketch2: smaller rectangle inside Sketch1's footprint on XY plane at Z=0.
+      4. Pocket: cut downward from Z=0 with reversed=False.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+
+    bridge.run("create_document", {"document_id": "skpockrect", "workspace": workspace})
+
+    # Base sketch: rectangle on XY plane at Z=0.
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpockrect", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skpockrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+
+    # A normal Pocket cuts opposite to the sketch normal.
+    pad_result = bridge.run(
+        "sketch_pad",
+        {
+            "document_id": "skpockrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": True,
+        },
+    )
+    assert pad_result["body_name"] == "Body"
+    assert pad_result["pad_name"] == "Pad"
+    assert pad_result["volume"] is not None
+    assert pad_result["volume"] == pytest.approx(160.0)
+
+    # Pocket profile: smaller rectangle strictly inside the base solid's footprint.
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpockrect", "workspace": workspace, "sketch_name": "Sketch2"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skpockrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch2",
+            "x": 1.0,
+            "y": 1.0,
+            "width": 2.0,
+            "height": 2.0,
+        },
+    )
+
+    result = bridge.run(
+        "sketch_pocket",
+        {
+            "document_id": "skpockrect",
+            "workspace": workspace,
+            "sketch_name": "Sketch2",
+            "length": 5.0,
+            "reversed": False,
+        },
+    )
+    assert result["sketch_name"] == "Sketch2"
+    assert result["body_name"] == "Body"
+    assert result["pocket_name"] == "Pocket"
+    assert result["profile_name"] == "Sketch2"
+    assert result["length"] == 5.0
+    assert result["reversed"] is False
+    assert result["solids_count"] == 1
+    assert result["volume"] is not None
+    assert result["volume"] == pytest.approx(140.0)
+
+    # Verify objects exist in the document.
+    objects = bridge.run(
+        "list_objects", {"document_id": "skpockrect", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Sketch1" in names
+    assert "Pad" in names
+    assert "Sketch2" in names
+    assert "Pocket" in names
+
+    # Verify the Pocket has a valid shape.
+    pocket_info = bridge.run(
+        "inspect_object",
+        {
+            "document_id": "skpockrect",
+            "workspace": workspace,
+            "object_name": "Pocket",
+        },
+    )["info"]
+    assert pocket_info["shape_valid"] is True
+    assert pocket_info["volume"] > 0
+    _assert_pocket_tree(tmp_path, "skpockrect", -2.5, -7.5)
+
+
+@requires_freecad
+def test_real_freecad_sketch_pocket_from_circle(tmp_path: Path) -> None:
+    """Create a Pocket from a circle sketch; verify reversed direction.
+
+    Setup:
+      1. Sketch1: rectangle on XY plane at Z=0.
+      2. Pad: extrude Sketch1 upward -> solid Z in [0,10].
+      3. Sketch2: circle inside Sketch1's footprint on XY plane at Z=0.
+      4. Pocket: cut upward from Z=0 with reversed=True.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+
+    bridge.run("create_document", {"document_id": "skpockcirc", "workspace": workspace})
+
+    # Base sketch: rectangle on XY plane at Z=0.
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpockcirc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skpockcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 4.0,
+            "height": 4.0,
+        },
+    )
+
+    # A reversed Pocket cuts along the sketch normal.
+    pad_result = bridge.run(
+        "sketch_pad",
+        {
+            "document_id": "skpockcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": False,
+        },
+    )
+    assert pad_result["body_name"] == "Body"
+    assert pad_result["pad_name"] == "Pad"
+    assert pad_result["volume"] is not None
+    assert pad_result["volume"] == pytest.approx(160.0)
+
+    # Pocket profile: circle strictly inside the base solid's footprint.
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpockcirc", "workspace": workspace, "sketch_name": "Sketch2"},
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "skpockcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch2",
+            "center_x": 2.0,
+            "center_y": 2.0,
+            "radius": 1.0,
+        },
+    )
+
+    result = bridge.run(
+        "sketch_pocket",
+        {
+            "document_id": "skpockcirc",
+            "workspace": workspace,
+            "sketch_name": "Sketch2",
+            "length": 5.0,
+            "reversed": True,
+        },
+    )
+    assert result["length"] == 5.0
+    assert result["reversed"] is True
+    assert result["solids_count"] == 1
+    assert result["volume"] is not None
+    assert result["volume"] == pytest.approx(160.0 - 5.0 * math.pi)
+
+    # Verify objects exist in the document.
+    objects = bridge.run(
+        "list_objects", {"document_id": "skpockcirc", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Sketch1" in names
+    assert "Pad" in names
+    assert "Sketch2" in names
+    assert "Pocket" in names
+
+    # Verify the Pocket has a valid shape.
+    pocket_info = bridge.run(
+        "inspect_object",
+        {
+            "document_id": "skpockcirc",
+            "workspace": workspace,
+            "object_name": "Pocket",
+        },
+    )["info"]
+    assert pocket_info["shape_valid"] is True
+    assert pocket_info["volume"] > 0
+    _assert_pocket_tree(tmp_path, "skpockcirc", 2.5, 7.5)
+
+
+@requires_freecad
+def test_real_freecad_sketch_pocket_errors(tmp_path: Path) -> None:
+    """sketch_pocket returns structured errors for missing sketch, wrong type, invalid length, missing base solid."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "skpockerr", "workspace": workspace})
+
+    # No base solid / no Body: sketch_pocket on a standalone sketch with no Body.
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skpockerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pocket",
+            {
+                "document_id": "skpockerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "length": 10.0,
+            },
+        )
+    assert "body" in str(excinfo.value).lower()
+
+    # Missing sketch.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pocket",
+            {
+                "document_id": "skpockerr",
+                "workspace": workspace,
+                "sketch_name": "NoSuchSketch",
+                "length": 10.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Zero length.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_pocket",
+            {
+                "document_id": "skpockerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "length": 0.0,
             },
         )
     assert "positive" in str(excinfo.value).lower()

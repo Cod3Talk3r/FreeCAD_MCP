@@ -70,6 +70,7 @@ OP_SKETCH_EDIT_TRIANGLE = "sketch_edit_triangle"
 OP_SKETCH_EDIT_REGULAR_POLYGON = "sketch_edit_regular_polygon"
 OP_SKETCH_EDIT_POLYGON = "sketch_edit_polygon"
 OP_SKETCH_PAD = "sketch_pad"
+OP_SKETCH_POCKET = "sketch_pocket"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -5014,6 +5015,7 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
             desired_pad_name = f"{pad_name}_{counter}"
         try:
             pad = doc.addObject("PartDesign::Pad", desired_pad_name)
+            body.addObject(pad)
         except Exception as exc:
             return _fail(
                 f"FreeCAD could not create a PartDesign::Pad: {exc}.  Ensure the PartDesign "
@@ -5125,6 +5127,336 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a PartDesign::Pocket that cuts an existing sketch out of a solid.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::Pocket`` (not
+    ``Part::Cut``).  The sketch must already belong to a Body, or the document
+    must contain exactly one (unambiguous) Body to which the sketch can be
+    assigned.  A new Body is never silently created for a Pocket -- a Pocket
+    requires an existing solid to cut from.
+
+    The Pocket requires a valid existing solid (the Body's Tip or last feature)
+    to cut into.  If no suitable preceding solid feature exists, the operation
+    is rejected.
+
+    The Pocket profile is set to the existing sketch, and the requested length
+    and reversed direction are applied.  After recompute, the resulting Pocket
+    shape is validated (non-null valid solid).  The document is locked,
+    recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the on-disk
+    document is left unmodified (rollback via the established save-on-success
+    pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    length = params.get("length")
+    reversed_param = params.get("reversed", False)
+    pocket_name = params.get("pocket_name") or "Pocket"
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    # Validate sketch_name.
+    if not sketch_name.strip():
+        return {
+            "ok": False,
+            "op": "sketch_pocket",
+            "error": "sketch_name must not be empty.",
+        }
+
+    # Validate length: finite and positive.
+    try:
+        length_val = float(length)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_pocket",
+            "error": "length must be a finite number.",
+        }
+    if math.isnan(length_val) or math.isinf(length_val):
+        return {
+            "ok": False,
+            "op": "sketch_pocket",
+            "error": "length must be a finite number.",
+        }
+    if length_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_pocket",
+            "error": "length must be a positive number.",
+        }
+
+    # Validate reversed: must be a boolean.
+    if not isinstance(reversed_param, bool):
+        return {
+            "ok": False,
+            "op": "sketch_pocket",
+            "error": "reversed must be a boolean (true/false).",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_pocket", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_pocket", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_pocket", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_pocket", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Find the sketch and verify it is a Sketcher::SketchObject.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot create a Pocket from it."
+            )
+
+        # Determine the Body: reuse an existing Body that contains the sketch,
+        # or use the single unambiguous Body if the sketch is standalone.
+        # A new Body is never created for a Pocket.
+        body = None
+        bodies = []
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    bodies.append(obj)
+                    try:
+                        if sketch in getattr(obj, "Group", []) or sketch in getattr(obj, "outList", []):
+                            body = obj
+                    except Exception:
+                        pass
+        except Exception:
+            bodies = []
+
+        if body is None:
+            # Sketch is not in any Body.  Use the single unambiguous Body if
+            # exactly one exists; otherwise reject (ambiguous or none).
+            if len(bodies) == 1:
+                body = bodies[0]
+                try:
+                    previous_tip = body.Tip
+                    body.addObject(sketch)
+                    body.Tip = previous_tip
+                except Exception as exc:
+                    return _fail(
+                        f"FreeCAD could not add sketch to Body '{getattr(body, 'Name', body_name)}': {exc}."
+                    )
+            elif len(bodies) == 0:
+                return _fail(
+                    f"sketch '{sketch_name}' is not inside any PartDesign::Body, and no "
+                    f"Body exists in the document.  A Pocket requires a Body containing a "
+                    f"base solid to cut from."
+                )
+            else:
+                return _fail(
+                    f"sketch '{sketch_name}' is not inside any PartDesign::Body, and the "
+                    f"document contains {len(bodies)} Bodies.  Cannot determine which Body "
+                    f"to use for the Pocket."
+                )
+
+        body_name_used = getattr(body, "Name", body_name)
+
+        # Verify the Body has a preceding solid feature to cut from.
+        # In FreeCAD PartDesign, the Pocket's Base is automatically set to the
+        # Body's Tip (the last feature).  Check that Tip exists and has a valid
+        # solid shape.
+        base_feature = None
+        try:
+            base_feature = getattr(body, "Tip", None)
+        except Exception:
+            base_feature = None
+
+        if base_feature is None:
+            # Fall back to the last feature in the Body's Group/outList.
+            try:
+                group = getattr(body, "Group", []) or []
+                out_list = getattr(body, "outList", []) or []
+                candidates = list(out_list) or list(group)
+                if candidates:
+                    base_feature = candidates[-1]
+            except Exception:
+                base_feature = None
+
+        if base_feature is None:
+            return _fail(
+                f"Body '{body_name_used}' has no preceding feature to use as the Pocket base. "
+                f"A Pocket requires an existing solid feature before it in the Body."
+            )
+
+        base_shape = getattr(base_feature, "Shape", None)
+        if base_shape is None:
+            return _fail(
+                f"Body '{body_name_used}' base feature '{getattr(base_feature, 'Name', '?')}' "
+                f"has no shape.  A Pocket requires a valid solid to cut from."
+            )
+        try:
+            if not bool(base_shape.isValid()):
+                return _fail(
+                    f"Body '{body_name_used}' base feature '{getattr(base_feature, 'Name', '?')}' "
+                    f"has an invalid shape.  A Pocket requires a valid solid to cut from."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Body '{body_name_used}' base feature shape validation failed: {exc}"
+            )
+        try:
+            base_solids = list(getattr(base_shape, "Solids", []) or [])
+        except Exception:
+            base_solids = []
+        if not base_solids:
+            return _fail(
+                f"Body '{body_name_used}' base feature '{getattr(base_feature, 'Name', '?')}' "
+                f"produces no solid.  A Pocket requires an existing solid to cut from."
+            )
+
+        # Create the Pocket.  Avoid name clashes.
+        counter = 0
+        desired_pocket_name = pocket_name
+        while doc.getObject(desired_pocket_name) is not None:
+            counter += 1
+            desired_pocket_name = f"{pocket_name}_{counter}"
+        try:
+            pocket = doc.addObject("PartDesign::Pocket", desired_pocket_name)
+            body.addObject(pocket)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Pocket: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Pocket profile to the existing sketch.
+        try:
+            pocket.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pocket profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Apply length and reversed direction.
+        try:
+            pocket.Length = length_val
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pocket length: {exc}"
+            )
+        try:
+            pocket.Reversed = reversed_param
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pocket reversed direction: {exc}"
+            )
+
+        # Recompute the document so FreeCAD evaluates the Pocket feature tree.
+        doc.recompute()
+
+        # Validate the resulting Pocket: it must have a valid, non-null solid shape.
+        shape = getattr(pocket, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"Pocket '{desired_pocket_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate, or may not intersect the base solid."
+            )
+        try:
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"Pocket '{desired_pocket_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Pocket '{desired_pocket_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"Pocket '{desired_pocket_name}' produced no solid.  The sketch may not "
+                f"intersect the base solid in a way that produces a valid cut."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_pocket",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "body_name": body_name_used,
+            "pocket_name": desired_pocket_name,
+            "profile_name": sketch_name,
+            "length": length_val,
+            "reversed": reversed_param,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -5161,6 +5493,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_EDIT_REGULAR_POLYGON: _op_sketch_edit_regular_polygon,
     OP_SKETCH_EDIT_POLYGON: _op_sketch_edit_polygon,
     OP_SKETCH_PAD: _op_sketch_pad,
+    OP_SKETCH_POCKET: _op_sketch_pocket,
 }
 
 

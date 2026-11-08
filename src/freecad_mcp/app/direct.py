@@ -307,6 +307,20 @@ def validate_direct_request(op: str, params: Any) -> None:
         reversed_param = params.get("reversed", False)
         if not isinstance(reversed_param, bool):
             raise ValueError("reversed must be a boolean.")
+    elif op == "sketch_pocket":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        try:
+            length_val = float(params.get("length"))
+        except (TypeError, ValueError):
+            raise ValueError("length must be a finite number.")
+        if not math.isfinite(length_val):
+            raise ValueError("length must be a finite number.")
+        if length_val <= 0:
+            raise ValueError("length must be positive")
+        reversed_param = params.get("reversed", False)
+        if not isinstance(reversed_param, bool):
+            raise ValueError("reversed must be a boolean.")
 
 
 class DirectBackend:

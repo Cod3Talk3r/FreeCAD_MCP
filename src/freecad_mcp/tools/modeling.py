@@ -427,6 +427,28 @@ class SketchPadResult(BaseModel):
     )
 
 
+class SketchPocketResult(BaseModel):
+    """Result of sketch_pocket."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch used as the Pocket profile.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Pocket.")
+    pocket_name: str = Field(description="Name of the created PartDesign::Pocket.")
+    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    length: float = Field(description="Cut depth in millimetres.")
+    reversed: bool = Field(description="Whether the cut direction is reversed.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -753,6 +775,28 @@ class SketchPadParams(BaseModel):
     )
     pad_name: str = Field(default="Pad", description="Name for the new PartDesign::Pad object.")
     body_name: str = Field(default="Body", description="Name for the PartDesign::Body (created if needed).")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Input schemas (per-operation) — minimal fields; validation is done manually
+# in the tool handlers because Pydantic V2-style @validator is not guaranteed.
+# ---------------------------------------------------------------------------
+
+
+class SketchPocketParams(BaseModel):
+    """Parameters for creating a PartDesign::Pocket from an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to use as the Pocket profile.")
+    length: float = Field(default=10.0, description="Cut depth in millimetres (must be positive).")
+    reversed: bool = Field(
+        default=False, description="Whether to cut in the reversed direction."
+    )
+    pocket_name: str = Field(default="Pocket", description="Name for the new PartDesign::Pocket object.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the sketch.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -2345,6 +2389,56 @@ def _register_tools(server: Any, settings: Settings) -> None:
             sketch_name=result.get("sketch_name", params.sketch_name),
             body_name=result.get("body_name", params.body_name),
             pad_name=result.get("pad_name", params.pad_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            length=result.get("length", params.length),
+            reversed=result.get("reversed", params.reversed),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_pocket
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_pocket",
+        title="Create a PartDesign Pocket from a sketch",
+        description=(
+            "Create a native PartDesign::Pocket that cuts an existing "
+            "Sketcher::SketchObject out of a solid in a PartDesign::Body. "
+            "The sketch must already belong to a Body, or the document must "
+            "contain exactly one (unambiguous) Body.  A new Body is never "
+            "silently created for a Pocket -- a Pocket requires an existing "
+            "solid feature to cut from.  The Pocket profile is set to the "
+            "sketch, and *length* and *reversed* are applied.  The document "
+            "is recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_pocket_tool(params: SketchPocketParams) -> SketchPocketResult:
+        """Create a PartDesign Pocket from a sketch and return its info."""
+        validate_direct_request("sketch_pocket", params.model_dump())
+        if math.isnan(params.length) or math.isinf(params.length):
+            raise ValueError("length must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "length": params.length,
+            "reversed": params.reversed,
+            "pocket_name": params.pocket_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_pocket", bridge_params)
+
+        return SketchPocketResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            body_name=result.get("body_name", params.body_name),
+            pocket_name=result.get("pocket_name", params.pocket_name),
             profile_name=result.get("profile_name", params.sketch_name),
             length=result.get("length", params.length),
             reversed=result.get("reversed", params.reversed),
