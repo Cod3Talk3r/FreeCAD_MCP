@@ -468,9 +468,25 @@ class _FakeMirrored:
         self.Shape: object = _FakeShape()
 
 
+class _FakeThickness:
+    """Minimal stand-in for a PartDesign::Thickness."""
+
+    def __init__(self, name: str, volume: float = 100.0) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Thickness"
+        self.BaseFeature: object = None
+        self.Base: object = None
+        self.Value: float = 0.0
+        self.Reversed: bool = False
+        self.Mode: str = "Skin"
+        self.Shape: object = _FakeShape(volume=volume)
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
+        self.thickness_volume_override: float | None = None
 
     def openTransaction(self, name: str) -> None:
         pass
@@ -488,7 +504,7 @@ class _FakeDoc:
     def getObject(self, name: str) -> object | None:
         return self.objects.get(name)
 
-    def addObject(self, type_id: str, name: str) -> object:
+    def addObject(self, type_id: str, name: str, **kwargs) -> object:
         if type_id == "Sketcher::SketchObject":
             obj: object = _FakeSketch(name)
         elif type_id == "PartDesign::Body":
@@ -507,6 +523,13 @@ class _FakeDoc:
             obj: object = _FakePolarPattern(name)
         elif type_id == "PartDesign::Mirrored":
             obj: object = _FakeMirrored(name)
+        elif type_id == "PartDesign::Thickness":
+            vol = (
+                self.thickness_volume_override
+                if self.thickness_volume_override is not None
+                else kwargs.get("volume", 100.0)
+            )
+            obj: object = _FakeThickness(name, volume=vol)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -8811,3 +8834,562 @@ def test_handle_request_dispatches_partdesign_mirrored(
     mirrored = doc.objects["Mirrored"]
     assert mirrored.BaseFeature == box
     assert mirrored.MirrorPlane == (box, ["Face2"])
+
+
+def test_partdesign_thickness_successful_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness on a box inside a Body with default (outward) direction."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_thickness"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["thickness_name"] == "Thickness"
+    assert result["result"]["base_feature"] == "Box1"
+    assert result["result"]["thickness_value"] == 2.0
+    assert result["result"]["direction"] == "outward"
+    assert result["result"]["mode"] == "Skin"
+    assert result["result"]["solids_count"] == 1
+
+    thick = doc.objects["Thickness"]
+    assert thick.BaseFeature == box
+    assert thick.Value == 2.0
+    assert thick.Reversed is False
+    assert thick.Mode == "Skin"
+    assert thick.Shape is not None
+    assert thick.Shape.isValid() is True
+
+
+def test_partdesign_thickness_successful_reversed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness on a box inside a Body with reversed (inward) direction."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 3.5,
+            "reversed": True,
+            "thickness_name": "Wall",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["thickness_name"] == "Wall"
+    assert result["result"]["thickness_value"] == 3.5
+    assert result["result"]["direction"] == "inward"
+
+    thick = doc.objects["Wall"]
+    assert thick.Value == 3.5
+    assert thick.Reversed is True
+
+
+def test_partdesign_thickness_invalid_thickness_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects zero, negative, and non-numeric thickness."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    _make_body_with(doc, doc.objects["Box1"])
+
+    for thickness, message in [
+        (0, "thickness must be positive"),
+        (-1.5, "thickness must be positive"),
+        ("not-a-number", "thickness must be a finite number"),
+        (None, "thickness must be a finite number"),
+    ]:
+        result = runner._op_partdesign_thickness(
+            {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "thickness": thickness,
+            }
+        )
+        assert result["ok"] is False
+        assert result["op"] == "partdesign_thickness"
+        assert message in result["error"].lower()
+
+
+def test_partdesign_thickness_invalid_reversed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects non-boolean reversed values."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    _make_body_with(doc, doc.objects["Box1"])
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "reversed": "yes",
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "reversed" in result["error"].lower()
+
+
+def test_partdesign_thickness_missing_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "NoSuchObject",
+            "thickness": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "not found" in result["error"].lower()
+
+
+def test_partdesign_thickness_no_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=8000.0)
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "body" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_thickness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_thickness",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "thickness": 2.0,
+                "reversed": True,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_thickness"
+    assert response["result"]["object_name"] == "Box1"
+    assert response["result"]["thickness_value"] == 2.0
+    assert response["result"]["direction"] == "inward"
+    assert response["result"]["mode"] == "Skin"
+    assert response["result"]["body_name"] == "Body"
+    assert response["result"]["solids_count"] == 1
+
+    thick = doc.objects["Thickness"]
+    assert thick.BaseFeature == box
+    assert thick.Reversed is True
+    assert thick.Value == 2.0
+
+
+def test_partdesign_thickness_with_single_removed_face(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness with a single removed face sets Base LinkSub correctly."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 3.0,
+            "reversed": True,
+            "faces": [6],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_thickness"
+    assert result["result"]["removed_faces"] == [6]
+    assert result["result"]["base"] == "(Box1, ['Face6'])"
+
+    thick = doc.objects["Thickness"]
+    assert thick.Base == (box, ["Face6"])
+    assert thick.BaseFeature == box
+    assert thick.Value == 3.0
+    assert thick.Reversed is True
+
+
+def test_partdesign_thickness_with_multiple_removed_faces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness with multiple removed faces sets Base LinkSub correctly."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "faces": [1, 6],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["removed_faces"] == [1, 6]
+    assert result["result"]["base"] == "(Box1, ['Face1', 'Face6'])"
+
+    thick = doc.objects["Thickness"]
+    assert thick.Base == (box, ["Face1", "Face6"])
+
+
+def test_partdesign_thickness_duplicate_face_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects duplicate face indices."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    _make_body_with(doc, doc.objects["Box1"])
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "faces": [3, 3],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "duplicate" in result["error"].lower()
+
+
+def test_partdesign_thickness_boolean_face_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects boolean face indices."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    _make_body_with(doc, doc.objects["Box1"])
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "faces": [True],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "boolean" in result["error"].lower()
+
+
+def test_partdesign_thickness_malformed_face_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects non-integer face indices."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    _make_body_with(doc, doc.objects["Box1"])
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "faces": ["not-a-number"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "integer" in result["error"].lower()
+
+
+def test_partdesign_thickness_zero_face_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects face index 0 (must be >= 1)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    _make_body_with(doc, doc.objects["Box1"])
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "faces": [0],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert ">= 1" in result["error"].lower()
+
+
+def test_partdesign_thickness_out_of_range_face_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness rejects face index beyond the target's face count."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    # Box has 6 faces; index 7 is out of range.
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 2.0,
+            "faces": [7],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "out of range" in result["error"].lower()
+    assert "6 face" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_thickness_with_faces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """handle_request dispatches partdesign_thickness with faces."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_thickness",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "thickness": 3.0,
+                "faces": [6],
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_thickness"
+    assert response["result"]["removed_faces"] == [6]
+    assert response["result"]["base"] == "(Box1, ['Face6'])"
+
+    thick = doc.objects["Thickness"]
+    assert thick.Base == (box, ["Face6"])
+    assert thick.Value == 3.0
+
+
+def test_partdesign_thickness_outward_direction_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outward thickness (Reversed=False) succeeds even when result volume
+    exceeds base volume (the reported bug case)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    # Mock thickness shape volume differs from base (outward typically increases
+    # volume, but the mock just needs them to differ).
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 3.0,
+            "reversed": False,
+            "faces": [6],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_thickness"
+    assert result["result"]["direction"] == "outward"
+    assert result["result"]["removed_faces"] == [6]
+
+    thick = doc.objects["Thickness"]
+    assert thick.Reversed is False
+    assert thick.Base == (box, ["Face6"])
+
+
+def test_partdesign_thickness_inward_direction_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inward thickness (Reversed=True) succeeds when result volume is less
+    than base volume."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    # Mock thickness shape volume (100.0) is less than base volume (8000.0).
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 3.0,
+            "reversed": True,
+            "faces": [6],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["direction"] == "inward"
+
+    thick = doc.objects["Thickness"]
+    assert thick.Reversed is True
+
+
+def test_partdesign_thickness_inward_ineffective_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inward thickness is rejected when result volume is not less than base
+    volume (ineffective hollowing)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    # Mock thickness shape volume exceeds base volume -> ineffective inward.
+    doc.thickness_volume_override = 9000.0
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 3.0,
+            "reversed": True,
+            "faces": [6],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "not less than" in result["error"].lower()
+
+
+def test_partdesign_thickness_equal_volume_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thickness is rejected when result volume equals base volume
+    (ineffective, regardless of direction)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    # Mock thickness shape volume equals base volume -> ineffective.
+    doc.thickness_volume_override = 8000.0
+
+    result = runner._op_partdesign_thickness(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "thickness": 3.0,
+            "reversed": False,
+            "faces": [6],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_thickness"
+    assert "equal to the base volume" in result["error"].lower()

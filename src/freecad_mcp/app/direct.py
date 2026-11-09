@@ -413,6 +413,35 @@ def validate_direct_request(op: str, params: Any) -> None:
         plane = params.get("plane")
         if plane not in ("XY_Plane", "XZ_Plane", "YZ_Plane"):
             raise ValueError("plane must be one of 'XY_Plane', 'XZ_Plane', or 'YZ_Plane'.")
+    elif op == "partdesign_thickness":
+        if not params.get("object_name", "").strip():
+            raise ValueError("object_name must not be empty.")
+        thickness = params.get("thickness")
+        try:
+            thickness_val = float(thickness)
+        except (TypeError, ValueError):
+            raise ValueError("thickness must be a finite number.")
+        if not math.isfinite(thickness_val):
+            raise ValueError("thickness must be a finite number.")
+        if thickness_val <= 0:
+            raise ValueError("thickness must be positive")
+        reversed_param = params.get("reversed", False)
+        if isinstance(reversed_param, bool) is False:
+            raise ValueError("reversed must be a boolean (boolean values are not accepted).")
+        faces = params.get("faces", [])
+        if faces is None:
+            faces = []
+        if not isinstance(faces, list):
+            raise ValueError("faces must be a list of 1-based face indices.")
+        seen_faces: set[int] = set()
+        for i, f in enumerate(faces):
+            if isinstance(f, bool) or not isinstance(f, int):
+                raise ValueError(f"faces[{i}] must be an integer (boolean values are not accepted).")
+            if f in seen_faces:
+                raise ValueError(f"faces[{i}] is a duplicate face index: {f}.")
+            seen_faces.add(f)
+            if f < 1:
+                raise ValueError(f"faces[{i}] must be >= 1: {f}.")
 
 
 class DirectBackend:

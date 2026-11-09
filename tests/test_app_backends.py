@@ -235,6 +235,17 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 90.0, "occurrences": True}, "boolean values are not accepted"),
     ("partdesign_mirrored", {"object_name": ""}, "object_name must not be empty"),
     ("partdesign_mirrored", {"object_name": "O", "plane": "INVALID"}, "plane must be one of"),
+    ("partdesign_thickness", {"object_name": ""}, "object_name must not be empty"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 0}, "thickness must be positive"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": -1.5}, "thickness must be positive"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": "x"}, "thickness must be a finite number"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": None}, "thickness must be a finite number"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 2.0, "reversed": "yes"}, "reversed must be a boolean"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 2.0, "faces": [3, 3]}, "duplicate face index"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 2.0, "faces": [True]}, "boolean values are not accepted"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 2.0, "faces": ["x"]}, "must be an integer"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 2.0, "faces": [0]}, "must be >= 1"),
+    ("partdesign_thickness", {"object_name": "O", "thickness": 2.0, "faces": "not-a-list"}, "faces must be a list"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

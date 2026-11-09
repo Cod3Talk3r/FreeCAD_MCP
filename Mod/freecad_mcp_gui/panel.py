@@ -6,6 +6,7 @@ can be imported and syntax-checked outside a FreeCAD GUI process.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -867,6 +868,33 @@ class MCPGuiPanel:
         self._mirror_button.clicked.connect(self._on_partdesign_mirrored)
         mirror_layout.addWidget(self._mirror_button, 4, 0, 1, 2)
         layout.addWidget(mirror_group)
+
+        # ---- PartDesign Thickness ------------------------------------------------
+        thick_group = QtWidgets.QGroupBox("PartDesign Thickness")
+        thick_layout = QtWidgets.QGridLayout(thick_group)
+        self._thick_object_input = QtWidgets.QLineEdit("Pad")
+        thick_layout.addWidget(QtWidgets.QLabel("Target feature:"), 0, 0)
+        thick_layout.addWidget(self._thick_object_input, 0, 1)
+        self._thick_value_input = QtWidgets.QLineEdit("2.0")
+        thick_layout.addWidget(QtWidgets.QLabel("Thickness (mm):"), 1, 0)
+        thick_layout.addWidget(self._thick_value_input, 1, 1)
+        self._thick_reversed_input = QtWidgets.QCheckBox("Reversed direction")
+        self._thick_reversed_input.setChecked(False)
+        thick_layout.addWidget(self._thick_reversed_input, 2, 0, 1, 2)
+        self._thick_name_input = QtWidgets.QLineEdit("Thickness")
+        thick_layout.addWidget(QtWidgets.QLabel("Thickness name:"), 3, 0)
+        thick_layout.addWidget(self._thick_name_input, 3, 1)
+        self._thick_body_name_input = QtWidgets.QLineEdit("Body")
+        thick_layout.addWidget(QtWidgets.QLabel("Body name:"), 4, 0)
+        thick_layout.addWidget(self._thick_body_name_input, 4, 1)
+        self._thick_faces_input = QtWidgets.QLineEdit()
+        self._thick_faces_input.setPlaceholderText("e.g. 6 or 6,7")
+        thick_layout.addWidget(QtWidgets.QLabel("Faces to remove:"), 5, 0)
+        thick_layout.addWidget(self._thick_faces_input, 5, 1)
+        self._thick_button = QtWidgets.QPushButton("Create Thickness")
+        self._thick_button.clicked.connect(self._on_partdesign_thickness)
+        thick_layout.addWidget(self._thick_button, 6, 0, 1, 2)
+        layout.addWidget(thick_group)
 
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
@@ -2280,6 +2308,83 @@ class MCPGuiPanel:
         self._set_status(
             f"Created Mirrored '{result.get('mirrored_name', pattern_name)}' on feature "
             f"'{object_name}' plane {plane} face {result.get('mirror_face_index', '?')} "
+            f"in Body '{result.get('body_name', body_name)}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # PartDesign Thickness
+    # ------------------------------------------------------------------
+    def _on_partdesign_thickness(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._thick_object_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Target feature name must not be empty.", error=True)
+            return
+
+        try:
+            thickness = float(self._thick_value_input.text().strip())
+        except (TypeError, ValueError):
+            self._set_status("Error: Thickness must be a finite number.", error=True)
+            return
+        if math.isnan(thickness) or math.isinf(thickness):
+            self._set_status("Error: Thickness must be a finite number.", error=True)
+            return
+        if thickness <= 0:
+            self._set_status("Error: Thickness must be positive.", error=True)
+            return
+
+        reversed_param = self._thick_reversed_input.isChecked()
+        thickness_name = self._thick_name_input.text().strip() or "Thickness"
+        body_name = self._thick_body_name_input.text().strip() or "Body"
+
+        faces: list[int] = []
+        faces_text = self._thick_faces_input.text().strip()
+        if faces_text:
+            for token in faces_text.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    faces.append(int(token))
+                except (TypeError, ValueError):
+                    self._set_status(
+                        f"Error: Faces to remove must be integers (got '{token}').", error=True
+                    )
+                    return
+
+        response = self._run_operation(
+            "partdesign_thickness",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "thickness": thickness,
+                "reversed": reversed_param,
+                "thickness_name": thickness_name,
+                "body_name": body_name,
+                "faces": faces,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        removed = result.get("removed_faces", faces)
+        vol_red = result.get("volume_reduction")
+        vol_red_txt = f", volume reduced by {vol_red:.0f} mm^3" if isinstance(vol_red, (int, float)) else ""
+        face_txt = f", removed faces {removed}" if removed else ""
+        self._set_status(
+            f"Created Thickness '{result.get('thickness_name', thickness_name)}' on "
+            f"feature '{object_name}' thickness {result.get('thickness_value', thickness)} "
+            f"mm direction {result.get('direction', '?')} mode {result.get('mode', 'Skin')}"
+            f"{face_txt}{vol_red_txt} "
             f"in Body '{result.get('body_name', body_name)}' "
             f"in workspace document '{document_id}'.",
             error=False,

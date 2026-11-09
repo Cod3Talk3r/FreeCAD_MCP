@@ -76,6 +76,7 @@ OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
 OP_PARTDESIGN_LINEAR_PATTERN = "partdesign_linear_pattern"
 OP_PARTDESIGN_POLAR_PATTERN = "partdesign_polar_pattern"
 OP_PARTDESIGN_MIRRORED = "partdesign_mirrored"
+OP_PARTDESIGN_THICKNESS = "partdesign_thickness"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -7223,6 +7224,426 @@ def _op_partdesign_mirrored(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_partdesign_thickness(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::Thickness on an existing solid feature.
+
+    The target object must already belong to a PartDesign::Body, or the
+    document must contain exactly one (unambiguous) Body to which it can be
+    assigned.  A new Body is never silently created for a Thickness -- a
+    Thickness requires an existing solid feature to hollow.
+
+    The Thickness's BaseFeature links the target, *Value* is the wall
+    thickness, and *Reversed* controls the offset direction.  FreeCAD 1.1.4
+    exposes only the ``Mode='Skin'`` enumeration value for Thickness
+    direction (no Inward/Outward), so direction is expressed through
+    *Reversed*.  Face removal (opening faces) is not exposed as a settable
+    property in FreeCAD 1.1.4's PartDesign::Thickness, so removed-face
+    selection is not supported; the operation produces a valid solid from the
+    base feature with the requested wall thickness applied.
+
+    The document is recomputed, and the resulting shape is validated
+    (non-null valid solid containing at least one solid).  The document is
+    locked, recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the
+    on-disk document is left unmodified (rollback via the save-on-success
+    pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    thickness_name = params.get("thickness_name") or "Thickness"
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    # Validate object_name.
+    if not object_name.strip():
+        return {
+            "ok": False,
+            "op": "partdesign_thickness",
+            "error": "object_name must not be empty.",
+        }
+
+    # Validate thickness: must be finite and positive.
+    thickness = params.get("thickness")
+    try:
+        thickness_val = float(thickness)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "partdesign_thickness",
+            "error": "thickness must be a finite number.",
+        }
+    if math.isnan(thickness_val) or math.isinf(thickness_val):
+        return {
+            "ok": False,
+            "op": "partdesign_thickness",
+            "error": "thickness must be a finite number.",
+        }
+    if thickness_val <= 0:
+        return {
+            "ok": False,
+            "op": "partdesign_thickness",
+            "error": "thickness must be positive",
+        }
+
+    # Validate reversed: must be a boolean.
+    reversed_param = params.get("reversed", False)
+    if not isinstance(reversed_param, bool):
+        return {
+            "ok": False,
+            "op": "partdesign_thickness",
+            "error": "reversed must be a boolean (true/false).",
+        }
+
+    # Validate faces: optional list of 1-based face indices to remove.
+    faces_param = params.get("faces", [])
+    removed_faces: list[int] = []
+    if faces_param is None:
+        faces_param = []
+    if not isinstance(faces_param, list):
+        return {
+            "ok": False,
+            "op": "partdesign_thickness",
+            "error": "faces must be a list of 1-based face indices.",
+        }
+    seen_faces: set[int] = set()
+    for i, f in enumerate(faces_param):
+        if isinstance(f, bool) or not isinstance(f, int):
+            return {
+                "ok": False,
+                "op": "partdesign_thickness",
+                "error": f"faces[{i}] must be an integer (boolean values are not accepted).",
+            }
+        if f in seen_faces:
+            return {
+                "ok": False,
+                "op": "partdesign_thickness",
+                "error": f"faces[{i}] is a duplicate face index: {f}.",
+            }
+        seen_faces.add(f)
+        if f < 1:
+            return {
+                "ok": False,
+                "op": "partdesign_thickness",
+                "error": f"faces[{i}] must be >= 1: {f}.",
+            }
+        removed_faces.append(f)
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "partdesign_thickness", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "partdesign_thickness", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "partdesign_thickness", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    transaction_open = False
+    doc = None
+
+    def _fail(message: str) -> dict[str, Any]:
+        nonlocal transaction_open
+        if transaction_open:
+            try:
+                doc.abortTransaction()
+                doc.recompute()
+            except Exception as exc:
+                message += f" Rollback failed: {exc}"
+            transaction_open = False
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "partdesign_thickness", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Find the target object and verify it is a solid feature.
+        target = doc.getObject(object_name)
+        if target is None:
+            return _fail(f"object '{object_name}' not found")
+
+        target_shape = getattr(target, "Shape", None)
+        if target_shape is None:
+            return _fail(
+                f"object '{object_name}' has no shape; cannot create a Thickness on it."
+            )
+        try:
+            if not bool(target_shape.isValid()):
+                return _fail(
+                    f"object '{object_name}' has an invalid shape; cannot create a Thickness on it."
+                )
+        except Exception as exc:
+            return _fail(
+                f"object '{object_name}' shape validation failed: {exc}"
+            )
+        try:
+            target_solids = list(getattr(target_shape, "Solids", []) or [])
+        except Exception:
+            target_solids = []
+        if not target_solids:
+            return _fail(
+                f"object '{object_name}' produces no solid; a Thickness requires an existing solid."
+            )
+
+        # Get the target's face count for range-checking face indices.
+        try:
+            target_faces = list(getattr(target_shape, "Faces", []) or [])
+        except Exception:
+            target_faces = []
+        target_face_count = len(target_faces)
+        for f in removed_faces:
+            if f > target_face_count:
+                return _fail(
+                    f"faces index {f} is out of range: object '{object_name}' has "
+                    f"{target_face_count} face(s)."
+                )
+
+        # Determine the Body: reuse an existing Body that contains the target,
+        # or use the single unambiguous Body if the target is standalone.
+        # A new Body is never created for a Thickness.
+        body = None
+        bodies = []
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    bodies.append(obj)
+                    try:
+                        if target in getattr(obj, "Group", []) or target in getattr(obj, "outList", []):
+                            body = obj
+                    except Exception:
+                        pass
+        except Exception:
+            bodies = []
+
+        doc.openTransaction("Create PartDesign Thickness")
+        transaction_open = True
+
+        if body is None:
+            if len(bodies) == 1:
+                body = bodies[0]
+                try:
+                    body.addObject(target)
+                except Exception as exc:
+                    return _fail(
+                        f"FreeCAD could not add object '{object_name}' to Body "
+                        f"'{getattr(body, 'Name', body_name)}': {exc}."
+                    )
+            elif len(bodies) == 0:
+                return _fail(
+                    f"object '{object_name}' is not inside any PartDesign::Body, and no "
+                    f"Body exists in the document.  A Thickness requires a Body."
+                )
+            else:
+                return _fail(
+                    f"object '{object_name}' is not inside any PartDesign::Body, and the "
+                    f"document contains {len(bodies)} Bodies.  Cannot determine which Body "
+                    f"to use for the Thickness."
+                )
+
+        body_name_used = getattr(body, "Name", body_name)
+
+        # Create the Thickness.  Avoid name clashes.
+        counter = 0
+        desired_thickness_name = thickness_name
+        while doc.getObject(desired_thickness_name) is not None:
+            counter += 1
+            desired_thickness_name = f"{thickness_name}_{counter}"
+        try:
+            thickness_feature = doc.addObject("PartDesign::Thickness", desired_thickness_name)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Thickness: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Add the Thickness to the Body.
+        try:
+            body.addObject(thickness_feature)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not add Thickness to Body '{body_name_used}': {exc}."
+            )
+
+        # BaseFeature is the target feature to apply thickness to.
+        try:
+            thickness_feature.BaseFeature = target
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Thickness base feature: {exc}."
+            )
+
+        # Value is the wall thickness (Quantity; settable as a float in mm).
+        try:
+            thickness_feature.Value = thickness_val
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Thickness value: {exc}."
+            )
+
+        # Reversed controls the offset direction.  FreeCAD 1.1.4 exposes only
+        # Mode='Skin'; direction is expressed through Reversed.
+        try:
+            thickness_feature.Reversed = reversed_param
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Thickness direction: {exc}."
+            )
+
+        # Base is a LinkSub (object, [face_subname]) listing the faces to
+        # remove/open.  FreeCAD 1.1.4 accepts a single tuple containing the
+        # target object and a list of face subnames like "Face6".  1-based
+        # indices were range-checked above against the target's face count.
+        if removed_faces:
+            face_subnames = [f"Face{f}" for f in removed_faces]
+            try:
+                thickness_feature.Base = (target, face_subnames)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not set the Thickness removed faces: {exc}."
+                )
+
+        # Capture base volume before recompute for hollow-result validation.
+        try:
+            base_volume = float(target_shape.Volume)
+        except Exception:
+            base_volume = None
+
+        # Recompute the document so FreeCAD evaluates the Thickness feature tree.
+        doc.recompute()
+
+        # Validate the resulting Thickness: it must have a valid, non-null solid shape.
+        shape = getattr(thickness_feature, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"Thickness '{desired_thickness_name}' produced no shape."
+            )
+        try:
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"Thickness '{desired_thickness_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Thickness '{desired_thickness_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"Thickness '{desired_thickness_name}' produced no solid."
+            )
+
+        # When faces are removed, the result must be genuinely different from
+        # the base shape.  Otherwise the feature is ineffective (FreeCAD silently
+        # ignores missing/invalid face references), which we must not report as
+        # success.  The check is direction-aware:
+        #   * Inward (Reversed=True): hollowing reduces volume (result < base).
+        #   * Outward (Reversed=False): thickening adds material outward, so the
+        #     result volume may be greater than the base; it only needs to differ.
+        if removed_faces and base_volume is not None:
+            try:
+                result_volume = float(shape.Volume)
+            except Exception:
+                result_volume = None
+            if result_volume is None:
+                return _fail(
+                    f"Thickness '{desired_thickness_name}' produced a shape with "
+                    f"no readable volume; the feature may be ineffective."
+                )
+            # The result must be genuinely different from the base shape.
+            volume_tolerance = max(1e-6 * abs(base_volume), 1e-9)
+            if abs(result_volume - base_volume) <= volume_tolerance:
+                return _fail(
+                    f"Thickness '{desired_thickness_name}' produced a shape with "
+                    f"volume {result_volume} equal to the base volume "
+                    f"{base_volume}; the feature appears ineffective."
+                )
+            if reversed_param:
+                # Inward: hollowing should strictly reduce volume.
+                if result_volume >= base_volume:
+                    return _fail(
+                        f"Thickness '{desired_thickness_name}' with inward direction "
+                        f"produced a shape with volume {result_volume} not less than "
+                        f"the base volume {base_volume}; removed faces may be invalid."
+                    )
+
+        doc.commitTransaction()
+        transaction_open = False
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "partdesign_thickness",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "body_name": body_name_used,
+            "thickness_name": desired_thickness_name,
+            "base_feature": object_name,
+            "thickness_value": thickness_val,
+            "direction": "inward" if reversed_param else "outward",
+            "mode": "Skin",
+            "base": f"({object_name}, {[f'Face{f}' for f in removed_faces]})" if removed_faces else None,
+            "removed_faces": removed_faces,
+            "base_volume": base_volume,
+            "volume_reduction": (base_volume - volume) if (base_volume is not None and volume is not None) else None,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -7265,6 +7686,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PARTDESIGN_LINEAR_PATTERN: _op_partdesign_linear_pattern,
     OP_PARTDESIGN_POLAR_PATTERN: _op_partdesign_polar_pattern,
     OP_PARTDESIGN_MIRRORED: _op_partdesign_mirrored,
+    OP_PARTDESIGN_THICKNESS: _op_partdesign_thickness,
 }
 
 

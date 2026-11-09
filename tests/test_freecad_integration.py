@@ -4443,3 +4443,197 @@ print('MIRRORED_ROLLBACK_OK')
         **params, "object_name": "Pad", "plane": "XY_Plane",
     })
     _assert_mirrored_tree(tmp_path, "XY_Plane", result["volume"])
+
+
+@pytest.fixture
+def thickness_pad(tmp_path: Path):
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "thicknesspad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_thickness_tree(workspace: Path, volume: float, reversed_param: bool, thickness_name: str = "Thickness") -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "thicknesspad.fcstd", target)
+    direction = "outward" if reversed_param else "inward"
+    reversed_literal = "True" if reversed_param else "False"
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, thick = (doc.getObject(name) for name in ('Body', 'Pad', {thickness_name!r}))
+assert all(obj is not None for obj in (body, pad, thick))
+assert thick in body.Group and pad in body.Group
+assert thick.BaseFeature == pad
+assert thick.Reversed == {reversed_literal}
+assert not thick.Shape.isNull() and thick.Shape.isValid() and len(thick.Shape.Solids) >= 1
+assert abs(thick.Shape.Volume - {volume!r}) < 1e-2
+assert thick.Shape.Volume > 0
+print('THICKNESS_TREE_OK {direction}')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and f"THICKNESS_TREE_OK {direction}" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_thickness_default_direction(tmp_path: Path, thickness_pad) -> None:
+    bridge, params = thickness_pad
+    result = bridge.run("partdesign_thickness", {
+        **params, "object_name": "Pad", "thickness": 2.0,
+    })
+    assert result["thickness_value"] == 2.0
+    assert result["direction"] == "outward"
+    assert result["mode"] == "Skin"
+    assert result["body_name"] == "Body" and result["thickness_name"] == "Thickness"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_thickness_tree(tmp_path, result["volume"], False)
+
+
+@requires_freecad
+def test_real_freecad_thickness_reversed(tmp_path: Path, thickness_pad) -> None:
+    bridge, params = thickness_pad
+    result = bridge.run("partdesign_thickness", {
+        **params, "object_name": "Pad", "thickness": 3.0, "reversed": True, "thickness_name": "Wall",
+    })
+    assert result["thickness_value"] == 3.0
+    assert result["direction"] == "inward"
+    assert result["mode"] == "Skin"
+    assert result["thickness_name"] == "Wall"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_thickness_tree(tmp_path, result["volume"], True, thickness_name="Wall")
+
+
+@requires_freecad
+def test_real_freecad_thickness_invalid_and_rollback(tmp_path: Path, thickness_pad) -> None:
+    bridge, params = thickness_pad
+    document = tmp_path / "thicknesspad.fcstd"
+    before = document.read_bytes()
+    for thickness, message in [
+        (0, "thickness must be positive"),
+        (-1.5, "thickness must be positive"),
+        ("x", "thickness must be a finite number"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_thickness", {
+                **params, "object_name": "Pad", "thickness": thickness,
+            })
+        assert message in str(excinfo.value).lower()
+        assert document.read_bytes() == before
+
+    objects = bridge.run("list_objects", params)["objects"]
+    assert "Thickness" not in [obj["name"] for obj in objects]
+    pad = bridge.run("inspect_object", {**params, "object_name": "Pad"})["info"]
+    assert pad["shape_valid"] is True and pad["volume"] == pytest.approx(24000.0)
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad = (doc.getObject(name) for name in ('Body', 'Pad'))
+assert body.Tip == pad and pad in body.Group and doc.getObject('Thickness') is None
+assert not pad.Shape.isNull() and pad.Shape.isValid() and len(pad.Shape.Solids) == 1
+assert abs(pad.Shape.Volume - 24000.0) < 1e-5
+print('THICKNESS_ROLLBACK_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "THICKNESS_ROLLBACK_OK" in process.stdout, process.stdout + process.stderr
+    # A successful operation after the failed recompute also checks lock release.
+    result = bridge.run("partdesign_thickness", {
+        **params, "object_name": "Pad", "thickness": 2.0,
+    })
+    _assert_thickness_tree(tmp_path, result["volume"], False)
+
+
+@requires_freecad
+def test_real_freecad_thickness_single_removed_face(tmp_path: Path, thickness_pad) -> None:
+    """Thickness with one removed face produces a hollow solid with reduced volume."""
+    bridge, params = thickness_pad
+    # Pad has 6 faces; Face6 is the top face (normal +Z). Removing it opens the top.
+    result = bridge.run("partdesign_thickness", {
+        **params, "object_name": "Pad", "thickness": 2.0, "faces": [6],
+    })
+    assert result["removed_faces"] == [6]
+    assert result["base"] == "(Pad, ['Face6'])"
+    assert result["base_volume"] == pytest.approx(24000.0)
+    assert result["volume_reduction"] is not None
+    assert result["volume_reduction"] > 0
+    assert result["volume"] < result["base_volume"]
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_thickness_tree(tmp_path, result["volume"], False, thickness_name="Thickness")
+
+
+@requires_freecad
+def test_real_freecad_thickness_multiple_removed_faces(tmp_path: Path, thickness_pad) -> None:
+    """Thickness with multiple removed faces produces a more hollow solid."""
+    bridge, params = thickness_pad
+    result = bridge.run("partdesign_thickness", {
+        **params, "object_name": "Pad", "thickness": 2.0, "faces": [1, 6],
+    })
+    assert result["removed_faces"] == [1, 6]
+    assert result["base"] == "(Pad, ['Face1', 'Face6'])"
+    assert result["volume_reduction"] is not None
+    assert result["volume_reduction"] > 0
+    assert result["volume"] < result["base_volume"]
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_thickness_invalid_face_indices(tmp_path: Path, thickness_pad) -> None:
+    """Thickness rejects invalid face indices."""
+    bridge, params = thickness_pad
+    for faces, message in [
+        ([7], "out of range"),   # pad has 6 faces
+        ([0], ">= 1"),
+        ([3, 3], "duplicate"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_thickness", {
+                **params, "object_name": "Pad", "thickness": 2.0, "faces": faces,
+            })
+        assert message in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_thickness_save_reopen_with_faces(tmp_path: Path, thickness_pad) -> None:
+    """Thickness with removed faces persists after save/reopen and remains editable."""
+    bridge, params = thickness_pad
+    result = bridge.run("partdesign_thickness", {
+        **params, "object_name": "Pad", "thickness": 3.0, "faces": [6],
+    })
+    assert result["removed_faces"] == [6]
+    assert result["base"] == "(Pad, ['Face6'])"
+    document = tmp_path / "thicknesspad.fcstd"
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, thick = (doc.getObject(name) for name in ('Body', 'Pad', 'Thickness'))
+assert all(obj is not None for obj in (body, pad, thick))
+assert thick in body.Group and pad in body.Group
+assert thick.BaseFeature == pad
+assert thick.Base == (pad, ['Face6'])
+assert thick.Value == 3.0
+assert not thick.Shape.isNull() and thick.Shape.isValid()
+assert thick.Shape.Volume < pad.Shape.Volume
+print('THICKNESS_REOPEN_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "THICKNESS_REOPEN_OK" in process.stdout, process.stdout + process.stderr

@@ -563,6 +563,43 @@ class PartDesignMirroredResult(BaseModel):
     )
 
 
+class PartDesignThicknessResult(BaseModel):
+    """Result of partdesign_thickness."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the solid feature that was thickened.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Thickness.")
+    thickness_name: str = Field(description="Name of the created PartDesign::Thickness.")
+    base_feature: str = Field(description="Name of the feature used as the Thickness base.")
+    thickness_value: float = Field(description="Wall thickness in millimetres.")
+    direction: str = Field(description="Offset direction: 'inward' or 'outward'.")
+    mode: str = Field(description="Thickness mode: 'Skin' (only mode supported by FreeCAD 1.1.4).")
+    base: Optional[str] = Field(
+        default=None,
+        description="Native Base LinkSub reference, e.g. '(Pad, [Face6])', when faces are removed."
+    )
+    removed_faces: list[int] = Field(
+        default=[],
+        description="1-based face indices removed/opened by the Thickness feature."
+    )
+    base_volume: Optional[float] = Field(
+        default=None, description="Volume of the base feature before thickness, in mm^3."
+    )
+    volume_reduction: Optional[float] = Field(
+        default=None, description="Volume removed by the Thickness operation, in mm^3."
+    )
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -1004,6 +1041,30 @@ class PartDesignMirroredParams(BaseModel):
         default="Mirrored", description="Name for the new PartDesign::Mirrored object."
     )
     body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class PartDesignThicknessParams(BaseModel):
+    """Parameters for creating a PartDesign::Thickness on an existing solid feature."""
+
+    document_id: str = Field(description="Existing document containing the target feature.")
+    object_name: str = Field(description="Name of the solid feature to apply thickness to.")
+    thickness: float = Field(
+        description="Wall thickness in millimetres (must be finite and positive)."
+    )
+    reversed: bool = Field(
+        default=False, description="Whether to offset in the reversed direction."
+    )
+    thickness_name: str = Field(
+        default="Thickness", description="Name for the new PartDesign::Thickness object."
+    )
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
+    faces: list[int] = Field(
+        default=[],
+        description="1-based face indices of the target feature to remove/open (e.g. [6])."
+    )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -2899,6 +2960,67 @@ def _register_tools(server: Any, settings: Settings) -> None:
             base_feature=result.get("base_feature", params.object_name),
             plane=result.get("plane", params.plane),
             mirror_face_index=result.get("mirror_face_index", 1),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # partdesign_thickness
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="partdesign_thickness",
+        title="Create a PartDesign Thickness on a solid feature",
+        description=(
+            "Create a native PartDesign::Thickness that hollows an existing "
+            "solid feature into a shell of uniform wall thickness inside a "
+            "PartDesign::Body.  The target feature must already belong to a "
+            "Body, or the document must contain exactly one (unambiguous) "
+            "Body.  *thickness* must be finite and positive (millimetres); "
+            "*reversed* controls the offset direction.  FreeCAD 1.1.4 exposes "
+            "only the Mode='Skin' enumeration for Thickness direction and does "
+            "not expose a settable property for selecting faces to remove, so "
+            "face removal is not supported; the resulting solid is validated "
+            "as non-null with at least one solid.  The document is "
+            "recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def partdesign_thickness_tool(params: PartDesignThicknessParams) -> PartDesignThicknessResult:
+        """Create a PartDesign Thickness on a solid feature and return its info."""
+        validate_direct_request("partdesign_thickness", params.model_dump())
+        if math.isnan(params.thickness) or math.isinf(params.thickness):
+            raise ValueError("thickness must be a finite number.")
+        if params.thickness <= 0:
+            raise ValueError("thickness must be positive")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "thickness": params.thickness,
+            "reversed": params.reversed,
+            "thickness_name": params.thickness_name,
+            "body_name": params.body_name,
+            "faces": params.faces,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "partdesign_thickness", bridge_params)
+
+        return PartDesignThicknessResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", params.object_name),
+            body_name=result.get("body_name", params.body_name),
+            thickness_name=result.get("thickness_name", params.thickness_name),
+            base_feature=result.get("base_feature", params.object_name),
+            thickness_value=result.get("thickness_value", params.thickness),
+            direction=result.get("direction", "outward" if params.reversed else "inward"),
+            mode=result.get("mode", "Skin"),
+            base=result.get("base"),
+            removed_faces=result.get("removed_faces", params.faces),
+            base_volume=result.get("base_volume"),
+            volume_reduction=result.get("volume_reduction"),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),
