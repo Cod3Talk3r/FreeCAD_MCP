@@ -728,6 +728,32 @@ class MCPGuiPanel:
         pocket_layout.addWidget(self._pocket_button, 5, 0, 1, 2)
         layout.addWidget(pocket_group)
 
+        # ---- PartDesign Fillet -------------------------------------------
+        fillet_group = QtWidgets.QGroupBox("PartDesign Fillet")
+        fillet_layout = QtWidgets.QGridLayout(fillet_group)
+        self._fillet_object_input = QtWidgets.QLineEdit("Pad")
+        fillet_layout.addWidget(QtWidgets.QLabel("Target feature:"), 0, 0)
+        fillet_layout.addWidget(self._fillet_object_input, 0, 1)
+        self._fillet_edges_input = QtWidgets.QLineEdit("1")
+        fillet_layout.addWidget(QtWidgets.QLabel("Edge indices (1-based, comma-separated):"), 1, 0)
+        fillet_layout.addWidget(self._fillet_edges_input, 1, 1)
+        self._fillet_name_input = QtWidgets.QLineEdit("Fillet")
+        fillet_layout.addWidget(QtWidgets.QLabel("Fillet name:"), 2, 0)
+        fillet_layout.addWidget(self._fillet_name_input, 2, 1)
+        self._fillet_body_name_input = QtWidgets.QLineEdit("Body")
+        fillet_layout.addWidget(QtWidgets.QLabel("Body name:"), 3, 0)
+        fillet_layout.addWidget(self._fillet_body_name_input, 3, 1)
+        self._fillet_radius_input = QtWidgets.QDoubleSpinBox()
+        self._fillet_radius_input.setRange(0.001, 100000.0)
+        self._fillet_radius_input.setValue(2.0)
+        self._fillet_radius_input.setDecimals(3)
+        fillet_layout.addWidget(QtWidgets.QLabel("Radius (mm):"), 4, 0)
+        fillet_layout.addWidget(self._fillet_radius_input, 4, 1)
+        self._fillet_button = QtWidgets.QPushButton("Create Fillet")
+        self._fillet_button.clicked.connect(self._on_partdesign_fillet)
+        fillet_layout.addWidget(self._fillet_button, 5, 0, 1, 2)
+        layout.addWidget(fillet_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1890,6 +1916,62 @@ class MCPGuiPanel:
             f"Created Pocket '{result.get('pocket_name', pocket_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
             f"length={length}mm reversed={reversed_direction} "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # PartDesign Fillet
+    # ------------------------------------------------------------------
+    def _on_partdesign_fillet(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._fillet_object_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Target feature name must not be empty.", error=True)
+            return
+
+        edges_text = self._fillet_edges_input.text().strip()
+        if not edges_text:
+            self._set_status("Error: Edge indices must not be empty.", error=True)
+            return
+        try:
+            edge_indices = [int(part.strip()) for part in edges_text.split(",") if part.strip()]
+        except ValueError:
+            self._set_status("Error: Edge indices must be comma-separated integers.", error=True)
+            return
+        if not edge_indices:
+            self._set_status("Error: At least one edge index is required.", error=True)
+            return
+
+        fillet_name = self._fillet_name_input.text().strip() or "Fillet"
+        body_name = self._fillet_body_name_input.text().strip() or "Body"
+        radius = self._fillet_radius_input.value()
+
+        response = self._run_operation(
+            "partdesign_fillet",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "edge_indices": edge_indices,
+                "radius": radius,
+                "fillet_name": fillet_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Fillet '{result.get('fillet_name', fillet_name)}' on feature "
+            f"'{object_name}' edges {edge_indices} radius {radius}mm in Body "
+            f"'{result.get('body_name', body_name)}' "
             f"in workspace document '{document_id}'.",
             error=False,
         )

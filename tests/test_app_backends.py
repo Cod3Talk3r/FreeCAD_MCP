@@ -196,6 +196,18 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("sketch_pocket", {"sketch_name": "S", "length": -5.0}, "length must be positive"),
     ("sketch_pocket", {"sketch_name": "S", "length": 10.0, "reversed": 1}, "reversed must be a boolean."),
     ("sketch_pocket", {"sketch_name": "S", "length": 10.0, "reversed": "yes"}, "reversed must be a boolean."),
+    ("partdesign_fillet", {"object_name": ""}, "object_name must not be empty"),
+    ("partdesign_fillet", {"object_name": "   "}, "object_name must not be empty"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": []}, "non-empty"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [1, 1]}, "duplicate edge index"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [0]}, "must be a positive integer"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [-1]}, "must be a positive integer"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [True]}, "boolean values are not accepted"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [1.5]}, "must be an integer"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": float("nan")}, "must be a finite number"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": float("inf")}, "must be a finite number"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": 0.0}, "radius must be positive"),
+    ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": -5.0}, "radius must be positive"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

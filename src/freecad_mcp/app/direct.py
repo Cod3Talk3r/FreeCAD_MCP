@@ -321,6 +321,29 @@ def validate_direct_request(op: str, params: Any) -> None:
         reversed_param = params.get("reversed", False)
         if not isinstance(reversed_param, bool):
             raise ValueError("reversed must be a boolean.")
+    elif op == "partdesign_fillet":
+        if not params.get("object_name", "").strip():
+            raise ValueError("object_name must not be empty.")
+        edge_indices = params.get("edge_indices")
+        if not isinstance(edge_indices, list) or len(edge_indices) == 0:
+            raise ValueError("edge_indices must be a non-empty list of edge indices.")
+        seen = set()
+        for i, idx in enumerate(edge_indices):
+            if isinstance(idx, bool) or not isinstance(idx, int):
+                raise ValueError(f"edge_indices[{i}] must be an integer (boolean values are not accepted).")
+            if idx <= 0:
+                raise ValueError(f"edge_indices[{i}] must be a positive integer.")
+            if idx in seen:
+                raise ValueError(f"edge_indices[{i}] is a duplicate edge index: {idx}.")
+            seen.add(idx)
+        try:
+            radius_val = float(params.get("radius"))
+        except (TypeError, ValueError):
+            raise ValueError("radius must be a finite number.")
+        if not math.isfinite(radius_val):
+            raise ValueError("radius must be a finite number.")
+        if radius_val <= 0:
+            raise ValueError("radius must be positive")
 
 
 class DirectBackend:

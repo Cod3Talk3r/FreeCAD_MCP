@@ -3856,3 +3856,176 @@ def test_real_freecad_sketch_pocket_errors(tmp_path: Path) -> None:
             },
         )
     assert "positive" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_partdesign_fillet_errors(tmp_path: Path) -> None:
+    """partdesign_fillet returns structured errors for bad input."""
+    workspace = for_target(
+        tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    )
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "skfilerr", "workspace": workspace})
+
+    # No Body: fillet on a standalone box with no Body.
+    bridge.run("create_box", {"document_id": "skfilerr", "workspace": workspace, "object_name": "Box1"})
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "partdesign_fillet",
+            {
+                "document_id": "skfilerr",
+                "workspace": workspace,
+                "object_name": "Box1",
+                "edge_indices": [1],
+                "radius": 2.0,
+            },
+        )
+    assert "body" in str(excinfo.value).lower()
+
+    # Missing object.
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skfilerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "partdesign_fillet",
+            {
+                "document_id": "skfilerr",
+                "workspace": workspace,
+                "object_name": "NoSuchObject",
+                "edge_indices": [1],
+                "radius": 2.0,
+            },
+        )
+    assert "not found" in str(excinfo.value).lower()
+
+    # Zero radius.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "partdesign_fillet",
+            {
+                "document_id": "skfilerr",
+                "workspace": workspace,
+                "object_name": "Sketch1",
+                "edge_indices": [1],
+                "radius": 0.0,
+            },
+        )
+    assert "positive" in str(excinfo.value).lower()
+
+    # Out-of-range edge index / no solid (sketch is not a solid).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "partdesign_fillet",
+            {
+                "document_id": "skfilerr",
+                "workspace": workspace,
+                "object_name": "Sketch1",
+                "edge_indices": [1],
+                "radius": 2.0,
+            },
+        )
+    msg = str(excinfo.value).lower()
+    assert "out of range" in msg or "no solid" in msg or "shape validation failed" in msg
+
+
+@pytest.fixture
+def fillet_pad(tmp_path: Path):
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "filletpad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_fillet_tree(workspace: Path, edges: list[int], volume: float) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "filletpad.fcstd", target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, fillet = (doc.getObject(name) for name in ('Body', 'Pad', 'Fillet'))
+assert all(obj is not None for obj in (body, pad, fillet))
+assert fillet in body.Group and pad in body.Group and body.Tip == fillet
+assert fillet.Base[0] == pad and list(fillet.Base[1]) == {[f'Edge{i}' for i in edges]!r}
+assert not fillet.UseAllEdges and abs(fillet.Radius.Value - 3.0) < 1e-7
+assert not fillet.Shape.isNull() and fillet.Shape.isValid() and len(fillet.Shape.Solids) == 1
+assert abs(fillet.Shape.Volume - {volume!r}) < 1e-5
+assert 0 < fillet.Shape.Volume < pad.Shape.Volume
+print('FILLET_TREE_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "FILLET_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+@pytest.mark.parametrize("edges", [[7], [7, 9]], ids=["edge7", "multiple_edges"])
+def test_real_freecad_linksub_fillet_reopen(tmp_path: Path, fillet_pad, edges: list[int]) -> None:
+    bridge, params = fillet_pad
+    result = bridge.run("partdesign_fillet", {
+        **params, "object_name": "Pad", "edge_indices": edges, "radius": 3.0,
+    })
+    assert result["edge_indices"] == edges
+    assert result["body_name"] == "Body" and result["fillet_name"] == "Fillet"
+    assert result["solids_count"] == 1 and 0 < result["volume"] < 24000.0
+    _assert_fillet_tree(tmp_path, edges, result["volume"])
+
+
+@requires_freecad
+def test_real_freecad_linksub_fillet_invalid_and_rollback(tmp_path: Path, fillet_pad) -> None:
+    bridge, params = fillet_pad
+    document = tmp_path / "filletpad.fcstd"
+    before = document.read_bytes()
+    for edges, radius, message in [
+        ([], 3.0, "non-empty"),
+        ([0], 3.0, "positive"),
+        ([7, 7], 3.0, "duplicate"),
+        ([999], 3.0, "out of range"),
+        ([7], 0.0, "positive"),
+        ([7], -1.0, "positive"),
+        ([7], 1000.0, "fillet"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_fillet", {
+                **params, "object_name": "Pad", "edge_indices": edges, "radius": radius,
+            })
+        assert message in str(excinfo.value).lower()
+        assert document.read_bytes() == before
+
+    objects = bridge.run("list_objects", params)["objects"]
+    assert "Fillet" not in [obj["name"] for obj in objects]
+    pad = bridge.run("inspect_object", {**params, "object_name": "Pad"})["info"]
+    assert pad["shape_valid"] is True and pad["volume"] == pytest.approx(24000.0)
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad = (doc.getObject(name) for name in ('Body', 'Pad'))
+assert body.Tip == pad and pad in body.Group and doc.getObject('Fillet') is None
+assert not pad.Shape.isNull() and pad.Shape.isValid() and len(pad.Shape.Solids) == 1
+assert abs(pad.Shape.Volume - 24000.0) < 1e-5
+print('FILLET_ROLLBACK_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "FILLET_ROLLBACK_OK" in process.stdout, process.stdout + process.stderr
+    # A successful operation after the failed recompute also checks lock release.
+    result = bridge.run("partdesign_fillet", {
+        **params, "object_name": "Pad", "edge_indices": [7], "radius": 3.0,
+    })
+    _assert_fillet_tree(tmp_path, [7], result["volume"])

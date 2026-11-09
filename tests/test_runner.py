@@ -292,6 +292,7 @@ class _FakeShape:
         self.Volume = volume
         self._volume = volume
         self.Solids = [SimpleNamespace(Volume=volume)]
+        self.Edges = [object() for _ in range(12)]
         self.BoundBox = _FakeBoundBox()
 
     def isValid(self) -> bool:
@@ -338,9 +339,31 @@ class _FakePocket:
         self.Shape: object = _FakeShape()
 
 
+class _FakeFillet:
+    """Minimal stand-in for a PartDesign::Fillet."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Fillet"
+        self.Base: object = None
+        self.Radius: float = 0.0
+        self.Edges: list = []
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
+
+    def openTransaction(self, name: str) -> None:
+        pass
+
+    def commitTransaction(self) -> None:
+        pass
+
+    def abortTransaction(self) -> None:
+        pass
 
     @property
     def Objects(self) -> list:
@@ -358,6 +381,8 @@ class _FakeDoc:
             obj: object = _FakePad(name)
         elif type_id == "PartDesign::Pocket":
             obj: object = _FakePocket(name)
+        elif type_id == "PartDesign::Fillet":
+            obj: object = _FakeFillet(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -573,6 +598,7 @@ def _install_fake_freecad(
     part.LineSegment = _FakePart.LineSegment
     part.Circle = _FakePart.Circle
     part.Ellipse = _FakePart.Ellipse
+    part.Compound = lambda shapes: types.SimpleNamespace(Edges=list(shapes))
     monkeypatch.setitem(sys.modules, "Part", part)
     sketcher = types.ModuleType("Sketcher")
     monkeypatch.setitem(sys.modules, "Sketcher", sketcher)
@@ -585,6 +611,7 @@ def test_create_sketch_creates_empty_sketch_on_xy_plane(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_create_sketch(
         {
@@ -638,6 +665,7 @@ def test_create_sketch_rejects_empty_name(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_create_sketch(
         {"document_id": "skdoc", "workspace": str(tmp_path), "sketch_name": "   "}
@@ -868,6 +896,7 @@ def test_sketch_add_geometry_requires_existing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     for op, params in (
         (
@@ -947,6 +976,7 @@ def test_handle_request_dispatches_sketch_operations(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     response = runner.handle_request(
         {
@@ -1257,6 +1287,7 @@ def test_sketch_add_triangle_requires_existing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_add_triangle(
         {
@@ -1774,6 +1805,7 @@ def test_sketch_add_polygon_requires_existing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_add_polygon(
         {
@@ -2032,6 +2064,7 @@ def test_inspect_sketch_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_inspect_sketch(
         {"document_id": "missing", "workspace": str(tmp_path), "sketch_name": "NoSuchSketch"}
@@ -2258,6 +2291,7 @@ def test_sketch_delete_geometry_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_delete_geometry(
         {
@@ -2535,6 +2569,7 @@ def test_sketch_edit_line_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_line(
         {
@@ -2953,6 +2988,7 @@ def test_sketch_edit_circle_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_circle(
         {
@@ -3475,6 +3511,7 @@ def test_sketch_edit_ellipse_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_ellipse(
         {
@@ -4053,6 +4090,7 @@ def test_sketch_edit_rectangle_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_rectangle(
         {
@@ -4572,6 +4610,7 @@ def test_sketch_edit_triangle_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_triangle(
         {
@@ -5265,6 +5304,7 @@ def test_sketch_edit_regular_polygon_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_regular_polygon(
         {
@@ -5848,6 +5888,7 @@ def test_sketch_edit_polygon_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_edit_polygon(
         {
@@ -6168,6 +6209,7 @@ def test_sketch_pad_reuses_existing_body(
     """If the sketch already belongs to a Body, that Body is reused."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     # Create a Body and add the sketch to it first.
     body = doc.addObject("PartDesign::Body", "MyBody")
@@ -6203,6 +6245,7 @@ def test_sketch_pad_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_pad(
         {
@@ -6353,6 +6396,7 @@ def test_sketch_pad_empty_sketch_name(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_pad(
         {
@@ -6409,6 +6453,7 @@ def test_sketch_pocket_successful_from_rectangle(
     """Create a Pocket from a rectangle sketch inside a Body with a base Box solid."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     # Create a base Box solid first (simulating a preceding feature in the Body).
     box = doc.addObject("Part::Box", "Box1")
@@ -6462,6 +6507,7 @@ def test_sketch_pocket_successful_from_circle(
     """Create a Pocket from a circle sketch with reversed direction."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     box = doc.addObject("Part::Box", "Box1")
     box.Shape = _FakeShape(volume=64.0)
@@ -6505,6 +6551,7 @@ def test_sketch_pocket_standalone_sketch_uses_unambiguous_body(
     """A standalone sketch should use the single unambiguous Body in the document."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     box = doc.addObject("Part::Box", "Box1")
     box.Shape = _FakeShape(volume=64.0)
@@ -6545,6 +6592,7 @@ def test_sketch_pocket_missing_body_rejected(
     """A standalone sketch with no Body in the document must be rejected."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     runner._op_create_sketch(
         {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
@@ -6570,6 +6618,7 @@ def test_sketch_pocket_ambiguous_body_rejected(
     """A standalone sketch with multiple Bodies must be rejected."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     runner._op_create_sketch(
         {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
@@ -6599,6 +6648,7 @@ def test_sketch_pocket_no_base_solid_rejected(
     """A Body with no preceding solid feature must be rejected."""
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     runner._op_create_sketch(
         {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
@@ -6629,6 +6679,7 @@ def test_sketch_pocket_missing_sketch(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_pocket(
         {
@@ -6778,6 +6829,7 @@ def test_sketch_pocket_empty_sketch_name(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     result = runner._op_sketch_pocket(
         {
@@ -6798,6 +6850,7 @@ def test_handle_request_dispatches_sketch_pocket(
 ) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
 
     box = doc.addObject("Part::Box", "Box1")
     box.Shape = _FakeShape(volume=64.0)
@@ -6831,3 +6884,493 @@ def test_handle_request_dispatches_sketch_pocket(
     assert response["result"]["length"] == 6.0
     assert response["result"]["reversed"] is False
     assert response["result"]["solids_count"] == 1
+
+
+def _make_box_solid(doc: _FakeDoc, name: str = "Box1", volume: float = 64.0) -> object:
+    box = doc.addObject("Part::Box", name)
+    box.Shape = _FakeShape(volume=volume)
+    return box
+
+
+def _make_body_with(doc: _FakeDoc, *objs: object, name: str = "Body") -> object:
+    body = doc.addObject("PartDesign::Body", name)
+    for obj in objs:
+        body.addObject(obj)
+    body.Tip = objs[-1] if objs else None
+    return body
+
+
+def test_partdesign_fillet_successful_single_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fillet a single edge of a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_fillet"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["fillet_name"] == "Fillet"
+    assert result["result"]["base_feature"] == "Box1"
+    assert result["result"]["edge_indices"] == [1]
+    assert result["result"]["radius"] == 2.0
+    assert result["result"]["volume"] == 100.0
+    assert result["result"]["solids_count"] == 1
+
+    fillet = doc.objects["Fillet"]
+    assert fillet.Base == (box, ["Edge1"])
+    assert fillet.Radius == 2.0
+    assert fillet.UseAllEdges is False
+    assert fillet.Shape is not None
+    assert fillet.Shape.isValid() is True
+
+
+def test_partdesign_fillet_successful_multiple_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fillet multiple edges of a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=125.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1, 2, 3],
+            "radius": 1.5,
+            "fillet_name": "MultiFillet",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["fillet_name"] == "MultiFillet"
+    assert result["result"]["edge_indices"] == [1, 2, 3]
+    assert result["result"]["radius"] == 1.5
+    assert result["result"]["solids_count"] == 1
+
+    fillet = doc.objects["MultiFillet"]
+    assert fillet.Base == (box, ["Edge1", "Edge2", "Edge3"])
+    assert fillet.UseAllEdges is False
+
+
+def test_partdesign_fillet_target_not_in_body_uses_unambiguous_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone target feature uses the single unambiguous Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["body_name"] == "Body"
+
+
+def test_partdesign_fillet_no_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone target feature with no Body must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc)
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "body" in result["error"].lower()
+
+
+def test_partdesign_fillet_ambiguous_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone target feature with multiple Bodies must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+    doc.addObject("PartDesign::Body", "Body2")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "cannot determine" in result["error"].lower()
+
+
+def test_partdesign_fillet_missing_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "NoSuchObject",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "not found" in result["error"].lower()
+
+
+def test_partdesign_fillet_no_shape_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target without a solid shape must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Sketch1",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "no solid" in result["error"].lower() or "shape" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_edge_indices_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "non-empty" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_edge_indices_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1, 1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "duplicate" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_edge_indices_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A box has 12 edges; index 13 is out of range."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [13],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "out of range" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_edge_indices_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [True],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "integer" in result["error"].lower() and "boolean" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_edge_indices_non_int(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1.5],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "integer" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_edge_indices_zero_or_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    for indices in ([0], [-1]):
+        result = runner._op_partdesign_fillet(
+            {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "edge_indices": indices,
+                "radius": 2.0,
+            }
+        )
+        assert result["ok"] is False
+        assert result["op"] == "partdesign_fillet"
+        assert "positive" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_radius_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1],
+            "radius": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_radius_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1],
+            "radius": -5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_fillet_invalid_radius_non_finite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import math as _math
+
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc)
+    doc.addObject("PartDesign::Body", "Body")
+
+    for radius in (_math.nan, _math.inf):
+        result = runner._op_partdesign_fillet(
+            {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "edge_indices": [1],
+                "radius": radius,
+            }
+        )
+        assert result["ok"] is False
+        assert result["op"] == "partdesign_fillet"
+        assert "finite" in result["error"].lower()
+
+
+def test_partdesign_fillet_empty_object_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_fillet(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "",
+            "edge_indices": [1],
+            "radius": 2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_fillet"
+    assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_fillet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_fillet",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "edge_indices": [1],
+                "radius": 3.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_fillet"
+    assert response["result"]["object_name"] == "Box1"
+    assert response["result"]["edge_indices"] == [1]
+    assert response["result"]["radius"] == 3.0
+    assert response["result"]["body_name"] == "Body"
+    assert response["result"]["solids_count"] == 1
+
+    fillet = doc.objects["Fillet"]
+    assert fillet.Base == (box, ["Edge1"])
+    assert fillet.Radius == 3.0
+    assert fillet.UseAllEdges is False
