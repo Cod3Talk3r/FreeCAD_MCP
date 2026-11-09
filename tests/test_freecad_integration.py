@@ -4029,3 +4029,102 @@ print('FILLET_ROLLBACK_OK')
         **params, "object_name": "Pad", "edge_indices": [7], "radius": 3.0,
     })
     _assert_fillet_tree(tmp_path, [7], result["volume"])
+
+
+@pytest.fixture
+def chamfer_pad(tmp_path: Path):
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "chamferpad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_chamfer_tree(workspace: Path, edges: list[int], volume: float) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "chamferpad.fcstd", target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, chamfer = (doc.getObject(name) for name in ('Body', 'Pad', 'Chamfer'))
+assert all(obj is not None for obj in (body, pad, chamfer))
+assert chamfer in body.Group and pad in body.Group and body.Tip == chamfer
+assert chamfer.Base[0] == pad and list(chamfer.Base[1]) == {[f'Edge{i}' for i in edges]!r}
+assert not chamfer.UseAllEdges and abs(chamfer.Size.Value - 3.0) < 1e-7
+assert not chamfer.Shape.isNull() and chamfer.Shape.isValid() and len(chamfer.Shape.Solids) == 1
+assert abs(chamfer.Shape.Volume - {volume!r}) < 1e-5
+assert 0 < chamfer.Shape.Volume < pad.Shape.Volume
+print('CHAMFER_TREE_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "CHAMFER_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+@pytest.mark.parametrize("edges", [[7], [7, 9]], ids=["edge7", "multiple_edges"])
+def test_real_freecad_linksub_chamfer_reopen(tmp_path: Path, chamfer_pad, edges: list[int]) -> None:
+    bridge, params = chamfer_pad
+    result = bridge.run("partdesign_chamfer", {
+        **params, "object_name": "Pad", "edge_indices": edges, "size": 3.0,
+    })
+    assert result["edge_indices"] == edges
+    assert result["body_name"] == "Body" and result["chamfer_name"] == "Chamfer"
+    assert result["solids_count"] == 1 and 0 < result["volume"] < 24000.0
+    _assert_chamfer_tree(tmp_path, edges, result["volume"])
+
+
+@requires_freecad
+def test_real_freecad_linksub_chamfer_invalid_and_rollback(tmp_path: Path, chamfer_pad) -> None:
+    bridge, params = chamfer_pad
+    document = tmp_path / "chamferpad.fcstd"
+    before = document.read_bytes()
+    for edges, size, message in [
+        ([], 3.0, "non-empty"),
+        ([0], 3.0, "positive"),
+        ([7, 7], 3.0, "duplicate"),
+        ([999], 3.0, "out of range"),
+        ([7], 0.0, "positive"),
+        ([7], -1.0, "positive"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_chamfer", {
+                **params, "object_name": "Pad", "edge_indices": edges, "size": size,
+            })
+        assert message in str(excinfo.value).lower()
+        assert document.read_bytes() == before
+
+    objects = bridge.run("list_objects", params)["objects"]
+    assert "Chamfer" not in [obj["name"] for obj in objects]
+    pad = bridge.run("inspect_object", {**params, "object_name": "Pad"})["info"]
+    assert pad["shape_valid"] is True and pad["volume"] == pytest.approx(24000.0)
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad = (doc.getObject(name) for name in ('Body', 'Pad'))
+assert body.Tip == pad and pad in body.Group and doc.getObject('Chamfer') is None
+assert not pad.Shape.isNull() and pad.Shape.isValid() and len(pad.Shape.Solids) == 1
+assert abs(pad.Shape.Volume - 24000.0) < 1e-5
+print('CHAMFER_ROLLBACK_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "CHAMFER_ROLLBACK_OK" in process.stdout, process.stdout + process.stderr
+    # A successful operation after the failed recompute also checks lock release.
+    result = bridge.run("partdesign_chamfer", {
+        **params, "object_name": "Pad", "edge_indices": [7], "size": 3.0,
+    })
+    _assert_chamfer_tree(tmp_path, [7], result["volume"])

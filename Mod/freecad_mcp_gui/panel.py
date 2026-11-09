@@ -754,6 +754,32 @@ class MCPGuiPanel:
         fillet_layout.addWidget(self._fillet_button, 5, 0, 1, 2)
         layout.addWidget(fillet_group)
 
+        # ---- PartDesign Chamfer -------------------------------------------
+        chamfer_group = QtWidgets.QGroupBox("PartDesign Chamfer")
+        chamfer_layout = QtWidgets.QGridLayout(chamfer_group)
+        self._chamfer_object_input = QtWidgets.QLineEdit("Pad")
+        chamfer_layout.addWidget(QtWidgets.QLabel("Target feature:"), 0, 0)
+        chamfer_layout.addWidget(self._chamfer_object_input, 0, 1)
+        self._chamfer_edges_input = QtWidgets.QLineEdit("1")
+        chamfer_layout.addWidget(QtWidgets.QLabel("Edge indices (1-based, comma-separated):"), 1, 0)
+        chamfer_layout.addWidget(self._chamfer_edges_input, 1, 1)
+        self._chamfer_name_input = QtWidgets.QLineEdit("Chamfer")
+        chamfer_layout.addWidget(QtWidgets.QLabel("Chamfer name:"), 2, 0)
+        chamfer_layout.addWidget(self._chamfer_name_input, 2, 1)
+        self._chamfer_body_name_input = QtWidgets.QLineEdit("Body")
+        chamfer_layout.addWidget(QtWidgets.QLabel("Body name:"), 3, 0)
+        chamfer_layout.addWidget(self._chamfer_body_name_input, 3, 1)
+        self._chamfer_size_input = QtWidgets.QDoubleSpinBox()
+        self._chamfer_size_input.setRange(0.001, 100000.0)
+        self._chamfer_size_input.setValue(2.0)
+        self._chamfer_size_input.setDecimals(3)
+        chamfer_layout.addWidget(QtWidgets.QLabel("Size (mm):"), 4, 0)
+        chamfer_layout.addWidget(self._chamfer_size_input, 4, 1)
+        self._chamfer_button = QtWidgets.QPushButton("Create Chamfer")
+        self._chamfer_button.clicked.connect(self._on_partdesign_chamfer)
+        chamfer_layout.addWidget(self._chamfer_button, 5, 0, 1, 2)
+        layout.addWidget(chamfer_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -1971,6 +1997,62 @@ class MCPGuiPanel:
         self._set_status(
             f"Created Fillet '{result.get('fillet_name', fillet_name)}' on feature "
             f"'{object_name}' edges {edge_indices} radius {radius}mm in Body "
+            f"'{result.get('body_name', body_name)}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # PartDesign Chamfer
+    # ------------------------------------------------------------------
+    def _on_partdesign_chamfer(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._chamfer_object_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Target feature name must not be empty.", error=True)
+            return
+
+        edges_text = self._chamfer_edges_input.text().strip()
+        if not edges_text:
+            self._set_status("Error: Edge indices must not be empty.", error=True)
+            return
+        try:
+            edge_indices = [int(part.strip()) for part in edges_text.split(",") if part.strip()]
+        except ValueError:
+            self._set_status("Error: Edge indices must be comma-separated integers.", error=True)
+            return
+        if not edge_indices:
+            self._set_status("Error: At least one edge index is required.", error=True)
+            return
+
+        chamfer_name = self._chamfer_name_input.text().strip() or "Chamfer"
+        body_name = self._chamfer_body_name_input.text().strip() or "Body"
+        size = self._chamfer_size_input.value()
+
+        response = self._run_operation(
+            "partdesign_chamfer",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "edge_indices": edge_indices,
+                "size": size,
+                "chamfer_name": chamfer_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Chamfer '{result.get('chamfer_name', chamfer_name)}' on feature "
+            f"'{object_name}' edges {edge_indices} size {size}mm in Body "
             f"'{result.get('body_name', body_name)}' "
             f"in workspace document '{document_id}'.",
             error=False,

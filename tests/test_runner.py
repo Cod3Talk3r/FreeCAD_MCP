@@ -352,6 +352,19 @@ class _FakeFillet:
         self.Shape: object = _FakeShape()
 
 
+class _FakeChamfer:
+    """Minimal stand-in for a PartDesign::Chamfer."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Chamfer"
+        self.Base: object = None
+        self.Size: float = 0.0
+        self.Edges: list = []
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
@@ -383,6 +396,8 @@ class _FakeDoc:
             obj: object = _FakePocket(name)
         elif type_id == "PartDesign::Fillet":
             obj: object = _FakeFillet(name)
+        elif type_id == "PartDesign::Chamfer":
+            obj: object = _FakeChamfer(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -7374,3 +7389,454 @@ def test_handle_request_dispatches_partdesign_fillet(
     assert fillet.Base == (box, ["Edge1"])
     assert fillet.Radius == 3.0
     assert fillet.UseAllEdges is False
+
+
+def test_partdesign_chamfer_successful_single_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chamfer a single edge of a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_chamfer"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["chamfer_name"] == "Chamfer"
+    assert result["result"]["base_feature"] == "Box1"
+    assert result["result"]["edge_indices"] == [7]
+    assert result["result"]["size"] == 3.0
+    assert result["result"]["volume"] == 100.0
+    assert result["result"]["solids_count"] == 1
+
+    chamfer = doc.objects["Chamfer"]
+    assert chamfer.Base == (box, ["Edge7"])
+    assert chamfer.Size == 3.0
+    assert chamfer.UseAllEdges is False
+    assert chamfer.Shape is not None
+    assert chamfer.Shape.isValid() is True
+
+
+def test_partdesign_chamfer_successful_multiple_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chamfer multiple edges of a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=125.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1, 2, 3],
+            "size": 1.5,
+            "chamfer_name": "MultiChamfer",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["chamfer_name"] == "MultiChamfer"
+    assert result["result"]["edge_indices"] == [1, 2, 3]
+    assert result["result"]["size"] == 1.5
+    assert result["result"]["solids_count"] == 1
+
+    chamfer = doc.objects["MultiChamfer"]
+    assert chamfer.Base == (box, ["Edge1", "Edge2", "Edge3"])
+    assert chamfer.Size == 1.5
+    assert chamfer.UseAllEdges is False
+
+
+def test_partdesign_chamfer_target_not_in_body_uses_unambiguous_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone target feature uses the single unambiguous Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["body_name"] == "Body"
+
+
+def test_partdesign_chamfer_no_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone target feature with no Body must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc)
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "body" in result["error"].lower()
+
+
+def test_partdesign_chamfer_ambiguous_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone target feature with multiple Bodies must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body1")
+    doc.addObject("PartDesign::Body", "Body2")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "body" in result["error"].lower()
+
+
+def test_partdesign_chamfer_missing_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing target object must be rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "NoSuchObject",
+            "edge_indices": [7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "not found" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_edge_indices_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "non-empty" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_edge_indices_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7, 7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "duplicate" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_edge_indices_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    box = _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [999],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "out of range" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_edge_indices_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [True],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "boolean" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_edge_indices_non_int(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [1.5],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "integer" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_edge_indices_zero_or_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [0],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "positive integer" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_size_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_size_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": -5.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_chamfer_invalid_size_non_finite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import math as _math
+
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=64.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "edge_indices": [7],
+            "size": _math.inf,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "finite" in result["error"].lower()
+
+
+def test_partdesign_chamfer_empty_object_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_chamfer(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "",
+            "edge_indices": [7],
+            "size": 3.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_chamfer"
+    assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_chamfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_chamfer",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "edge_indices": [7],
+                "size": 3.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_chamfer"
+    assert response["result"]["object_name"] == "Box1"
+    assert response["result"]["edge_indices"] == [7]
+    assert response["result"]["size"] == 3.0
+    assert response["result"]["body_name"] == "Body"
+    assert response["result"]["solids_count"] == 1
+
+    chamfer = doc.objects["Chamfer"]
+    assert chamfer.Base == (box, ["Edge7"])
+    assert chamfer.Size == 3.0
+    assert chamfer.UseAllEdges is False

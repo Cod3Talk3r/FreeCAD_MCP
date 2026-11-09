@@ -471,6 +471,28 @@ class PartDesignFilletResult(BaseModel):
     )
 
 
+class PartDesignChamferResult(BaseModel):
+    """Result of partdesign_chamfer."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the solid feature that was chamfered.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Chamfer.")
+    chamfer_name: str = Field(description="Name of the created PartDesign::Chamfer.")
+    base_feature: str = Field(description="Name of the feature used as the Chamfer base.")
+    edge_indices: list[int] = Field(description="1-based edge indices that were chamfered.")
+    size: float = Field(description="Chamfer size in millimetres.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -834,6 +856,22 @@ class PartDesignFilletParams(BaseModel):
     )
     radius: float = Field(description="Fillet radius in millimetres (must be positive).")
     fillet_name: str = Field(default="Fillet", description="Name for the new PartDesign::Fillet object.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class PartDesignChamferParams(BaseModel):
+    """Parameters for creating a PartDesign::Chamfer on an existing solid feature."""
+
+    document_id: str = Field(description="Existing document containing the target feature.")
+    object_name: str = Field(description="Name of the solid feature to chamfer.")
+    edge_indices: list[int] = Field(
+        description="1-based edge indices of the target feature to chamfer (non-empty, unique)."
+    )
+    size: float = Field(description="Chamfer size in millimetres (must be positive).")
+    chamfer_name: str = Field(default="Chamfer", description="Name for the new PartDesign::Chamfer object.")
     body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
@@ -2528,6 +2566,54 @@ def _register_tools(server: Any, settings: Settings) -> None:
             base_feature=result.get("base_feature", params.object_name),
             edge_indices=result.get("edge_indices", params.edge_indices),
             radius=result.get("radius", params.radius),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # partdesign_chamfer
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="partdesign_chamfer",
+        title="Create a PartDesign Chamfer on a solid feature",
+        description=(
+            "Create a native PartDesign::Chamfer that chamfers selected edges of an "
+            "existing solid feature inside a PartDesign::Body.  The target feature "
+            "must already belong to a Body, or the document must contain exactly one "
+            "(unambiguous) Body.  *edge_indices* are 1-based edge indices of the "
+            "target feature; *size* must be finite and positive.  The document is "
+            "recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def partdesign_chamfer_tool(params: PartDesignChamferParams) -> PartDesignChamferResult:
+        """Create a PartDesign Chamfer on a solid feature and return its info."""
+        validate_direct_request("partdesign_chamfer", params.model_dump())
+        if math.isnan(params.size) or math.isinf(params.size):
+            raise ValueError("size must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "edge_indices": params.edge_indices,
+            "size": params.size,
+            "chamfer_name": params.chamfer_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "partdesign_chamfer", bridge_params)
+
+        return PartDesignChamferResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", params.object_name),
+            body_name=result.get("body_name", params.body_name),
+            chamfer_name=result.get("chamfer_name", params.chamfer_name),
+            base_feature=result.get("base_feature", params.object_name),
+            edge_indices=result.get("edge_indices", params.edge_indices),
+            size=result.get("size", params.size),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),

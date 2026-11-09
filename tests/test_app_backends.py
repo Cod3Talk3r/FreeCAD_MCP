@@ -208,6 +208,18 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": float("inf")}, "must be a finite number"),
     ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": 0.0}, "radius must be positive"),
     ("partdesign_fillet", {"object_name": "O", "edge_indices": [1], "radius": -5.0}, "radius must be positive"),
+    ("partdesign_chamfer", {"object_name": ""}, "object_name must not be empty"),
+    ("partdesign_chamfer", {"object_name": "   "}, "object_name must not be empty"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": []}, "non-empty"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1, 1]}, "duplicate edge index"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [0]}, "must be a positive integer"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [-1]}, "must be a positive integer"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [True]}, "boolean values are not accepted"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1.5]}, "must be an integer"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": float("nan")}, "must be a finite number"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": float("inf")}, "must be a finite number"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": 0.0}, "size must be positive"),
+    ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": -5.0}, "size must be positive"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()
