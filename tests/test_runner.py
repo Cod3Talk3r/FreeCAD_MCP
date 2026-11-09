@@ -317,6 +317,33 @@ class _FakeEdge:
         return _FakeVector(0.0, 0.0, 1.0)
 
 
+class _FakeFace:
+    """Minimal stand-in for a FreeCAD face with normal support.
+
+    Box faces: Face1 normal -Y (XZ_Plane), Face2 normal +X (YZ_Plane),
+    Face3 normal +Y (XZ_Plane), Face4 normal -X (YZ_Plane),
+    Face5 normal -Z (XY_Plane), Face6 normal +Z (XY_Plane).
+    """
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+    def normalAt(self, u: float, v: float) -> _FakeVector:
+        if self.index in (1,):
+            return _FakeVector(0.0, -1.0, 0.0)
+        if self.index in (2,):
+            return _FakeVector(1.0, 0.0, 0.0)
+        if self.index in (3,):
+            return _FakeVector(0.0, 1.0, 0.0)
+        if self.index in (4,):
+            return _FakeVector(-1.0, 0.0, 0.0)
+        if self.index in (5,):
+            return _FakeVector(0.0, 0.0, -1.0)
+        if self.index in (6,):
+            return _FakeVector(0.0, 0.0, 1.0)
+        return _FakeVector(0.0, 0.0, 1.0)
+
+
 class _FakeShape:
     """Minimal stand-in for a FreeCAD shape with a valid solid."""
 
@@ -325,6 +352,7 @@ class _FakeShape:
         self._volume = volume
         self.Solids = [SimpleNamespace(Volume=volume)]
         self.Edges = [_FakeEdge(i) for i in range(1, 13)]
+        self.Faces = [_FakeFace(i) for i in range(1, 7)]
         self.BoundBox = _FakeBoundBox()
 
     def isValid(self) -> bool:
@@ -427,6 +455,19 @@ class _FakePolarPattern:
         self.Shape: object = _FakeShape()
 
 
+class _FakeMirrored:
+    """Minimal stand-in for a PartDesign::Mirrored."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Mirrored"
+        self.BaseFeature: object = None
+        self.MirrorPlane: object = None
+        self.Originals: list = []
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
@@ -464,6 +505,8 @@ class _FakeDoc:
             obj: object = _FakeLinearPattern(name)
         elif type_id == "PartDesign::PolarPattern":
             obj: object = _FakePolarPattern(name)
+        elif type_id == "PartDesign::Mirrored":
+            obj: object = _FakeMirrored(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -8570,3 +8613,201 @@ def test_handle_request_dispatches_partdesign_polar_pattern(
     assert pattern.Axis == (box, ["Edge5"])
     assert pattern.Angle == 180.0
     assert pattern.Occurrences == 4
+
+
+def test_partdesign_mirrored_successful_xy_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrored across XY_Plane on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_mirrored(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "plane": "XY_Plane",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_mirrored"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["mirrored_name"] == "Mirrored"
+    assert result["result"]["base_feature"] == "Box1"
+    assert result["result"]["plane"] == "XY_Plane"
+    assert result["result"]["mirror_face_index"] == 5
+    assert result["result"]["solids_count"] == 1
+
+    mirrored = doc.objects["Mirrored"]
+    assert mirrored.BaseFeature == box
+    assert mirrored.MirrorPlane == (box, ["Face5"])
+    assert mirrored.Originals == [box]
+    assert mirrored.Shape is not None
+    assert mirrored.Shape.isValid() is True
+
+
+def test_partdesign_mirrored_successful_xz_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrored across XZ_Plane on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_mirrored(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "plane": "XZ_Plane",
+            "mirrored_name": "XZMirror",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["mirrored_name"] == "XZMirror"
+    assert result["result"]["plane"] == "XZ_Plane"
+    assert result["result"]["mirror_face_index"] == 1
+
+    mirrored = doc.objects["XZMirror"]
+    assert mirrored.MirrorPlane == (box, ["Face1"])
+
+
+def test_partdesign_mirrored_successful_yz_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrored across YZ_Plane on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_mirrored(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "plane": "YZ_Plane",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["plane"] == "YZ_Plane"
+    assert result["result"]["mirror_face_index"] == 2
+
+    mirrored = doc.objects["Mirrored"]
+    assert mirrored.MirrorPlane == (box, ["Face2"])
+
+
+def test_partdesign_mirrored_invalid_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_mirrored(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "plane": "INVALID_PLANE",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_mirrored"
+    assert "plane" in result["error"].lower()
+
+
+def test_partdesign_mirrored_missing_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_mirrored(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "NoSuchObject",
+            "plane": "XY_Plane",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_mirrored"
+    assert "not found" in result["error"].lower()
+
+
+def test_partdesign_mirrored_no_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=8000.0)
+
+    result = runner._op_partdesign_mirrored(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "plane": "XY_Plane",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_mirrored"
+    assert "body" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_mirrored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_mirrored",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "plane": "YZ_Plane",
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_mirrored"
+    assert response["result"]["object_name"] == "Box1"
+    assert response["result"]["plane"] == "YZ_Plane"
+    assert response["result"]["mirror_face_index"] == 2
+    assert response["result"]["body_name"] == "Body"
+    assert response["result"]["solids_count"] == 1
+
+    mirrored = doc.objects["Mirrored"]
+    assert mirrored.BaseFeature == box
+    assert mirrored.MirrorPlane == (box, ["Face2"])

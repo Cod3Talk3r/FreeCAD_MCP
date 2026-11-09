@@ -541,6 +541,28 @@ class PartDesignPolarPatternResult(BaseModel):
     )
 
 
+class PartDesignMirroredResult(BaseModel):
+    """Result of partdesign_mirrored."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the solid feature that was mirrored.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Mirrored.")
+    mirrored_name: str = Field(description="Name of the created PartDesign::Mirrored.")
+    base_feature: str = Field(description="Name of the feature used as the Mirrored base.")
+    plane: str = Field(description="Mirror plane: 'XY_Plane', 'XZ_Plane', or 'YZ_Plane'.")
+    mirror_face_index: int = Field(description="1-based face index used for the mirror plane.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -963,6 +985,23 @@ class PartDesignPolarPatternParams(BaseModel):
     )
     polar_pattern_name: str = Field(
         default="PolarPattern", description="Name for the new PartDesign::PolarPattern object."
+    )
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class PartDesignMirroredParams(BaseModel):
+    """Parameters for creating a PartDesign::Mirrored on an existing solid feature."""
+
+    document_id: str = Field(description="Existing document containing the target feature.")
+    object_name: str = Field(description="Name of the solid feature to mirror.")
+    plane: str = Field(
+        description="Mirror plane: 'XY_Plane', 'XZ_Plane', or 'YZ_Plane'."
+    )
+    mirrored_name: str = Field(
+        default="Mirrored", description="Name for the new PartDesign::Mirrored object."
     )
     body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
     workspace: Optional[str] = Field(
@@ -2815,6 +2854,51 @@ def _register_tools(server: Any, settings: Settings) -> None:
             axis_edge_index=result.get("axis_edge_index", 1),
             angle=result.get("angle", params.angle),
             occurrences=result.get("occurrences", params.occurrences),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # partdesign_mirrored
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="partdesign_mirrored",
+        title="Create a PartDesign Mirrored feature on a solid feature",
+        description=(
+            "Create a native PartDesign::Mirrored that mirrors an existing solid "
+            "feature across a principal origin plane inside a PartDesign::Body.  The "
+            "target feature must already belong to a Body, or the document must "
+            "contain exactly one (unambiguous) Body.  *plane* selects the principal "
+            "plane ('XY_Plane', 'XZ_Plane', or 'YZ_Plane').  The document is "
+            "recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def partdesign_mirrored_tool(params: PartDesignMirroredParams) -> PartDesignMirroredResult:
+        """Create a PartDesign Mirrored feature on a solid feature and return its info."""
+        validate_direct_request("partdesign_mirrored", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "plane": params.plane,
+            "mirrored_name": params.mirrored_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "partdesign_mirrored", bridge_params)
+
+        return PartDesignMirroredResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", params.object_name),
+            body_name=result.get("body_name", params.body_name),
+            mirrored_name=result.get("mirrored_name", params.mirrored_name),
+            base_feature=result.get("base_feature", params.object_name),
+            plane=result.get("plane", params.plane),
+            mirror_face_index=result.get("mirror_face_index", 1),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),

@@ -233,6 +233,8 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 361.0}, "angle must be at most 360"),
     ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 90.0, "occurrences": 1}, "greater than or equal to 2"),
     ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 90.0, "occurrences": True}, "boolean values are not accepted"),
+    ("partdesign_mirrored", {"object_name": ""}, "object_name must not be empty"),
+    ("partdesign_mirrored", {"object_name": "O", "plane": "INVALID"}, "plane must be one of"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

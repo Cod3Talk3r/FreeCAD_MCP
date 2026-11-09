@@ -4349,3 +4349,97 @@ print('POLAR_PATTERN_ROLLBACK_OK')
         **params, "object_name": "Pad", "axis": "X_Axis", "angle": 90.0, "occurrences": 3,
     })
     _assert_polar_pattern_tree(tmp_path, "X_Axis", result["volume"], 3)
+
+
+@pytest.fixture
+def mirrored_pad(tmp_path: Path):
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "mirroredpad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_mirrored_tree(workspace: Path, plane: str, volume: float) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "mirroredpad.fcstd", target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, mirrored = (doc.getObject(name) for name in ('Body', 'Pad', 'Mirrored'))
+assert all(obj is not None for obj in (body, pad, mirrored))
+assert mirrored in body.Group and pad in body.Group
+assert mirrored.BaseFeature == pad
+assert not mirrored.Shape.isNull() and mirrored.Shape.isValid() and len(mirrored.Shape.Solids) >= 1
+assert abs(mirrored.Shape.Volume - {volume!r}) < 1e-2
+assert mirrored.Shape.Volume > pad.Shape.Volume
+print('MIRRORED_TREE_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "MIRRORED_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+@pytest.mark.parametrize("plane", ["XY_Plane", "XZ_Plane", "YZ_Plane"], ids=["xy_plane", "xz_plane", "yz_plane"])
+def test_real_freecad_mirrored_all_planes(tmp_path: Path, mirrored_pad, plane: str) -> None:
+    bridge, params = mirrored_pad
+    result = bridge.run("partdesign_mirrored", {
+        **params, "object_name": "Pad", "plane": plane,
+    })
+    assert result["plane"] == plane
+    assert isinstance(result["mirror_face_index"], int) and result["mirror_face_index"] >= 1
+    assert result["body_name"] == "Body" and result["mirrored_name"] == "Mirrored"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_mirrored_tree(tmp_path, plane, result["volume"])
+
+
+@requires_freecad
+def test_real_freecad_mirrored_invalid_and_rollback(tmp_path: Path, mirrored_pad) -> None:
+    bridge, params = mirrored_pad
+    document = tmp_path / "mirroredpad.fcstd"
+    before = document.read_bytes()
+    for plane, message in [
+        ("INVALID_PLANE", "plane"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_mirrored", {
+                **params, "object_name": "Pad", "plane": plane,
+            })
+        assert message in str(excinfo.value).lower()
+        assert document.read_bytes() == before
+
+    objects = bridge.run("list_objects", params)["objects"]
+    assert "Mirrored" not in [obj["name"] for obj in objects]
+    pad = bridge.run("inspect_object", {**params, "object_name": "Pad"})["info"]
+    assert pad["shape_valid"] is True and pad["volume"] == pytest.approx(24000.0)
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad = (doc.getObject(name) for name in ('Body', 'Pad'))
+assert body.Tip == pad and pad in body.Group and doc.getObject('Mirrored') is None
+assert not pad.Shape.isNull() and pad.Shape.isValid() and len(pad.Shape.Solids) == 1
+assert abs(pad.Shape.Volume - 24000.0) < 1e-5
+print('MIRRORED_ROLLBACK_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "MIRRORED_ROLLBACK_OK" in process.stdout, process.stdout + process.stderr
+    # A successful operation after the failed recompute also checks lock release.
+    result = bridge.run("partdesign_mirrored", {
+        **params, "object_name": "Pad", "plane": "XY_Plane",
+    })
+    _assert_mirrored_tree(tmp_path, "XY_Plane", result["volume"])

@@ -846,6 +846,28 @@ class MCPGuiPanel:
         polar_layout.addWidget(self._polar_button, 6, 0, 1, 2)
         layout.addWidget(polar_group)
 
+        # ---- PartDesign Mirrored ------------------------------------------------
+        mirror_group = QtWidgets.QGroupBox("PartDesign Mirrored")
+        mirror_layout = QtWidgets.QGridLayout(mirror_group)
+        self._mirror_object_input = QtWidgets.QLineEdit("Pad")
+        mirror_layout.addWidget(QtWidgets.QLabel("Target feature:"), 0, 0)
+        mirror_layout.addWidget(self._mirror_object_input, 0, 1)
+        self._mirror_plane_input = QtWidgets.QComboBox()
+        self._mirror_plane_input.addItems(["XY_Plane", "XZ_Plane", "YZ_Plane"])
+        self._mirror_plane_input.setCurrentIndex(0)
+        mirror_layout.addWidget(QtWidgets.QLabel("Plane:"), 1, 0)
+        mirror_layout.addWidget(self._mirror_plane_input, 1, 1)
+        self._mirror_name_input = QtWidgets.QLineEdit("Mirrored")
+        mirror_layout.addWidget(QtWidgets.QLabel("Mirrored name:"), 2, 0)
+        mirror_layout.addWidget(self._mirror_name_input, 2, 1)
+        self._mirror_body_name_input = QtWidgets.QLineEdit("Body")
+        mirror_layout.addWidget(QtWidgets.QLabel("Body name:"), 3, 0)
+        mirror_layout.addWidget(self._mirror_body_name_input, 3, 1)
+        self._mirror_button = QtWidgets.QPushButton("Create Mirrored")
+        self._mirror_button.clicked.connect(self._on_partdesign_mirrored)
+        mirror_layout.addWidget(self._mirror_button, 4, 0, 1, 2)
+        layout.addWidget(mirror_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -2216,6 +2238,49 @@ class MCPGuiPanel:
             f"'{object_name}' axis {axis} edge {result.get('axis_edge_index', '?')} "
             f"angle {angle}deg occurrences {occurrences} in Body "
             f"'{result.get('body_name', body_name)}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # PartDesign Mirrored
+    # ------------------------------------------------------------------
+    def _on_partdesign_mirrored(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._mirror_object_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Target feature name must not be empty.", error=True)
+            return
+
+        plane = self._mirror_plane_input.currentText()
+
+        pattern_name = self._mirror_name_input.text().strip() or "Mirrored"
+        body_name = self._mirror_body_name_input.text().strip() or "Body"
+
+        response = self._run_operation(
+            "partdesign_mirrored",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "plane": plane,
+                "mirrored_name": pattern_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Mirrored '{result.get('mirrored_name', pattern_name)}' on feature "
+            f"'{object_name}' plane {plane} face {result.get('mirror_face_index', '?')} "
+            f"in Body '{result.get('body_name', body_name)}' "
             f"in workspace document '{document_id}'.",
             error=False,
         )

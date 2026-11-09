@@ -407,6 +407,12 @@ def validate_direct_request(op: str, params: Any) -> None:
             raise ValueError("occurrences must be an integer (boolean values are not accepted).")
         if occurrences < 2:
             raise ValueError("occurrences must be an integer greater than or equal to 2.")
+    elif op == "partdesign_mirrored":
+        if not params.get("object_name", "").strip():
+            raise ValueError("object_name must not be empty.")
+        plane = params.get("plane")
+        if plane not in ("XY_Plane", "XZ_Plane", "YZ_Plane"):
+            raise ValueError("plane must be one of 'XY_Plane', 'XZ_Plane', or 'YZ_Plane'.")
 
 
 class DirectBackend:
