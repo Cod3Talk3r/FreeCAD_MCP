@@ -412,6 +412,21 @@ class _FakeLinearPattern:
         self.Shape: object = _FakeShape()
 
 
+class _FakePolarPattern:
+    """Minimal stand-in for a PartDesign::PolarPattern."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::PolarPattern"
+        self.BaseFeature: object = None
+        self.Axis: object = None
+        self.Originals: list = []
+        self.Angle: float = 0.0
+        self.Occurrences: int = 2
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
@@ -447,6 +462,8 @@ class _FakeDoc:
             obj: object = _FakeChamfer(name)
         elif type_id == "PartDesign::LinearPattern":
             obj: object = _FakeLinearPattern(name)
+        elif type_id == "PartDesign::PolarPattern":
+            obj: object = _FakePolarPattern(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -8208,4 +8225,348 @@ def test_handle_request_dispatches_partdesign_linear_pattern(
     assert pattern.BaseFeature == box
     assert pattern.Direction == (box, ["Edge5"])
     assert pattern.Length == 40.0
+    assert pattern.Occurrences == 4
+
+
+def test_partdesign_polar_pattern_successful_x_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PolarPattern along X_Axis on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": 90.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_polar_pattern"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["polar_pattern_name"] == "PolarPattern"
+    assert result["result"]["base_feature"] == "Box1"
+    assert result["result"]["axis"] == "X_Axis"
+    assert result["result"]["axis_edge_index"] == 1
+    assert result["result"]["angle"] == 90.0
+    assert result["result"]["occurrences"] == 3
+    assert result["result"]["solids_count"] == 1
+
+    pattern = doc.objects["PolarPattern"]
+    assert pattern.BaseFeature == box
+    assert pattern.Axis == (box, ["Edge1"])
+    assert pattern.Originals == [box]
+    assert pattern.Angle == 90.0
+    assert pattern.Occurrences == 3
+    assert pattern.Shape is not None
+    assert pattern.Shape.isValid() is True
+
+
+def test_partdesign_polar_pattern_successful_y_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PolarPattern along Y_Axis on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "Y_Axis",
+            "angle": 90.0,
+            "occurrences": 3,
+            "polar_pattern_name": "YPolar",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["polar_pattern_name"] == "YPolar"
+    assert result["result"]["axis"] == "Y_Axis"
+    assert result["result"]["axis_edge_index"] == 2
+
+    pattern = doc.objects["YPolar"]
+    assert pattern.Axis == (box, ["Edge2"])
+
+
+def test_partdesign_polar_pattern_successful_z_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PolarPattern along Z_Axis on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "Z_Axis",
+            "angle": 90.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["axis"] == "Z_Axis"
+    assert result["result"]["axis_edge_index"] == 5
+
+    pattern = doc.objects["PolarPattern"]
+    assert pattern.Axis == (box, ["Edge5"])
+
+
+def test_partdesign_polar_pattern_invalid_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "INVALID_AXIS",
+            "angle": 90.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "axis" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_invalid_angle_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": 0.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_invalid_angle_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": -45.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_invalid_angle_over_360(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": 361.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "360" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_invalid_occurrences_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": 90.0,
+            "occurrences": 1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "greater than or equal to 2" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_invalid_occurrences_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": 90.0,
+            "occurrences": True,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "boolean" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_missing_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "NoSuchObject",
+            "axis": "X_Axis",
+            "angle": 90.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "not found" in result["error"].lower()
+
+
+def test_partdesign_polar_pattern_no_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=8000.0)
+
+    result = runner._op_partdesign_polar_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "axis": "X_Axis",
+            "angle": 90.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_polar_pattern"
+    assert "body" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_polar_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_polar_pattern",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "axis": "Z_Axis",
+                "angle": 180.0,
+                "occurrences": 4,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_polar_pattern"
+    assert response["result"]["object_name"] == "Box1"
+    assert response["result"]["axis"] == "Z_Axis"
+    assert response["result"]["angle"] == 180.0
+    assert response["result"]["occurrences"] == 4
+    assert response["result"]["body_name"] == "Body"
+    assert response["result"]["solids_count"] == 1
+
+    pattern = doc.objects["PolarPattern"]
+    assert pattern.BaseFeature == box
+    assert pattern.Axis == (box, ["Edge5"])
+    assert pattern.Angle == 180.0
     assert pattern.Occurrences == 4

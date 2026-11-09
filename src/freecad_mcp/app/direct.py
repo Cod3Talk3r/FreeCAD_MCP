@@ -386,6 +386,27 @@ def validate_direct_request(op: str, params: Any) -> None:
             raise ValueError("occurrences must be an integer (boolean values are not accepted).")
         if occurrences < 2:
             raise ValueError("occurrences must be an integer greater than or equal to 2.")
+    elif op == "partdesign_polar_pattern":
+        if not params.get("object_name", "").strip():
+            raise ValueError("object_name must not be empty.")
+        axis = params.get("axis")
+        if axis not in ("X_Axis", "Y_Axis", "Z_Axis"):
+            raise ValueError("axis must be one of 'X_Axis', 'Y_Axis', or 'Z_Axis'.")
+        try:
+            angle_val = float(params.get("angle"))
+        except (TypeError, ValueError):
+            raise ValueError("angle must be a finite number.")
+        if not math.isfinite(angle_val):
+            raise ValueError("angle must be a finite number.")
+        if angle_val <= 0:
+            raise ValueError("angle must be positive")
+        if angle_val > 360:
+            raise ValueError("angle must be at most 360 degrees.")
+        occurrences = params.get("occurrences")
+        if isinstance(occurrences, bool) or not isinstance(occurrences, int):
+            raise ValueError("occurrences must be an integer (boolean values are not accepted).")
+        if occurrences < 2:
+            raise ValueError("occurrences must be an integer greater than or equal to 2.")
 
 
 class DirectBackend:

@@ -517,6 +517,30 @@ class PartDesignLinearPatternResult(BaseModel):
     )
 
 
+class PartDesignPolarPatternResult(BaseModel):
+    """Result of partdesign_polar_pattern."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the solid feature that was patterned.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the PolarPattern.")
+    polar_pattern_name: str = Field(description="Name of the created PartDesign::PolarPattern.")
+    base_feature: str = Field(description="Name of the feature used as the PolarPattern base.")
+    axis: str = Field(description="Principal axis: 'X_Axis', 'Y_Axis', or 'Z_Axis'.")
+    axis_edge_index: int = Field(description="1-based edge index used for the pattern axis.")
+    angle: float = Field(description="Pattern angle in degrees (0 < angle <= 360).")
+    occurrences: int = Field(description="Number of pattern occurrences.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -916,6 +940,29 @@ class PartDesignLinearPatternParams(BaseModel):
     )
     linear_pattern_name: str = Field(
         default="LinearPattern", description="Name for the new PartDesign::LinearPattern object."
+    )
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class PartDesignPolarPatternParams(BaseModel):
+    """Parameters for creating a PartDesign::PolarPattern on an existing solid feature."""
+
+    document_id: str = Field(description="Existing document containing the target feature.")
+    object_name: str = Field(description="Name of the solid feature to pattern.")
+    axis: str = Field(
+        description="Principal axis direction: 'X_Axis', 'Y_Axis', or 'Z_Axis'."
+    )
+    angle: float = Field(
+        description="Pattern angle in degrees (must be finite, positive, and at most 360)."
+    )
+    occurrences: int = Field(
+        description="Number of pattern occurrences (must be >= 2)."
+    )
+    polar_pattern_name: str = Field(
+        default="PolarPattern", description="Name for the new PartDesign::PolarPattern object."
     )
     body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
     workspace: Optional[str] = Field(
@@ -2710,6 +2757,63 @@ def _register_tools(server: Any, settings: Settings) -> None:
             direction=result.get("direction", params.direction),
             direction_edge_index=result.get("direction_edge_index", 1),
             length=result.get("length", params.length),
+            occurrences=result.get("occurrences", params.occurrences),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # partdesign_polar_pattern
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="partdesign_polar_pattern",
+        title="Create a PartDesign Polar Pattern on a solid feature",
+        description=(
+            "Create a native PartDesign::PolarPattern that patterns an existing "
+            "solid feature around a principal axis inside a PartDesign::Body.  The "
+            "target feature must already belong to a Body, or the document must "
+            "contain exactly one (unambiguous) Body.  *axis* selects the "
+            "principal axis ('X_Axis', 'Y_Axis', or 'Z_Axis'); *angle* must be "
+            "finite, positive, and at most 360 degrees; *occurrences* must be an "
+            "integer >= 2.  The document is recomputed, saved atomically, and its "
+            "revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def partdesign_polar_pattern_tool(params: PartDesignPolarPatternParams) -> PartDesignPolarPatternResult:
+        """Create a PartDesign Polar Pattern on a solid feature and return its info."""
+        validate_direct_request("partdesign_polar_pattern", params.model_dump())
+        if math.isnan(params.angle) or math.isinf(params.angle):
+            raise ValueError("angle must be a finite number.")
+        if params.angle <= 0:
+            raise ValueError("angle must be positive")
+        if params.angle > 360:
+            raise ValueError("angle must be at most 360 degrees.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "axis": params.axis,
+            "angle": params.angle,
+            "occurrences": params.occurrences,
+            "polar_pattern_name": params.polar_pattern_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "partdesign_polar_pattern", bridge_params)
+
+        return PartDesignPolarPatternResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", params.object_name),
+            body_name=result.get("body_name", params.body_name),
+            polar_pattern_name=result.get("polar_pattern_name", params.polar_pattern_name),
+            base_feature=result.get("base_feature", params.object_name),
+            axis=result.get("axis", params.axis),
+            axis_edge_index=result.get("axis_edge_index", 1),
+            angle=result.get("angle", params.angle),
             occurrences=result.get("occurrences", params.occurrences),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),

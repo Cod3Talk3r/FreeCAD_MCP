@@ -4228,3 +4228,124 @@ print('LINEAR_PATTERN_ROLLBACK_OK')
         **params, "object_name": "Pad", "direction": "X_Axis", "length": 60.0, "occurrences": 3,
     })
     _assert_linear_pattern_tree(tmp_path, "X_Axis", result["volume"], 3)
+
+
+@pytest.fixture
+def polar_pattern_pad(tmp_path: Path):
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "polarpattermpad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_polar_pattern_tree(workspace: Path, axis: str, volume: float, occurrences: int) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "polarpattermpad.fcstd", target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, pattern = (doc.getObject(name) for name in ('Body', 'Pad', 'PolarPattern'))
+assert all(obj is not None for obj in (body, pad, pattern))
+assert pattern in body.Group and pad in body.Group and body.Tip == pattern
+assert pattern.Length.Value == 60.0 if hasattr(pattern, 'Length') else True
+assert pattern.Occurrences == {occurrences}
+assert not pattern.Shape.isNull() and pattern.Shape.isValid() and len(pattern.Shape.Solids) >= 1
+assert abs(pattern.Shape.Volume - {volume!r}) < 1e-2
+assert pattern.Shape.Volume > pad.Shape.Volume
+print('POLAR_PATTERN_TREE_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "POLAR_PATTERN_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+@pytest.mark.parametrize("axis", ["X_Axis", "Y_Axis", "Z_Axis"], ids=["x_axis", "y_axis", "z_axis"])
+def test_real_freecad_polar_pattern_all_axes(tmp_path: Path, polar_pattern_pad, axis: str) -> None:
+    bridge, params = polar_pattern_pad
+    result = bridge.run("partdesign_polar_pattern", {
+        **params, "object_name": "Pad", "axis": axis, "angle": 90.0, "occurrences": 3,
+    })
+    assert result["axis"] == axis
+    assert isinstance(result["axis_edge_index"], int) and result["axis_edge_index"] >= 1
+    assert result["body_name"] == "Body" and result["polar_pattern_name"] == "PolarPattern"
+    assert result["angle"] == 90.0 and result["occurrences"] == 3
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_polar_pattern_tree(tmp_path, axis, result["volume"], 3)
+
+
+@requires_freecad
+def test_real_freecad_polar_pattern_full_360(tmp_path: Path, polar_pattern_pad) -> None:
+    bridge, params = polar_pattern_pad
+    result = bridge.run("partdesign_polar_pattern", {
+        **params, "object_name": "Pad", "axis": "Z_Axis", "angle": 360.0, "occurrences": 4,
+    })
+    assert result["angle"] == 360.0 and result["occurrences"] == 4
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_polar_pattern_partial_angle(tmp_path: Path, polar_pattern_pad) -> None:
+    bridge, params = polar_pattern_pad
+    result = bridge.run("partdesign_polar_pattern", {
+        **params, "object_name": "Pad", "axis": "Z_Axis", "angle": 45.0, "occurrences": 4,
+    })
+    assert result["angle"] == 45.0 and result["occurrences"] == 4
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_polar_pattern_invalid_and_rollback(tmp_path: Path, polar_pattern_pad) -> None:
+    bridge, params = polar_pattern_pad
+    document = tmp_path / "polarpattermpad.fcstd"
+    before = document.read_bytes()
+    for axis, angle, occurrences, message in [
+        ("INVALID_AXIS", 90.0, 3, "axis"),
+        ("X_Axis", 0.0, 3, "positive"),
+        ("X_Axis", -45.0, 3, "positive"),
+        ("X_Axis", 361.0, 3, "360"),
+        ("X_Axis", 90.0, 1, "greater than or equal to 2"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_polar_pattern", {
+                **params, "object_name": "Pad", "axis": axis,
+                "angle": angle, "occurrences": occurrences,
+            })
+        assert message in str(excinfo.value).lower()
+        assert document.read_bytes() == before
+
+    objects = bridge.run("list_objects", params)["objects"]
+    assert "PolarPattern" not in [obj["name"] for obj in objects]
+    pad = bridge.run("inspect_object", {**params, "object_name": "Pad"})["info"]
+    assert pad["shape_valid"] is True and pad["volume"] == pytest.approx(24000.0)
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad = (doc.getObject(name) for name in ('Body', 'Pad'))
+assert body.Tip == pad and pad in body.Group and doc.getObject('PolarPattern') is None
+assert not pad.Shape.isNull() and pad.Shape.isValid() and len(pad.Shape.Solids) == 1
+assert abs(pad.Shape.Volume - 24000.0) < 1e-5
+print('POLAR_PATTERN_ROLLBACK_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "POLAR_PATTERN_ROLLBACK_OK" in process.stdout, process.stdout + process.stderr
+    # A successful operation after the failed recompute also checks lock release.
+    result = bridge.run("partdesign_polar_pattern", {
+        **params, "object_name": "Pad", "axis": "X_Axis", "angle": 90.0, "occurrences": 3,
+    })
+    _assert_polar_pattern_tree(tmp_path, "X_Axis", result["volume"], 3)

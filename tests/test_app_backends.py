@@ -226,6 +226,13 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": -5.0}, "length must be positive"),
     ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": 10.0, "occurrences": 1}, "greater than or equal to 2"),
     ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": 10.0, "occurrences": True}, "boolean values are not accepted"),
+    ("partdesign_polar_pattern", {"object_name": ""}, "object_name must not be empty"),
+    ("partdesign_polar_pattern", {"object_name": "O", "axis": "INVALID"}, "axis must be one of"),
+    ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 0.0}, "angle must be positive"),
+    ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": -45.0}, "angle must be positive"),
+    ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 361.0}, "angle must be at most 360"),
+    ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 90.0, "occurrences": 1}, "greater than or equal to 2"),
+    ("partdesign_polar_pattern", {"object_name": "O", "axis": "X_Axis", "angle": 90.0, "occurrences": True}, "boolean values are not accepted"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

@@ -813,6 +813,39 @@ class MCPGuiPanel:
         pattern_layout.addWidget(self._pattern_button, 6, 0, 1, 2)
         layout.addWidget(pattern_group)
 
+        # ---- PartDesign Polar Pattern -------------------------------------------
+        polar_group = QtWidgets.QGroupBox("PartDesign Polar Pattern")
+        polar_layout = QtWidgets.QGridLayout(polar_group)
+        self._polar_object_input = QtWidgets.QLineEdit("Pad")
+        polar_layout.addWidget(QtWidgets.QLabel("Target feature:"), 0, 0)
+        polar_layout.addWidget(self._polar_object_input, 0, 1)
+        self._polar_axis_input = QtWidgets.QComboBox()
+        self._polar_axis_input.addItems(["X_Axis", "Y_Axis", "Z_Axis"])
+        self._polar_axis_input.setCurrentIndex(0)
+        polar_layout.addWidget(QtWidgets.QLabel("Axis:"), 1, 0)
+        polar_layout.addWidget(self._polar_axis_input, 1, 1)
+        self._polar_angle_input = QtWidgets.QDoubleSpinBox()
+        self._polar_angle_input.setRange(0.001, 360.0)
+        self._polar_angle_input.setValue(90.0)
+        self._polar_angle_input.setDecimals(3)
+        polar_layout.addWidget(QtWidgets.QLabel("Angle (deg):"), 2, 0)
+        polar_layout.addWidget(self._polar_angle_input, 2, 1)
+        self._polar_occurrences_input = QtWidgets.QSpinBox()
+        self._polar_occurrences_input.setRange(2, 1000)
+        self._polar_occurrences_input.setValue(3)
+        polar_layout.addWidget(QtWidgets.QLabel("Occurrences:"), 3, 0)
+        polar_layout.addWidget(self._polar_occurrences_input, 3, 1)
+        self._polar_name_input = QtWidgets.QLineEdit("PolarPattern")
+        polar_layout.addWidget(QtWidgets.QLabel("Pattern name:"), 4, 0)
+        polar_layout.addWidget(self._polar_name_input, 4, 1)
+        self._polar_body_name_input = QtWidgets.QLineEdit("Body")
+        polar_layout.addWidget(QtWidgets.QLabel("Body name:"), 5, 0)
+        polar_layout.addWidget(self._polar_body_name_input, 5, 1)
+        self._polar_button = QtWidgets.QPushButton("Create Polar Pattern")
+        self._polar_button.clicked.connect(self._on_partdesign_polar_pattern)
+        polar_layout.addWidget(self._polar_button, 6, 0, 1, 2)
+        layout.addWidget(polar_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -2134,6 +2167,54 @@ class MCPGuiPanel:
             f"Created Linear Pattern '{result.get('linear_pattern_name', pattern_name)}' on feature "
             f"'{object_name}' direction {direction} edge {result.get('direction_edge_index', '?')} "
             f"length {length}mm occurrences {occurrences} in Body "
+            f"'{result.get('body_name', body_name)}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # PartDesign Polar Pattern
+    # ------------------------------------------------------------------
+    def _on_partdesign_polar_pattern(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._polar_object_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Target feature name must not be empty.", error=True)
+            return
+
+        axis = self._polar_axis_input.currentText()
+        angle = self._polar_angle_input.value()
+        occurrences = self._polar_occurrences_input.value()
+
+        pattern_name = self._polar_name_input.text().strip() or "PolarPattern"
+        body_name = self._polar_body_name_input.text().strip() or "Body"
+
+        response = self._run_operation(
+            "partdesign_polar_pattern",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "axis": axis,
+                "angle": angle,
+                "occurrences": occurrences,
+                "polar_pattern_name": pattern_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Polar Pattern '{result.get('polar_pattern_name', pattern_name)}' on feature "
+            f"'{object_name}' axis {axis} edge {result.get('axis_edge_index', '?')} "
+            f"angle {angle}deg occurrences {occurrences} in Body "
             f"'{result.get('body_name', body_name)}' "
             f"in workspace document '{document_id}'.",
             error=False,
