@@ -493,6 +493,30 @@ class PartDesignChamferResult(BaseModel):
     )
 
 
+class PartDesignLinearPatternResult(BaseModel):
+    """Result of partdesign_linear_pattern."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the solid feature that was patterned.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the LinearPattern.")
+    linear_pattern_name: str = Field(description="Name of the created PartDesign::LinearPattern.")
+    base_feature: str = Field(description="Name of the feature used as the LinearPattern base.")
+    direction: str = Field(description="Principal axis direction: 'X_Axis', 'Y_Axis', or 'Z_Axis'.")
+    direction_edge_index: int = Field(description="1-based edge index used for the pattern direction.")
+    length: float = Field(description="Pattern length in millimetres.")
+    occurrences: int = Field(description="Number of pattern occurrences.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
@@ -872,6 +896,27 @@ class PartDesignChamferParams(BaseModel):
     )
     size: float = Field(description="Chamfer size in millimetres (must be positive).")
     chamfer_name: str = Field(default="Chamfer", description="Name for the new PartDesign::Chamfer object.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class PartDesignLinearPatternParams(BaseModel):
+    """Parameters for creating a PartDesign::LinearPattern on an existing solid feature."""
+
+    document_id: str = Field(description="Existing document containing the target feature.")
+    object_name: str = Field(description="Name of the solid feature to pattern.")
+    direction: str = Field(
+        description="Principal axis direction: 'X_Axis', 'Y_Axis', or 'Z_Axis'."
+    )
+    length: float = Field(description="Pattern length in millimetres (must be positive).")
+    occurrences: int = Field(
+        description="Number of pattern occurrences (must be >= 2)."
+    )
+    linear_pattern_name: str = Field(
+        default="LinearPattern", description="Name for the new PartDesign::LinearPattern object."
+    )
     body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the target.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
@@ -2614,6 +2659,58 @@ def _register_tools(server: Any, settings: Settings) -> None:
             base_feature=result.get("base_feature", params.object_name),
             edge_indices=result.get("edge_indices", params.edge_indices),
             size=result.get("size", params.size),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # partdesign_linear_pattern
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="partdesign_linear_pattern",
+        title="Create a PartDesign Linear Pattern on a solid feature",
+        description=(
+            "Create a native PartDesign::LinearPattern that patterns an existing "
+            "solid feature along a principal axis inside a PartDesign::Body.  The "
+            "target feature must already belong to a Body, or the document must "
+            "contain exactly one (unambiguous) Body.  *direction* selects the "
+            "principal axis ('X_Axis', 'Y_Axis', or 'Z_Axis'); *length* must be "
+            "finite and positive; *occurrences* must be an integer >= 2.  The "
+            "document is recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def partdesign_linear_pattern_tool(params: PartDesignLinearPatternParams) -> PartDesignLinearPatternResult:
+        """Create a PartDesign Linear Pattern on a solid feature and return its info."""
+        validate_direct_request("partdesign_linear_pattern", params.model_dump())
+        if math.isnan(params.length) or math.isinf(params.length):
+            raise ValueError("length must be a finite number.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "direction": params.direction,
+            "length": params.length,
+            "occurrences": params.occurrences,
+            "linear_pattern_name": params.linear_pattern_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "partdesign_linear_pattern", bridge_params)
+
+        return PartDesignLinearPatternResult(
+            document_id=params.document_id,
+            object_name=result.get("object_name", params.object_name),
+            body_name=result.get("body_name", params.body_name),
+            linear_pattern_name=result.get("linear_pattern_name", params.linear_pattern_name),
+            base_feature=result.get("base_feature", params.object_name),
+            direction=result.get("direction", params.direction),
+            direction_edge_index=result.get("direction_edge_index", 1),
+            length=result.get("length", params.length),
+            occurrences=result.get("occurrences", params.occurrences),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),

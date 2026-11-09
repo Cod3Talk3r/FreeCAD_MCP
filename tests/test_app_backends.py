@@ -220,6 +220,12 @@ def test_taiga_preserves_absent_and_empty_payload(payload: object) -> None:
     ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": float("inf")}, "must be a finite number"),
     ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": 0.0}, "size must be positive"),
     ("partdesign_chamfer", {"object_name": "O", "edge_indices": [1], "size": -5.0}, "size must be positive"),
+    ("partdesign_linear_pattern", {"object_name": ""}, "object_name must not be empty"),
+    ("partdesign_linear_pattern", {"object_name": "O", "direction": "INVALID"}, "direction must be one of"),
+    ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": 0.0}, "length must be positive"),
+    ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": -5.0}, "length must be positive"),
+    ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": 10.0, "occurrences": 1}, "greater than or equal to 2"),
+    ("partdesign_linear_pattern", {"object_name": "O", "direction": "X_Axis", "length": 10.0, "occurrences": True}, "boolean values are not accepted"),
 ])
 def test_direct_rejects_invalid_requests_before_execution(operation: str, params: dict, message: str) -> None:
     executor = Mock()

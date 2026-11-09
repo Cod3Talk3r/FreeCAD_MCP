@@ -73,6 +73,7 @@ OP_SKETCH_PAD = "sketch_pad"
 OP_SKETCH_POCKET = "sketch_pocket"
 OP_PARTDESIGN_FILLET = "partdesign_fillet"
 OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
+OP_PARTDESIGN_LINEAR_PATTERN = "partdesign_linear_pattern"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -6139,6 +6140,382 @@ def _op_partdesign_chamfer(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_partdesign_linear_pattern(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::LinearPattern on an existing solid feature.
+
+    The target object must already belong to a PartDesign::Body, or the
+    document must contain exactly one (unambiguous) Body to which it can be
+    assigned.  A new Body is never silently created for a LinearPattern -- a
+    LinearPattern requires an existing solid feature to pattern.
+
+    The LinearPattern's BaseFeature links the target, *Originals* lists the
+    target as the feature to pattern, and *Direction* links a subelement of the
+    target that is parallel to the requested principal axis (X_Axis, Y_Axis,
+    or Z_Axis).  *Length* and *Occurrences* are applied, the document is
+    recomputed, and the resulting shape is validated (non-null valid solid
+    containing at least one solid).  The document is locked, recomputed, saved
+    atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the
+    on-disk document is left unmodified (rollback via the save-on-success
+    pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    direction = params.get("direction") or ""
+    length = params.get("length")
+    occurrences = params.get("occurrences")
+    pattern_name = params.get("linear_pattern_name") or "LinearPattern"
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    # Validate object_name.
+    if not object_name.strip():
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "object_name must not be empty.",
+        }
+
+    # Validate direction: must be one of X_Axis, Y_Axis, Z_Axis.
+    if direction not in ("X_Axis", "Y_Axis", "Z_Axis"):
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "direction must be one of 'X_Axis', 'Y_Axis', or 'Z_Axis'.",
+        }
+
+    # Validate length: finite and positive.
+    try:
+        length_val = float(length)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "length must be a finite number.",
+        }
+    if math.isnan(length_val) or math.isinf(length_val):
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "length must be a finite number.",
+        }
+    if length_val <= 0:
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "length must be a positive number.",
+        }
+
+    # Validate occurrences: integer >= 2 (booleans are not accepted).
+    if isinstance(occurrences, bool) or not isinstance(occurrences, int):
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "occurrences must be an integer (boolean values are not accepted).",
+        }
+    if occurrences < 2:
+        return {
+            "ok": False,
+            "op": "partdesign_linear_pattern",
+            "error": "occurrences must be an integer greater than or equal to 2.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "partdesign_linear_pattern", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "partdesign_linear_pattern", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "partdesign_linear_pattern", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    transaction_open = False
+    doc = None
+
+    def _fail(message: str) -> dict[str, Any]:
+        nonlocal transaction_open
+        if transaction_open:
+            try:
+                doc.abortTransaction()
+                doc.recompute()
+            except Exception as exc:
+                message += f" Rollback failed: {exc}"
+            transaction_open = False
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "partdesign_linear_pattern", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Find the target object and verify it is a solid feature.
+        target = doc.getObject(object_name)
+        if target is None:
+            return _fail(f"object '{object_name}' not found")
+
+        target_shape = getattr(target, "Shape", None)
+        if target_shape is None:
+            return _fail(
+                f"object '{object_name}' has no shape; cannot create a LinearPattern on it."
+            )
+        try:
+            if not bool(target_shape.isValid()):
+                return _fail(
+                    f"object '{object_name}' has an invalid shape; cannot create a LinearPattern on it."
+                )
+        except Exception as exc:
+            return _fail(
+                f"object '{object_name}' shape validation failed: {exc}"
+            )
+        try:
+            target_solids = list(getattr(target_shape, "Solids", []) or [])
+        except Exception:
+            target_solids = []
+        if not target_solids:
+            return _fail(
+                f"object '{object_name}' produces no solid; a LinearPattern requires an existing solid."
+            )
+
+        # Validate edge indices against the target's edge count and find an
+        # edge parallel to the requested principal axis.
+        try:
+            target_edges = list(getattr(target_shape, "Edges", []) or [])
+        except Exception:
+            target_edges = []
+        edge_count = len(target_edges)
+        if edge_count == 0:
+            return _fail(
+                f"object '{object_name}' has no edges; cannot determine a pattern direction."
+            )
+
+        # Map the requested axis to a FreeCAD vector and find a parallel edge.
+        axis_vec = (
+            _FC.Vector(1, 0, 0) if direction == "X_Axis"
+            else _FC.Vector(0, 1, 0) if direction == "Y_Axis"
+            else _FC.Vector(0, 0, 1)
+        )
+        direction_edge_index = None
+        for i, edge in enumerate(target_edges, 1):
+            try:
+                tangent = edge.tangentAt(0.5)
+                tangent.normalize()
+                if abs(tangent.dot(axis_vec)) > 0.99:
+                    direction_edge_index = i
+                    break
+            except Exception:
+                continue
+        if direction_edge_index is None:
+            return _fail(
+                f"object '{object_name}' has no edge parallel to the {direction} direction."
+            )
+
+        # Determine the Body: reuse an existing Body that contains the target,
+        # or use the single unambiguous Body if the target is standalone.
+        # A new Body is never created for a LinearPattern.
+        body = None
+        bodies = []
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    bodies.append(obj)
+                    try:
+                        if target in getattr(obj, "Group", []) or target in getattr(obj, "outList", []):
+                            body = obj
+                    except Exception:
+                        pass
+        except Exception:
+            bodies = []
+
+        doc.openTransaction("Create PartDesign LinearPattern")
+        transaction_open = True
+
+        if body is None:
+            if len(bodies) == 1:
+                body = bodies[0]
+                try:
+                    body.addObject(target)
+                except Exception as exc:
+                    return _fail(
+                        f"FreeCAD could not add object '{object_name}' to Body "
+                        f"'{getattr(body, 'Name', body_name)}': {exc}."
+                    )
+            elif len(bodies) == 0:
+                return _fail(
+                    f"object '{object_name}' is not inside any PartDesign::Body, and no "
+                    f"Body exists in the document.  A LinearPattern requires a Body."
+                )
+            else:
+                return _fail(
+                    f"object '{object_name}' is not inside any PartDesign::Body, and the "
+                    f"document contains {len(bodies)} Bodies.  Cannot determine which Body "
+                    f"to use for the LinearPattern."
+                )
+
+        body_name_used = getattr(body, "Name", body_name)
+
+        # Create the LinearPattern.  Avoid name clashes.
+        counter = 0
+        desired_pattern_name = pattern_name
+        while doc.getObject(desired_pattern_name) is not None:
+            counter += 1
+            desired_pattern_name = f"{pattern_name}_{counter}"
+        try:
+            pattern = doc.addObject("PartDesign::LinearPattern", desired_pattern_name)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::LinearPattern: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # BaseFeature is the target feature to pattern.
+        try:
+            pattern.BaseFeature = target
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the LinearPattern base feature: {exc}."
+            )
+
+        # Originals lists the features to pattern (required for a valid pattern).
+        try:
+            pattern.Originals = [target]
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the LinearPattern originals: {exc}."
+            )
+
+        # Direction is a LinkSub referencing an edge parallel to the requested axis.
+        try:
+            pattern.Direction = (target, [f"Edge{direction_edge_index}"])
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the LinearPattern direction: {exc}."
+            )
+
+        # Apply the length.
+        try:
+            pattern.Length = length_val
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the LinearPattern length: {exc}."
+            )
+
+        # Apply the occurrence count.
+        try:
+            pattern.Occurrences = occurrences
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the LinearPattern occurrences: {exc}."
+            )
+
+        # Add the LinearPattern to the Body (this advances Body.Tip to the pattern).
+        try:
+            body.addObject(pattern)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not add LinearPattern to Body '{body_name_used}': {exc}."
+            )
+
+        # Recompute the document so FreeCAD evaluates the LinearPattern feature tree.
+        doc.recompute()
+
+        # Validate the resulting LinearPattern: it must have a valid, non-null solid shape.
+        shape = getattr(pattern, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"LinearPattern '{desired_pattern_name}' produced no shape.  The requested "
+                f"direction, length, or occurrences may not produce a valid pattern."
+            )
+        try:
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"LinearPattern '{desired_pattern_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"LinearPattern '{desired_pattern_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"LinearPattern '{desired_pattern_name}' produced no solid."
+            )
+
+        doc.commitTransaction()
+        transaction_open = False
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "partdesign_linear_pattern",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "body_name": body_name_used,
+            "linear_pattern_name": desired_pattern_name,
+            "base_feature": object_name,
+            "direction": direction,
+            "direction_edge_index": direction_edge_index,
+            "length": length_val,
+            "occurrences": occurrences,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -6178,6 +6555,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_POCKET: _op_sketch_pocket,
     OP_PARTDESIGN_FILLET: _op_partdesign_fillet,
     OP_PARTDESIGN_CHAMFER: _op_partdesign_chamfer,
+    OP_PARTDESIGN_LINEAR_PATTERN: _op_partdesign_linear_pattern,
 }
 
 

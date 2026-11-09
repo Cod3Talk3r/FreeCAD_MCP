@@ -4128,3 +4128,103 @@ print('CHAMFER_ROLLBACK_OK')
         **params, "object_name": "Pad", "edge_indices": [7], "size": 3.0,
     })
     _assert_chamfer_tree(tmp_path, [7], result["volume"])
+
+
+@pytest.fixture
+def linear_pattern_pad(tmp_path: Path):
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "linearpatternpad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_linear_pattern_tree(workspace: Path, direction: str, volume: float, occurrences: int) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "linearpatternpad.fcstd", target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, pattern = (doc.getObject(name) for name in ('Body', 'Pad', 'LinearPattern'))
+assert all(obj is not None for obj in (body, pad, pattern))
+assert pattern in body.Group and pad in body.Group and body.Tip == pattern
+assert pattern.Length.Value == 60.0
+assert pattern.Occurrences == {occurrences}
+assert not pattern.Shape.isNull() and pattern.Shape.isValid() and len(pattern.Shape.Solids) >= 1
+assert abs(pattern.Shape.Volume - {volume!r}) < 1e-2
+assert pattern.Shape.Volume > pad.Shape.Volume
+print('LINEAR_PATTERN_TREE_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "LINEAR_PATTERN_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+@pytest.mark.parametrize("direction", ["X_Axis", "Y_Axis", "Z_Axis"], ids=["x_axis", "y_axis", "z_axis"])
+def test_real_freecad_linear_pattern_all_axes(tmp_path: Path, linear_pattern_pad, direction: str) -> None:
+    bridge, params = linear_pattern_pad
+    result = bridge.run("partdesign_linear_pattern", {
+        **params, "object_name": "Pad", "direction": direction, "length": 60.0, "occurrences": 3,
+    })
+    assert result["direction"] == direction
+    assert isinstance(result["direction_edge_index"], int) and result["direction_edge_index"] >= 1
+    assert result["body_name"] == "Body" and result["linear_pattern_name"] == "LinearPattern"
+    assert result["length"] == 60.0 and result["occurrences"] == 3
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_linear_pattern_tree(tmp_path, direction, result["volume"], 3)
+
+
+@requires_freecad
+def test_real_freecad_linear_pattern_invalid_and_rollback(tmp_path: Path, linear_pattern_pad) -> None:
+    bridge, params = linear_pattern_pad
+    document = tmp_path / "linearpatternpad.fcstd"
+    before = document.read_bytes()
+    for direction, length, occurrences, message in [
+        ("INVALID_AXIS", 60.0, 3, "direction"),
+        ("X_Axis", 0.0, 3, "positive"),
+        ("X_Axis", -10.0, 3, "positive"),
+        ("X_Axis", 60.0, 1, "greater than or equal to 2"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("partdesign_linear_pattern", {
+                **params, "object_name": "Pad", "direction": direction,
+                "length": length, "occurrences": occurrences,
+            })
+        assert message in str(excinfo.value).lower()
+        assert document.read_bytes() == before
+
+    objects = bridge.run("list_objects", params)["objects"]
+    assert "LinearPattern" not in [obj["name"] for obj in objects]
+    pad = bridge.run("inspect_object", {**params, "object_name": "Pad"})["info"]
+    assert pad["shape_valid"] is True and pad["volume"] == pytest.approx(24000.0)
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad = (doc.getObject(name) for name in ('Body', 'Pad'))
+assert body.Tip == pad and pad in body.Group and doc.getObject('LinearPattern') is None
+assert not pad.Shape.isNull() and pad.Shape.isValid() and len(pad.Shape.Solids) == 1
+assert abs(pad.Shape.Volume - 24000.0) < 1e-5
+print('LINEAR_PATTERN_ROLLBACK_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "LINEAR_PATTERN_ROLLBACK_OK" in process.stdout, process.stdout + process.stderr
+    # A successful operation after the failed recompute also checks lock release.
+    result = bridge.run("partdesign_linear_pattern", {
+        **params, "object_name": "Pad", "direction": "X_Axis", "length": 60.0, "occurrences": 3,
+    })
+    _assert_linear_pattern_tree(tmp_path, "X_Axis", result["volume"], 3)

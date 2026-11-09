@@ -780,6 +780,39 @@ class MCPGuiPanel:
         chamfer_layout.addWidget(self._chamfer_button, 5, 0, 1, 2)
         layout.addWidget(chamfer_group)
 
+        # ---- PartDesign Linear Pattern -------------------------------------------
+        pattern_group = QtWidgets.QGroupBox("PartDesign Linear Pattern")
+        pattern_layout = QtWidgets.QGridLayout(pattern_group)
+        self._pattern_object_input = QtWidgets.QLineEdit("Pad")
+        pattern_layout.addWidget(QtWidgets.QLabel("Target feature:"), 0, 0)
+        pattern_layout.addWidget(self._pattern_object_input, 0, 1)
+        self._pattern_direction_input = QtWidgets.QComboBox()
+        self._pattern_direction_input.addItems(["X_Axis", "Y_Axis", "Z_Axis"])
+        self._pattern_direction_input.setCurrentIndex(0)
+        pattern_layout.addWidget(QtWidgets.QLabel("Direction:"), 1, 0)
+        pattern_layout.addWidget(self._pattern_direction_input, 1, 1)
+        self._pattern_length_input = QtWidgets.QDoubleSpinBox()
+        self._pattern_length_input.setRange(0.001, 100000.0)
+        self._pattern_length_input.setValue(60.0)
+        self._pattern_length_input.setDecimals(3)
+        pattern_layout.addWidget(QtWidgets.QLabel("Length (mm):"), 2, 0)
+        pattern_layout.addWidget(self._pattern_length_input, 2, 1)
+        self._pattern_occurrences_input = QtWidgets.QSpinBox()
+        self._pattern_occurrences_input.setRange(2, 1000)
+        self._pattern_occurrences_input.setValue(3)
+        pattern_layout.addWidget(QtWidgets.QLabel("Occurrences:"), 3, 0)
+        pattern_layout.addWidget(self._pattern_occurrences_input, 3, 1)
+        self._pattern_name_input = QtWidgets.QLineEdit("LinearPattern")
+        pattern_layout.addWidget(QtWidgets.QLabel("Pattern name:"), 4, 0)
+        pattern_layout.addWidget(self._pattern_name_input, 4, 1)
+        self._pattern_body_name_input = QtWidgets.QLineEdit("Body")
+        pattern_layout.addWidget(QtWidgets.QLabel("Body name:"), 5, 0)
+        pattern_layout.addWidget(self._pattern_body_name_input, 5, 1)
+        self._pattern_button = QtWidgets.QPushButton("Create Linear Pattern")
+        self._pattern_button.clicked.connect(self._on_partdesign_linear_pattern)
+        pattern_layout.addWidget(self._pattern_button, 6, 0, 1, 2)
+        layout.addWidget(pattern_group)
+
         # ---- Boolean Cut ------------------------------------------------
         cut_group = QtWidgets.QGroupBox("Boolean Cut")
         cut_layout = QtWidgets.QGridLayout(cut_group)
@@ -2053,6 +2086,54 @@ class MCPGuiPanel:
         self._set_status(
             f"Created Chamfer '{result.get('chamfer_name', chamfer_name)}' on feature "
             f"'{object_name}' edges {edge_indices} size {size}mm in Body "
+            f"'{result.get('body_name', body_name)}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # PartDesign Linear Pattern
+    # ------------------------------------------------------------------
+    def _on_partdesign_linear_pattern(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._pattern_object_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Target feature name must not be empty.", error=True)
+            return
+
+        direction = self._pattern_direction_input.currentText()
+        length = self._pattern_length_input.value()
+        occurrences = self._pattern_occurrences_input.value()
+
+        pattern_name = self._pattern_name_input.text().strip() or "LinearPattern"
+        body_name = self._pattern_body_name_input.text().strip() or "Body"
+
+        response = self._run_operation(
+            "partdesign_linear_pattern",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+                "direction": direction,
+                "length": length,
+                "occurrences": occurrences,
+                "linear_pattern_name": pattern_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Linear Pattern '{result.get('linear_pattern_name', pattern_name)}' on feature "
+            f"'{object_name}' direction {direction} edge {result.get('direction_edge_index', '?')} "
+            f"length {length}mm occurrences {occurrences} in Body "
             f"'{result.get('body_name', body_name)}' "
             f"in workspace document '{document_id}'.",
             error=False,

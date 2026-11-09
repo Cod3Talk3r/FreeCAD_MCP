@@ -285,6 +285,38 @@ class _FakeBoundBox:
         self.ZMax = zmax
 
 
+class _FakeVector:
+    """Minimal stand-in for a FreeCAD Vector."""
+
+    def __init__(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def normalize(self) -> None:
+        pass  # Already unit vectors in tests
+
+    def dot(self, other: "_FakeVector") -> float:
+        return self.x * other.x + self.y * other.y + self.z * other.z
+
+
+class _FakeEdge:
+    """Minimal stand-in for a FreeCAD edge with tangent support.
+
+    Box edges: 1,3,9,11 along X; 2,4,10,12 along Y; 5,6,7,8 along Z.
+    """
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+    def tangentAt(self, parameter: float) -> _FakeVector:
+        if self.index in (1, 3, 9, 11):
+            return _FakeVector(1.0, 0.0, 0.0)
+        if self.index in (2, 4, 10, 12):
+            return _FakeVector(0.0, 1.0, 0.0)
+        return _FakeVector(0.0, 0.0, 1.0)
+
+
 class _FakeShape:
     """Minimal stand-in for a FreeCAD shape with a valid solid."""
 
@@ -292,7 +324,7 @@ class _FakeShape:
         self.Volume = volume
         self._volume = volume
         self.Solids = [SimpleNamespace(Volume=volume)]
-        self.Edges = [object() for _ in range(12)]
+        self.Edges = [_FakeEdge(i) for i in range(1, 13)]
         self.BoundBox = _FakeBoundBox()
 
     def isValid(self) -> bool:
@@ -365,6 +397,21 @@ class _FakeChamfer:
         self.Shape: object = _FakeShape()
 
 
+class _FakeLinearPattern:
+    """Minimal stand-in for a PartDesign::LinearPattern."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::LinearPattern"
+        self.BaseFeature: object = None
+        self.Direction: object = None
+        self.Originals: list = []
+        self.Length: float = 0.0
+        self.Occurrences: int = 2
+        self.Shape: object = _FakeShape()
+
+
 class _FakeDoc:
     def __init__(self) -> None:
         self.objects: dict[str, object] = {}
@@ -398,6 +445,8 @@ class _FakeDoc:
             obj: object = _FakeFillet(name)
         elif type_id == "PartDesign::Chamfer":
             obj: object = _FakeChamfer(name)
+        elif type_id == "PartDesign::LinearPattern":
+            obj: object = _FakeLinearPattern(name)
         else:
             obj = SimpleNamespace(TypeId=type_id, Length=0.0, Width=0.0, Height=0.0)
         self.objects[name] = obj
@@ -614,6 +663,7 @@ def _install_fake_freecad(
     part.Circle = _FakePart.Circle
     part.Ellipse = _FakePart.Ellipse
     part.Compound = lambda shapes: types.SimpleNamespace(Edges=list(shapes))
+    part.Vector = _FakeVector
     monkeypatch.setitem(sys.modules, "Part", part)
     sketcher = types.ModuleType("Sketcher")
     monkeypatch.setitem(sys.modules, "Sketcher", sketcher)
@@ -7840,3 +7890,322 @@ def test_handle_request_dispatches_partdesign_chamfer(
     assert chamfer.Base == (box, ["Edge7"])
     assert chamfer.Size == 3.0
     assert chamfer.UseAllEdges is False
+
+
+def test_partdesign_linear_pattern_successful_x_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LinearPattern along X_Axis on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "X_Axis",
+            "length": 60.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "partdesign_linear_pattern"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["linear_pattern_name"] == "LinearPattern"
+    assert result["result"]["base_feature"] == "Box1"
+    assert result["result"]["direction"] == "X_Axis"
+    assert result["result"]["direction_edge_index"] == 1
+    assert result["result"]["length"] == 60.0
+    assert result["result"]["occurrences"] == 3
+    assert result["result"]["solids_count"] == 1
+
+    pattern = doc.objects["LinearPattern"]
+    assert pattern.BaseFeature == box
+    assert pattern.Direction == (box, ["Edge1"])
+    assert pattern.Originals == [box]
+    assert pattern.Length == 60.0
+    assert pattern.Occurrences == 3
+    assert pattern.Shape is not None
+    assert pattern.Shape.isValid() is True
+
+
+def test_partdesign_linear_pattern_successful_y_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LinearPattern along Y_Axis on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "Y_Axis",
+            "length": 60.0,
+            "occurrences": 3,
+            "linear_pattern_name": "YPattern",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["linear_pattern_name"] == "YPattern"
+    assert result["result"]["direction"] == "Y_Axis"
+    assert result["result"]["direction_edge_index"] == 2
+
+    pattern = doc.objects["YPattern"]
+    assert pattern.Direction == (box, ["Edge2"])
+
+
+def test_partdesign_linear_pattern_successful_z_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LinearPattern along Z_Axis on a box inside a Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "Z_Axis",
+            "length": 60.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["direction"] == "Z_Axis"
+    assert result["result"]["direction_edge_index"] == 5
+
+    pattern = doc.objects["LinearPattern"]
+    assert pattern.Direction == (box, ["Edge5"])
+
+
+def test_partdesign_linear_pattern_invalid_direction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "INVALID_AXIS",
+            "length": 60.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "direction" in result["error"].lower()
+
+
+def test_partdesign_linear_pattern_invalid_length_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "X_Axis",
+            "length": 0.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_linear_pattern_invalid_length_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "X_Axis",
+            "length": -10.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "positive" in result["error"].lower()
+
+
+def test_partdesign_linear_pattern_invalid_occurrences_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "X_Axis",
+            "length": 60.0,
+            "occurrences": 1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "greater than or equal to 2" in result["error"].lower()
+
+
+def test_partdesign_linear_pattern_invalid_occurrences_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    _make_box_solid(doc, volume=8000.0)
+    doc.addObject("PartDesign::Body", "Body")
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "X_Axis",
+            "length": 60.0,
+            "occurrences": True,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "boolean" in result["error"].lower()
+
+
+def test_partdesign_linear_pattern_missing_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "NoSuchObject",
+            "direction": "X_Axis",
+            "length": 60.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "not found" in result["error"].lower()
+
+
+def test_partdesign_linear_pattern_no_body_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=8000.0)
+
+    result = runner._op_partdesign_linear_pattern(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "direction": "X_Axis",
+            "length": 60.0,
+            "occurrences": 3,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "partdesign_linear_pattern"
+    assert "body" in result["error"].lower()
+
+
+def test_handle_request_dispatches_partdesign_linear_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=8000.0)
+    body = _make_body_with(doc, box)
+
+    response = runner.handle_request(
+        {
+            "op": "partdesign_linear_pattern",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "object_name": "Box1",
+                "direction": "Z_Axis",
+                "length": 40.0,
+                "occurrences": 4,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "partdesign_linear_pattern"
+    assert response["result"]["object_name"] == "Box1"
+    assert response["result"]["direction"] == "Z_Axis"
+    assert response["result"]["length"] == 40.0
+    assert response["result"]["occurrences"] == 4
+    assert response["result"]["body_name"] == "Body"
+    assert response["result"]["solids_count"] == 1
+
+    pattern = doc.objects["LinearPattern"]
+    assert pattern.BaseFeature == box
+    assert pattern.Direction == (box, ["Edge5"])
+    assert pattern.Length == 40.0
+    assert pattern.Occurrences == 4

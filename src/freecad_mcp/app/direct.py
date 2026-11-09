@@ -367,6 +367,25 @@ def validate_direct_request(op: str, params: Any) -> None:
             raise ValueError("size must be a finite number.")
         if size_val <= 0:
             raise ValueError("size must be positive")
+    elif op == "partdesign_linear_pattern":
+        if not params.get("object_name", "").strip():
+            raise ValueError("object_name must not be empty.")
+        direction = params.get("direction")
+        if direction not in ("X_Axis", "Y_Axis", "Z_Axis"):
+            raise ValueError("direction must be one of 'X_Axis', 'Y_Axis', or 'Z_Axis'.")
+        try:
+            length_val = float(params.get("length"))
+        except (TypeError, ValueError):
+            raise ValueError("length must be a finite number.")
+        if not math.isfinite(length_val):
+            raise ValueError("length must be a finite number.")
+        if length_val <= 0:
+            raise ValueError("length must be positive")
+        occurrences = params.get("occurrences")
+        if isinstance(occurrences, bool) or not isinstance(occurrences, int):
+            raise ValueError("occurrences must be an integer (boolean values are not accepted).")
+        if occurrences < 2:
+            raise ValueError("occurrences must be an integer greater than or equal to 2.")
 
 
 class DirectBackend:
