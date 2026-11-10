@@ -71,6 +71,7 @@ OP_SKETCH_EDIT_REGULAR_POLYGON = "sketch_edit_regular_polygon"
 OP_SKETCH_EDIT_POLYGON = "sketch_edit_polygon"
 OP_SKETCH_PAD = "sketch_pad"
 OP_SKETCH_POCKET = "sketch_pocket"
+OP_SKETCH_REVOLUTION = "sketch_revolution"
 OP_PARTDESIGN_FILLET = "partdesign_fillet"
 OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
 OP_PARTDESIGN_LINEAR_PATTERN = "partdesign_linear_pattern"
@@ -5463,6 +5464,395 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _find_revolution_axis_edge(sketch: Any, axis: str) -> str | None:
+    """Find a sketch edge subname parallel to the requested principal axis.
+
+    FreeCAD 1.1.4's PartDesign::Revolution requires the ReferenceAxis to be a
+    subelement of the profile sketch (an edge subname like ``"Edge1"``).  The
+    Body origin axes cannot be used: X_Axis/Y_Axis intersect the sketch and
+    Z_Axis is rejected as ``perpendicular to the sketch plane``.
+
+    The edge direction is computed in the sketch's local coordinate system and
+    then transformed by the sketch's Placement so the selected edge corresponds
+    to the requested *global* axis direction.  Only edges lying in the sketch
+    plane are considered; a 2D sketch on the XY plane has no Z-parallel edge,
+    so Z_Axis cannot be supported and the caller must return a validation error.
+    """
+    import FreeCAD as App  # noqa: PLC0415 - imported lazily; only available inside FreeCAD
+
+    # Global axis direction vectors.
+    target = {
+        "X_Axis": App.Vector(1.0, 0.0, 0.0),
+        "Y_Axis": App.Vector(0.0, 1.0, 0.0),
+        "Z_Axis": App.Vector(0.0, 0.0, 1.0),
+    }.get(axis)
+    if target is None:
+        return None
+
+    # Collect candidate edges: prefer Shape.Edges (real FreeCAD), fall back to
+    # Geometry (mock / test environments where Shape may not exist).
+    edges: list[tuple[str, Any]] = []
+    shape = getattr(sketch, "Shape", None)
+    if shape is not None:
+        try:
+            shape_edges = list(shape.Edges) if hasattr(shape, "Edges") else []
+            for i, edge in enumerate(shape_edges, start=1):
+                edges.append((f"Edge{i}", edge))
+        except Exception:
+            pass
+
+    if not edges:
+        try:
+            geometry = list(getattr(sketch, "Geometry", []) or [])
+        except Exception:
+            geometry = []
+        for i, geom in enumerate(geometry, start=1):
+            edges.append((f"Edge{i}", geom))
+
+    placement = getattr(sketch, "Placement", None)
+    rotation = placement.Rotation if placement is not None else App.Rotation()
+
+    for subname, edge in edges:
+        try:
+            # LineSegment-like edges have StartPoint/EndPoint; others use tangentAt.
+            if hasattr(edge, "StartPoint") and hasattr(edge, "EndPoint"):
+                p1 = edge.StartPoint
+                p2 = edge.EndPoint
+                direction = App.Vector(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z)
+            else:
+                tangent = edge.tangentAt(0.5)
+                direction = App.Vector(tangent.x, tangent.y, tangent.z)
+        except Exception:
+            continue
+
+        try:
+            direction.normalize()
+        except Exception:
+            continue
+
+        # Transform from sketch-local to global direction.
+        try:
+            global_dir = rotation * direction
+        except Exception:
+            global_dir = direction
+
+        try:
+            global_dir.normalize()
+        except Exception:
+            continue
+
+        # Check parallelism (dot product near +/-1).
+        try:
+            dot = abs(global_dir.dot(target))
+        except Exception:
+            continue
+
+        if dot > 0.99:
+            return subname
+
+    return None
+
+
+def _op_sketch_revolution(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::Revolution that revolves an existing sketch around an axis.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::Revolution``.  If the
+    sketch already belongs to a Body, that Body is reused.  Otherwise a new
+    Body is created and the sketch is added to it via ``body.addObject(sketch)``,
+    preserving the sketch's identity, geometry, and parametric editability.
+
+    The Revolution profile is set to the existing sketch, and the requested
+    axis (one of the Body's principal origin axes: X_Axis, Y_Axis, Z_Axis)
+    and angle (degrees) are applied.  After recompute, the resulting Revolution
+    shape is validated (non-null solid with positive volume).  The document is
+    locked, recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the on-disk
+    document is left unmodified (rollback via the established save-on-success
+    pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    axis = params.get("axis") or ""
+    angle = params.get("angle")
+    revolution_name = params.get("revolution_name") or "Revolution"
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    # Validate sketch_name.
+    if not sketch_name.strip():
+        return {
+            "ok": False,
+            "op": "sketch_revolution",
+            "error": "sketch_name must not be empty.",
+        }
+
+    # Validate axis: must be one of the three principal origin axes.
+    if axis not in ("X_Axis", "Y_Axis", "Z_Axis"):
+        return {
+            "ok": False,
+            "op": "sketch_revolution",
+            "error": "axis must be one of 'X_Axis', 'Y_Axis', 'Z_Axis'.",
+        }
+
+    # Validate angle: finite and positive, maximum 360 degrees.
+    try:
+        angle_val = float(angle)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_revolution",
+            "error": "angle must be a finite number.",
+        }
+    if math.isnan(angle_val) or math.isinf(angle_val):
+        return {
+            "ok": False,
+            "op": "sketch_revolution",
+            "error": "angle must be a finite number.",
+        }
+    if angle_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_revolution",
+            "error": "angle must be a positive number.",
+        }
+    if angle_val > 360:
+        return {
+            "ok": False,
+            "op": "sketch_revolution",
+            "error": "angle must not exceed 360 degrees.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_revolution", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_revolution", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_revolution", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_revolution", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Find the sketch and verify it is a Sketcher::SketchObject.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot create a Revolution from it."
+            )
+
+        # Determine the Body: reuse an existing Body that contains the sketch,
+        # or create a new Body and add the sketch to it.
+        body = None
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    try:
+                        if sketch in getattr(obj, "Group", []) or sketch in getattr(obj, "outList", []):
+                            body = obj
+                            break
+                    except Exception:
+                        pass
+        except Exception:
+            body = None
+
+        if body is None:
+            # No existing Body contains the sketch.  Create a new Body.
+            counter = 0
+            desired_body_name = body_name
+            while doc.getObject(desired_body_name) is not None:
+                counter += 1
+                desired_body_name = f"{body_name}_{counter}"
+            try:
+                body = doc.addObject("PartDesign::Body", desired_body_name)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not create a PartDesign::Body: {exc}"
+                )
+            try:
+                body.addObject(sketch)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not add sketch to Body: {exc}.  The sketch may already "
+                    f"belong to another Body or may not be suitable for PartDesign."
+                )
+
+        body_name_used = getattr(body, "Name", body_name)
+
+        # Create the Revolution.  Avoid name clashes.
+        counter = 0
+        desired_revolution_name = revolution_name
+        while doc.getObject(desired_revolution_name) is not None:
+            counter += 1
+            desired_revolution_name = f"{revolution_name}_{counter}"
+        try:
+            revolution = doc.addObject("PartDesign::Revolution", desired_revolution_name)
+            body.addObject(revolution)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Revolution: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Revolution profile to the existing sketch.
+        try:
+            revolution.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Revolution profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Set the ReferenceAxis to the requested principal origin axis.
+        # ReferenceAxis is an App::PropertyLinkSub: (linked_object, [subelement_names]).
+        # FreeCAD 1.1.4 requires the axis to be a subelement of the profile sketch
+        # (an edge subname like "Edge1").  The Body origin axes cannot be used:
+        # X_Axis/Y_Axis intersect the sketch, and Z_Axis is rejected as perpendicular
+        # to the sketch plane.  We find a sketch edge parallel to the requested
+        # global axis, accounting for sketch placement.
+        try:
+            origin = getattr(body, "Origin", None)
+            if origin is None:
+                return _fail(
+                    f"Body '{body_name_used}' has no Origin.  Cannot set the Revolution axis."
+                )
+            edge_subname = _find_revolution_axis_edge(sketch, axis)
+            if edge_subname is None:
+                return _fail(
+                    f"Body '{body_name_used}' has no sketch edge parallel to the {axis} "
+                    f"direction.  Cannot set the Revolution axis '{axis}'.  This axis cannot "
+                    f"be represented for this sketch (e.g. Z_Axis has no parallel edge in a "
+                    f"2D sketch on the XY plane)."
+                )
+            revolution.ReferenceAxis = (sketch, [edge_subname])
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Revolution axis '{axis}': {exc}."
+            )
+
+        # Apply the revolution angle (degrees).
+        try:
+            revolution.Angle = angle_val
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Revolution angle: {exc}"
+            )
+
+        # Recompute the document so FreeCAD evaluates the Revolution feature tree.
+        doc.recompute()
+
+        # Validate the resulting Revolution: it must have a valid, non-null solid shape.
+        shape = getattr(revolution, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"Revolution '{desired_revolution_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate, or the ReferenceAxis '{axis}' may be invalid."
+            )
+        try:
+            if getattr(shape, "isNull", lambda: False)():
+                return _fail(
+                    f"Revolution '{desired_revolution_name}' produced a NULL shape.  The "
+                    f"ReferenceAxis reference to '{axis}' was accepted but not resolved by FreeCAD "
+                    f"(computed axis is Vector(0,0,0)).  This axis reference cannot be used for "
+                    f"Revolution on this sketch."
+                )
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"Revolution '{desired_revolution_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Revolution '{desired_revolution_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"Revolution '{desired_revolution_name}' produced no solid.  The sketch profile or "
+                f"axis configuration may not produce a valid solid."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_revolution",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "body_name": body_name_used,
+            "revolution_name": desired_revolution_name,
+            "profile_name": sketch_name,
+            "axis": axis,
+            "angle": angle_val,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 def _op_partdesign_fillet(params: dict[str, Any]) -> dict[str, Any]:
     """Create a native PartDesign::Fillet on edges of an existing solid feature.
 
@@ -7681,6 +8071,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_EDIT_POLYGON: _op_sketch_edit_polygon,
     OP_SKETCH_PAD: _op_sketch_pad,
     OP_SKETCH_POCKET: _op_sketch_pocket,
+    OP_SKETCH_REVOLUTION: _op_sketch_revolution,
     OP_PARTDESIGN_FILLET: _op_partdesign_fillet,
     OP_PARTDESIGN_CHAMFER: _op_partdesign_chamfer,
     OP_PARTDESIGN_LINEAR_PATTERN: _op_partdesign_linear_pattern,

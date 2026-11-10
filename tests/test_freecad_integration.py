@@ -4637,3 +4637,262 @@ print('THICKNESS_REOPEN_OK')
         [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
     )
     assert process.returncode == 0 and "THICKNESS_REOPEN_OK" in process.stdout, process.stdout + process.stderr
+
+
+@pytest.fixture
+def revolution_pad(tmp_path: Path):
+    """Fixture: document with a sketch + Pad, ready for Revolution tests."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "revolutionpad", "workspace": workspace}
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 40.0, "height": 30.0,
+    })
+    pad = bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 20.0})
+    assert pad["volume"] == pytest.approx(24000.0)
+    return bridge, params
+
+
+def _assert_revolution_tree(
+    workspace: Path, volume: float, axis: str, angle: float, revolution_name: str = "Revolution"
+) -> None:
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(workspace / "revolutionpad.fcstd", target)
+    # Expected global direction for each principal axis (sketch on XY plane, identity placement).
+    expected = {"X_Axis": (1.0, 0.0, 0.0), "Y_Axis": (0.0, 1.0, 0.0), "Z_Axis": (0.0, 0.0, 1.0)}[axis]
+    ex, ey, ez = expected
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, sketch, rev = (doc.getObject(name) for name in ('Body', 'Pad', 'Sketch1', {revolution_name!r}))
+assert all(obj is not None for obj in (body, pad, sketch, rev)), (body, pad, sketch, rev)
+assert rev in body.Group and pad in body.Group and sketch in body.Group
+print('PROFILE CHECK', rev.Profile, getattr(rev.Profile, 'Name', None), rev.PropertiesList)
+assert rev.Angle == {angle!r}
+assert not rev.Shape.isNull() and rev.Shape.isValid() and len(rev.Shape.Solids) >= 1
+assert abs(rev.Shape.Volume - {volume!r}) < 1e-2
+assert rev.Shape.Volume > 0
+# Verify the computed revolution axis matches the requested global direction.
+axis_vec = rev.Axis
+assert axis_vec is not None
+mag = (axis_vec.x**2 + axis_vec.y**2 + axis_vec.z**2) ** 0.5
+assert mag > 1e-9, f"Revolution axis has zero magnitude for {axis!r}"
+nx, ny, nz = axis_vec.x / mag, axis_vec.y / mag, axis_vec.z / mag
+dot = nx * {ex!r} + ny * {ey!r} + nz * {ez!r}
+assert abs(dot) > 0.99, f"Revolution axis {{axis_vec}} is not parallel to {axis} direction ({ex!r}, {ey!r}, {ez!r})"
+print('REVOLUTION_TREE_OK {axis}')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and f"REVOLUTION_TREE_OK {axis}" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_revolution_z_axis_rejected(tmp_path: Path, revolution_pad) -> None:
+    """Z_Axis revolution is rejected on an XY-plane sketch (axis perpendicular to sketch plane)."""
+    bridge, params = revolution_pad
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_revolution", {
+            **params, "sketch_name": "Sketch1", "axis": "Z_Axis", "angle": 360.0,
+        })
+    assert "axis" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_revolution_default_x_axis(tmp_path: Path, revolution_pad) -> None:
+    """Full 360-degree Revolution around X_Axis from a closed sketch profile."""
+    bridge, params = revolution_pad
+    result = bridge.run("sketch_revolution", {
+        **params, "sketch_name": "Sketch1", "axis": "X_Axis", "angle": 360.0,
+    })
+    assert result["axis"] == "X_Axis"
+    assert result["angle"] == 360.0
+    assert result["body_name"] == "Body" and result["revolution_name"] == "Revolution"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_revolution_tree(tmp_path, result["volume"], "X_Axis", 360.0, "Revolution")
+
+
+@requires_freecad
+def test_real_freecad_revolution_x_axis(tmp_path: Path, revolution_pad) -> None:
+    """Revolution around X_Axis produces a valid solid."""
+    bridge, params = revolution_pad
+    result = bridge.run("sketch_revolution", {
+        **params, "sketch_name": "Sketch1", "axis": "X_Axis", "angle": 360.0,
+        "revolution_name": "RevX",
+    })
+    assert result["axis"] == "X_Axis"
+    assert result["revolution_name"] == "RevX"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_revolution_tree(tmp_path, result["volume"], "X_Axis", 360.0, "RevX")
+
+
+@requires_freecad
+def test_real_freecad_revolution_y_axis(tmp_path: Path, revolution_pad) -> None:
+    """Revolution around Y_Axis produces a valid solid."""
+    bridge, params = revolution_pad
+    result = bridge.run("sketch_revolution", {
+        **params, "sketch_name": "Sketch1", "axis": "Y_Axis", "angle": 360.0,
+        "revolution_name": "RevY",
+    })
+    assert result["axis"] == "Y_Axis"
+    assert result["revolution_name"] == "RevY"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_revolution_tree(tmp_path, result["volume"], "Y_Axis", 360.0, "RevY")
+
+
+@requires_freecad
+def test_real_freecad_revolution_partial_angle(tmp_path: Path, revolution_pad) -> None:
+    """Partial revolution (180 degrees) produces a valid solid."""
+    bridge, params = revolution_pad
+    result = bridge.run("sketch_revolution", {
+        **params, "sketch_name": "Sketch1", "axis": "X_Axis", "angle": 180.0,
+        "revolution_name": "RevHalf",
+    })
+    assert result["angle"] == 180.0
+    assert result["revolution_name"] == "RevHalf"
+    assert result["solids_count"] >= 1 and result["volume"] > 0
+    _assert_revolution_tree(tmp_path, result["volume"], "X_Axis", 180.0, "RevHalf")
+
+
+@requires_freecad
+def test_real_freecad_revolution_invalid_axis(tmp_path: Path, revolution_pad) -> None:
+    """Revolution rejects invalid axis values."""
+    bridge, params = revolution_pad
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_revolution", {
+            **params, "sketch_name": "Sketch1", "axis": "InvalidAxis", "angle": 360.0,
+        })
+    assert "axis" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_revolution_invalid_angle(tmp_path: Path, revolution_pad) -> None:
+    """Revolution rejects invalid angle values."""
+    bridge, params = revolution_pad
+    for angle, message in [
+        (0, "positive"),
+        (-90, "positive"),
+        (400, "360"),
+        ("not-a-number", "finite"),
+    ]:
+        with pytest.raises(FreeCadOperationError) as excinfo:
+            bridge.run("sketch_revolution", {
+                **params, "sketch_name": "Sketch1", "axis": "X_Axis", "angle": angle,
+            })
+        assert message in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_revolution_missing_sketch(tmp_path: Path, revolution_pad) -> None:
+    """Revolution rejects a missing sketch."""
+    bridge, params = revolution_pad
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_revolution", {
+            **params, "sketch_name": "Nonexistent", "axis": "X_Axis", "angle": 360.0,
+        })
+    assert "not found" in str(excinfo.value).lower()
+
+
+@requires_freecad
+def test_real_freecad_revolution_save_reopen(tmp_path: Path, revolution_pad) -> None:
+    """Revolution persists after save/reopen and remains editable."""
+    bridge, params = revolution_pad
+    result = bridge.run("sketch_revolution", {
+        **params, "sketch_name": "Sketch1", "axis": "X_Axis", "angle": 360.0,
+    })
+    document = tmp_path / "revolutionpad.fcstd"
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, sketch, rev = (doc.getObject(name) for name in ('Body', 'Pad', 'Sketch1', 'Revolution'))
+print('OBJECTS', {{'Body': body is not None, 'Pad': pad is not None, 'Sketch1': sketch is not None, 'Revolution': rev is not None}})
+assert all(obj is not None for obj in (body, pad, sketch, rev))
+print('BODY_GROUP', [obj.Name for obj in body.Group], 'TIP', getattr(body.Tip, 'Name', None))
+assert rev in body.Group, ('membership', [obj.Name for obj in body.Group], 'tip', getattr(body.Tip, 'Name', None))
+print('PROFILE', getattr(rev.Profile, 'Name', None), 'EXPECTED', sketch.Name)
+print('PROFILE CHECK', rev.Profile, getattr(rev.Profile, 'Name', None), rev.PropertiesList)
+print('ANGLE', rev.Angle)
+assert rev.Angle == 360.0, ('angle', rev.Angle)
+print('SHAPE', rev.Shape.isNull(), rev.Shape.isValid(), len(rev.Shape.Solids), 'VOLUME', rev.Shape.Volume)
+assert not rev.Shape.isNull() and rev.Shape.isValid(), ('shape', rev.Shape.isNull(), rev.Shape.isValid())
+assert len(rev.Shape.Solids) >= 1, ('solids', len(rev.Shape.Solids))
+print('REFERENCE_AXIS', rev.ReferenceAxis, 'COMPUTED_AXIS', rev.Axis)
+print('REVOLUTION_REOPEN_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "REVOLUTION_REOPEN_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_revolution_parametric_edit(tmp_path: Path, revolution_pad) -> None:
+    """Revolution remains parametric after save/reopen: editing the angle updates the solid."""
+    bridge, params = revolution_pad
+    result = bridge.run("sketch_revolution", {
+        **params, "sketch_name": "Sketch1", "axis": "X_Axis", "angle": 360.0,
+    })
+    document = tmp_path / "revolutionpad.fcstd"
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(document, target)
+
+    # Reopen and verify the Revolution is still linked and editable.
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+body, pad, sketch, rev = (doc.getObject(name) for name in ('Body', 'Pad', 'Sketch1', 'Revolution'))
+def report(label):
+    print(label, 'OBJECTS', {{'Body': body is not None, 'Pad': pad is not None, 'Sketch1': sketch is not None, 'Revolution': rev is not None}})
+    print(label, 'GROUP', [obj.Name for obj in body.Group], 'TIP', getattr(body.Tip, 'Name', None))
+    print(label, 'PROFILE', getattr(rev.Profile, 'Name', None), 'ANGLE', rev.Angle)
+    print(label, 'SHAPE', rev.Shape.isNull(), rev.Shape.isValid(), len(rev.Shape.Solids), 'VOLUME', rev.Shape.Volume)
+    print(label, 'REFERENCE_AXIS', rev.ReferenceAxis, 'COMPUTED_AXIS', rev.Axis)
+report('BEFORE_EDIT')
+assert rev in body.Group, ('membership', [obj.Name for obj in body.Group], 'tip', getattr(body.Tip, 'Name', None))
+print('PROFILE LINK CHECK', rev.Profile, getattr(rev.Profile, 'Name', None), rev.PropertiesList)
+assert rev.Angle == 360.0, ('initial angle', rev.Angle)
+assert not rev.Shape.isNull() and rev.Shape.isValid(), ('initial shape', rev.Shape.isNull(), rev.Shape.isValid())
+assert len(rev.Shape.Solids) >= 1, ('initial solids', len(rev.Shape.Solids))
+original_volume = rev.Shape.Volume
+# Edit the angle: a partial revolution should still produce a valid solid.
+rev.Angle = 180.0
+doc.recompute()
+report('AFTER_EDIT')
+assert not rev.Shape.isNull() and rev.Shape.isValid(), ('edited shape', rev.Shape.isNull(), rev.Shape.isValid())
+assert len(rev.Shape.Solids) >= 1, ('edited solids', len(rev.Shape.Solids))
+assert rev.Shape.Volume > 0, ('edited volume', rev.Shape.Volume)
+assert abs(rev.Shape.Volume - original_volume) > 1.0, ('volume unchanged', original_volume, rev.Shape.Volume)
+doc.saveAs({path!r})
+print('REVOLUTION_PARAMETRIC_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "REVOLUTION_PARAMETRIC_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_revolution_invalid_axis_rollback(tmp_path: Path, revolution_pad) -> None:
+    """Rejection of an invalid axis leaves the on-disk document unchanged (rollback)."""
+    bridge, params = revolution_pad
+    before = bridge.run("list_objects", {"document_id": "revolutionpad", "workspace": params["workspace"]})
+    before_names = [obj["name"] for obj in before["objects"]]
+
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_revolution", {
+            **params, "sketch_name": "Sketch1", "axis": "InvalidAxis", "angle": 360.0,
+        })
+    assert "axis" in str(excinfo.value).lower()
+
+    after = bridge.run("list_objects", {"document_id": "revolutionpad", "workspace": params["workspace"]})
+    after_names = [obj["name"] for obj in after["objects"]]
+    assert after_names == before_names

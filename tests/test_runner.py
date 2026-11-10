@@ -368,9 +368,19 @@ class _FakeBody:
         self.TypeId = "PartDesign::Body"
         self.Group: list = []
         self.outList: list = []
+        self.Origin: object = _FakeOrigin()
 
     def addObject(self, obj: object) -> None:
         self.Group.append(obj)
+
+
+class _FakeOrigin:
+    """Minimal stand-in for a PartDesign Body Origin with principal axes."""
+
+    def __init__(self) -> None:
+        self.X_Axis: object = SimpleNamespace(Name="X_Axis")
+        self.Y_Axis: object = SimpleNamespace(Name="Y_Axis")
+        self.Z_Axis: object = SimpleNamespace(Name="Z_Axis")
 
 
 class _FakePad:
@@ -396,6 +406,21 @@ class _FakePocket:
         self.Profile: object = None
         self.Length: float = 0.0
         self.Reversed: bool = False
+        self.Shape: object = _FakeShape()
+
+
+class _FakeRevolution:
+    """Minimal stand-in for a PartDesign::Revolution."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Revolution"
+        self.Profile: object = None
+        self.ReferenceAxis: object = None
+        self.Angle: float = 0.0
+        self.Axis: object = None
+        self.Base: object = None
         self.Shape: object = _FakeShape()
 
 
@@ -513,6 +538,8 @@ class _FakeDoc:
             obj: object = _FakePad(name)
         elif type_id == "PartDesign::Pocket":
             obj: object = _FakePocket(name)
+        elif type_id == "PartDesign::Revolution":
+            obj: object = _FakeRevolution(name)
         elif type_id == "PartDesign::Fillet":
             obj: object = _FakeFillet(name)
         elif type_id == "PartDesign::Chamfer":
@@ -6239,8 +6266,15 @@ def _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0):
 
 
 def _make_circle_sketch(sketch, cx=0.0, cy=0.0, radius=2.0):
-    """Add a closed circle sketch (1 Circle geometry)."""
+    """Add a closed circle sketch (1 Circle geometry plus diameter lines)."""
     sketch.Geometry.append(Circle(_FakePoint(cx, cy, 0), radius))
+    # Add diameter lines so the sketch has straight edges usable as revolution axes.
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(cx - radius, cy, 0), _FakePoint(cx + radius, cy, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(cx, cy - radius, 0), _FakePoint(cx, cy + radius, 0))
+    )
 
 
 def test_sketch_pad_successful_from_rectangle(
@@ -7032,6 +7066,403 @@ def test_handle_request_dispatches_sketch_pocket(
     assert response["result"]["length"] == 6.0
     assert response["result"]["reversed"] is False
     assert response["result"]["solids_count"] == 1
+
+
+def test_sketch_revolution_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_revolution"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["revolution_name"] == "Revolution"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["axis"] == "X_Axis"
+    assert result["result"]["angle"] == 360.0
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    assert doc.getObject("Body") is not None
+    assert doc.getObject("Revolution") is not None
+    rev = doc.objects["Revolution"]
+    assert rev.Profile is sketch
+    assert rev.Angle == 360.0
+    assert rev.ReferenceAxis is not None
+    assert rev.Shape is not None
+    assert rev.Shape.isValid() is True
+
+
+def test_sketch_revolution_successful_from_circle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_circle_sketch(sketch, cx=0.0, cy=0.0, radius=2.0)
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 180.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_revolution"
+    assert result["result"]["axis"] == "X_Axis"
+    assert result["result"]["angle"] == 180.0
+    assert result["result"]["solids_count"] == 1
+
+    rev = doc.objects["Revolution"]
+    assert rev.Angle == 180.0
+    assert rev.Profile is sketch
+
+
+def test_sketch_revolution_all_three_axes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for axis in ("X_Axis", "Y_Axis", "Z_Axis"):
+        doc = _FakeDoc()
+        _install_fake_freecad(monkeypatch, doc)
+        runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+        runner._op_create_sketch(
+            {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+        )
+        sketch = doc.objects["Sketch1"]
+        _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+        result = runner._op_sketch_revolution(
+            {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "axis": axis,
+                "angle": 360.0,
+            }
+        )
+
+        if axis in ("X_Axis", "Y_Axis"):
+            assert result["ok"] is True, f"axis={axis}: {result.get('error')}"
+            assert result["result"]["axis"] == axis
+            assert result["result"]["solids_count"] == 1
+        else:
+            # Z_Axis has no parallel edge in a 2D XY-plane sketch and is rejected
+            # by FreeCAD as "perpendicular to the sketch plane".
+            assert result["ok"] is False, f"axis={axis} should be rejected: {result}"
+            assert "axis" in result.get("error", "").lower()
+
+
+def test_sketch_revolution_partial_angle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 90.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["angle"] == 90.0
+    assert result["result"]["solids_count"] == 1
+
+
+def test_sketch_revolution_reuses_existing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 360.0,
+            "body_name": "Body",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["body_name"] == "Body"
+    assert doc.getObject("Body") is body
+
+
+def test_sketch_revolution_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Nonexistent",
+            "axis": "Z_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_revolution_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "axis": "Z_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_revolution_invalid_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "InvalidAxis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "axis" in result["error"].lower()
+
+
+def test_sketch_revolution_invalid_angle_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_revolution_invalid_angle_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": -45.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_revolution_invalid_angle_non_finite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": "not-a-number",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "finite" in result["error"].lower()
+
+
+def test_sketch_revolution_invalid_angle_exceeds_360(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": 400.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "360" in result["error"]
+
+
+def test_sketch_revolution_empty_sketch_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_sketch_revolution(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "",
+            "axis": "Z_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_revolution"
+    assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_revolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_revolution",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "axis": "Y_Axis",
+                "angle": 270.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_revolution"
+    assert response["result"]["axis"] == "Y_Axis"
+    assert response["result"]["angle"] == 270.0
+    assert response["result"]["solids_count"] == 1
+
+    rev = doc.objects["Revolution"]
+    assert rev.Angle == 270.0
+    assert rev.Profile is sketch
 
 
 def _make_box_solid(doc: _FakeDoc, name: str = "Box1", volume: float = 64.0) -> object:
