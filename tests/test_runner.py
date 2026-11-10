@@ -424,6 +424,21 @@ class _FakeRevolution:
         self.Shape: object = _FakeShape()
 
 
+class _FakeGroove:
+    """Minimal stand-in for a PartDesign::Groove."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Groove"
+        self.Profile: object = None
+        self.ReferenceAxis: object = None
+        self.Angle: float = 0.0
+        self.Axis: object = None
+        self.BaseFeature: object = None
+        self.Shape: object = _FakeShape()
+
+
 class _FakeFillet:
     """Minimal stand-in for a PartDesign::Fillet."""
 
@@ -540,6 +555,8 @@ class _FakeDoc:
             obj: object = _FakePocket(name)
         elif type_id == "PartDesign::Revolution":
             obj: object = _FakeRevolution(name)
+        elif type_id == "PartDesign::Groove":
+            obj: object = _FakeGroove(name)
         elif type_id == "PartDesign::Fillet":
             obj: object = _FakeFillet(name)
         elif type_id == "PartDesign::Chamfer":
@@ -2510,10 +2527,14 @@ def test_handle_request_dispatches_sketch_delete_geometry(
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
     runner._op_create_sketch(
-        {"document_id": "deldel", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
     )
     sketch = doc.objects["Sketch1"]
-    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(1, 0, 0)))
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
 
     response = runner.handle_request(
         {
@@ -7463,6 +7484,458 @@ def test_handle_request_dispatches_sketch_revolution(
     rev = doc.objects["Revolution"]
     assert rev.Angle == 270.0
     assert rev.Profile is sketch
+
+
+def test_sketch_groove_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_groove"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["groove_name"] == "Groove"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["axis"] == "X_Axis"
+    assert result["result"]["angle"] == 360.0
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    assert doc.getObject("Body") is not None
+    assert doc.getObject("Groove") is not None
+    groove = doc.objects["Groove"]
+    assert groove.Profile is sketch
+    assert groove.Angle == 360.0
+    assert groove.ReferenceAxis is not None
+    assert groove.Shape is not None
+    assert groove.Shape.isValid() is True
+
+
+def test_sketch_groove_successful_from_circle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_circle_sketch(sketch, cx=0.0, cy=0.0, radius=2.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 180.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_groove"
+    assert result["result"]["axis"] == "X_Axis"
+    assert result["result"]["angle"] == 180.0
+    assert result["result"]["solids_count"] == 1
+
+    groove = doc.objects["Groove"]
+    assert groove.Angle == 180.0
+    assert groove.Profile is sketch
+
+
+def test_sketch_groove_all_three_axes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for axis in ("X_Axis", "Y_Axis", "Z_Axis"):
+        doc = _FakeDoc()
+        _install_fake_freecad(monkeypatch, doc)
+        runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+        runner._op_create_sketch(
+            {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+        )
+        sketch = doc.objects["Sketch1"]
+        _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.addObject(sketch)
+        body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+        result = runner._op_sketch_groove(
+            {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "axis": axis,
+                "angle": 360.0,
+            }
+        )
+
+        if axis in ("X_Axis", "Y_Axis"):
+            assert result["ok"] is True, f"axis={axis}: {result.get('error')}"
+            assert result["result"]["axis"] == axis
+            assert result["result"]["solids_count"] == 1
+        else:
+            # Z_Axis has no parallel edge in a 2D XY-plane sketch and is rejected
+            assert result["ok"] is False, f"axis={axis} should be rejected: {result}"
+            assert "axis" in result.get("error", "").lower()
+
+
+def test_sketch_groove_partial_angle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 90.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["angle"] == 90.0
+    assert result["result"]["solids_count"] == 1
+
+
+def test_sketch_groove_requires_existing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Groove requires a Body with a valid base solid -- a standalone sketch gets a Body but no base solid."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    # Sketch is standalone, not in any Body.  The groove creates a Body but
+    # cannot find a base solid, so it must fail.
+    assert len(doc.objects) == 1
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "base solid" in result["error"].lower() or "tip" in result["error"].lower()
+    # A Body was created for the sketch.
+    assert doc.getObject("Body") is not None
+
+
+def test_sketch_groove_requires_base_solid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Groove requires a Body with a valid base solid (Body.Tip)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    # Body has no Pad/base solid -- Tip is None.
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "X_Axis",
+            "angle": 360.0,
+            "body_name": "Body",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "base solid" in result["error"].lower()
+
+
+def test_sketch_groove_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Nonexistent",
+            "axis": "Z_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_groove_wrong_object_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "Box1")
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Box1",
+            "axis": "Z_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_groove_invalid_axis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "InvalidAxis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "axis" in result["error"].lower()
+
+
+def test_sketch_groove_invalid_angle_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": 0.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_groove_invalid_angle_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": -45.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "positive" in result["error"].lower()
+
+
+def test_sketch_groove_invalid_angle_non_finite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": "not-a-number",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "finite" in result["error"].lower()
+
+
+def test_sketch_groove_invalid_angle_exceeds_360(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "axis": "Z_Axis",
+            "angle": 400.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "360" in result["error"]
+
+
+def test_sketch_groove_empty_sketch_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_sketch_groove(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "",
+            "axis": "Z_Axis",
+            "angle": 360.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_groove"
+    assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_groove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_groove",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "sketch_name": "Sketch1",
+                "axis": "Y_Axis",
+                "angle": 270.0,
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_groove"
+    assert response["result"]["axis"] == "Y_Axis"
+    assert response["result"]["angle"] == 270.0
+    assert response["result"]["solids_count"] == 1
+
+    groove = doc.objects["Groove"]
+    assert groove.Angle == 270.0
+    assert groove.Profile is sketch
 
 
 def _make_box_solid(doc: _FakeDoc, name: str = "Box1", volume: float = 64.0) -> object:

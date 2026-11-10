@@ -471,6 +471,46 @@ class SketchRevolutionResult(BaseModel):
     )
 
 
+class SketchGrooveParams(BaseModel):
+    """Parameters for creating a PartDesign::Groove from an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch and Body.")
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to use as the Groove profile.")
+    axis: str = Field(
+        default="Z_Axis", description="Groove axis: one of 'X_Axis', 'Y_Axis', 'Z_Axis' (principal origin axes)."
+    )
+    angle: float = Field(
+        default=360.0, description="Groove angle in degrees (must be positive, maximum 360)."
+    )
+    groove_name: str = Field(default="Groove", description="Name for the new PartDesign::Groove object.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the sketch.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchGrooveResult(BaseModel):
+    """Result of sketch_groove."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch used as the Groove profile.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Groove.")
+    groove_name: str = Field(description="Name of the created PartDesign::Groove.")
+    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    axis: str = Field(description="Groove axis ('X_Axis', 'Y_Axis', or 'Z_Axis').")
+    angle: float = Field(description="Groove angle in degrees.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 class PartDesignFilletResult(BaseModel):
     """Result of partdesign_fillet."""
 
@@ -2801,6 +2841,59 @@ def _register_tools(server: Any, settings: Settings) -> None:
             sketch_name=result.get("sketch_name", params.sketch_name),
             body_name=result.get("body_name", params.body_name),
             revolution_name=result.get("revolution_name", params.revolution_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            axis=result.get("axis", params.axis),
+            angle=result.get("angle", params.angle),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_groove
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_groove",
+        title="Create a PartDesign Groove from a sketch",
+        description=(
+            "Create a native PartDesign::Groove that subtracts material by "
+            "revolving an existing Sketcher::SketchObject around a principal "
+            "origin axis.  The sketch must already belong to an existing "
+            "PartDesign::Body that contains a valid base solid (Body.Tip).  The "
+            "Groove profile is set to the sketch, and *axis* and *angle* are "
+            "applied.  The document is recomputed, saved atomically, and its "
+            "revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_groove_tool(params: SketchGrooveParams) -> SketchGrooveResult:
+        """Create a PartDesign Groove from a sketch and return its info."""
+        validate_direct_request("sketch_groove", params.model_dump())
+        if math.isnan(params.angle) or math.isinf(params.angle):
+            raise ValueError("angle must be a finite number.")
+        if params.angle <= 0:
+            raise ValueError("angle must be positive.")
+        if params.angle > 360:
+            raise ValueError("angle must not exceed 360 degrees.")
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "axis": params.axis,
+            "angle": params.angle,
+            "groove_name": params.groove_name,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_groove", bridge_params)
+
+        return SketchGrooveResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            body_name=result.get("body_name", params.body_name),
+            groove_name=result.get("groove_name", params.groove_name),
             profile_name=result.get("profile_name", params.sketch_name),
             axis=result.get("axis", params.axis),
             angle=result.get("angle", params.angle),

@@ -72,6 +72,7 @@ OP_SKETCH_EDIT_POLYGON = "sketch_edit_polygon"
 OP_SKETCH_PAD = "sketch_pad"
 OP_SKETCH_POCKET = "sketch_pocket"
 OP_SKETCH_REVOLUTION = "sketch_revolution"
+OP_SKETCH_GROOVE = "sketch_groove"
 OP_PARTDESIGN_FILLET = "partdesign_fillet"
 OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
 OP_PARTDESIGN_LINEAR_PATTERN = "partdesign_linear_pattern"
@@ -5853,6 +5854,337 @@ def _op_sketch_revolution(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_groove(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::Groove (subtractive revolution) from a sketch.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::Groove``.  Unlike
+    ``sketch_revolution``, a Groove requires an existing Body that already
+    contains the sketch *and* a valid base solid (the Body.Tip).  The Groove
+    removes material by revolving the sketch profile around the requested
+    principal origin axis.  The sketch is not added to the Body by this
+    operation -- the caller must ensure the sketch already belongs to the Body.
+
+    After recompute, the resulting Groove shape is validated (non-null solid
+    with positive volume).  The document is locked, recomputed, saved
+    atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the on-disk
+    document is left unmodified (rollback via the established save-on-success
+    pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    axis = params.get("axis") or ""
+    angle = params.get("angle")
+    groove_name = params.get("groove_name") or "Groove"
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    # Validate sketch_name.
+    if not sketch_name.strip():
+        return {
+            "ok": False,
+            "op": "sketch_groove",
+            "error": "sketch_name must not be empty.",
+        }
+
+    # Validate axis: must be one of the three principal origin axes.
+    if axis not in ("X_Axis", "Y_Axis", "Z_Axis"):
+        return {
+            "ok": False,
+            "op": "sketch_groove",
+            "error": "axis must be one of 'X_Axis', 'Y_Axis', 'Z_Axis'.",
+        }
+
+    # Validate angle: finite and positive, maximum 360 degrees.
+    try:
+        angle_val = float(angle)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_groove",
+            "error": "angle must be a finite number.",
+        }
+    if math.isnan(angle_val) or math.isinf(angle_val):
+        return {
+            "ok": False,
+            "op": "sketch_groove",
+            "error": "angle must be a finite number.",
+        }
+    if angle_val <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_groove",
+            "error": "angle must be a positive number.",
+        }
+    if angle_val > 360:
+        return {
+            "ok": False,
+            "op": "sketch_groove",
+            "error": "angle must not exceed 360 degrees.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_groove", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_groove", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_groove", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_groove", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Find the sketch and verify it is a Sketcher::SketchObject.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot create a Groove from it."
+            )
+
+        # A Groove requires an existing PartDesign::Body with a valid base solid.
+        # Reuse a Body that already contains the sketch, or any Body with a base
+        # solid; otherwise create a new Body and add the sketch to it.
+        body = None
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    try:
+                        if sketch in getattr(obj, "Group", []) or sketch in getattr(obj, "outList", []):
+                            body = obj
+                            break
+                    except Exception:
+                        pass
+        except Exception:
+            body = None
+
+        if body is None:
+            # No Body contains the sketch.  Reuse any Body that has a base solid,
+            # or create a new one and add the sketch to it.
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    tip = getattr(obj, "Tip", None)
+                    tip_shape = getattr(tip, "Shape", None) if tip is not None else None
+                    if tip_shape is not None and not getattr(tip_shape, "isNull", lambda: False)() and bool(tip_shape.isValid()):
+                        body = obj
+                        break
+
+        if body is None:
+            counter = 0
+            desired_body_name = body_name
+            while doc.getObject(desired_body_name) is not None:
+                counter += 1
+                desired_body_name = f"{body_name}_{counter}"
+            try:
+                body = doc.addObject("PartDesign::Body", desired_body_name)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not create a PartDesign::Body: {exc}"
+                )
+            try:
+                body.addObject(sketch)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not add sketch to Body: {exc}.  The sketch may already "
+                    f"belong to another Body or may not be suitable for PartDesign."
+                )
+        else:
+            # Ensure the sketch belongs to the Body.
+            try:
+                if sketch not in getattr(body, "Group", []) and sketch not in getattr(body, "outList", []):
+                    body.addObject(sketch)
+            except Exception:
+                pass
+
+        body_name_used = getattr(body, "Name", body_name)
+
+        # Require a valid base solid in the Body (Body.Tip).
+        tip = getattr(body, "Tip", None)
+        if tip is None:
+            return _fail(
+                f"Body '{body_name_used}' has no Tip.  A Groove requires a valid base solid.  "
+                f"Create a Pad or other base solid before adding a Groove."
+            )
+        tip_shape = getattr(tip, "Shape", None)
+        if tip_shape is None or getattr(tip_shape, "isNull", lambda: False)() or not bool(tip_shape.isValid()):
+            return _fail(
+                f"Body '{body_name_used}' Tip '{getattr(tip, 'Name', '?')}' has no valid base solid.  "
+                f"Create a Pad or other base solid before adding a Groove."
+            )
+
+        # Create the Groove.  Avoid name clashes.
+        counter = 0
+        desired_groove_name = groove_name
+        while doc.getObject(desired_groove_name) is not None:
+            counter += 1
+            desired_groove_name = f"{groove_name}_{counter}"
+        try:
+            groove = doc.addObject("PartDesign::Groove", desired_groove_name)
+            body.addObject(groove)
+            # Link the groove to its parent base solid so FreeCAD can recompute
+            # it after the document is reopened.
+            try:
+                groove.BaseFeature = tip
+            except Exception:
+                pass
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Groove: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Groove profile to the existing sketch.
+        try:
+            groove.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Groove profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Set the ReferenceAxis to a sketch edge parallel to the requested
+        # global axis.  FreeCAD 1.1.4 requires the axis to be a subelement of
+        # the profile sketch (an edge subname like ``"Edge1"``).  The Body
+        # origin axes cannot be used.  Z_Axis has no parallel edge in a 2D
+        # sketch on the XY plane and is rejected.
+        try:
+            edge_subname = _find_revolution_axis_edge(sketch, axis)
+            if edge_subname is None:
+                return _fail(
+                    f"Body '{body_name_used}' has no sketch edge parallel to the {axis} "
+                    f"direction.  Cannot set the Groove axis '{axis}'.  This axis cannot "
+                    f"be represented for this sketch (e.g. Z_Axis has no parallel edge in a "
+                    f"2D sketch on the XY plane)."
+                )
+            groove.ReferenceAxis = (sketch, [edge_subname])
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Groove axis '{axis}': {exc}."
+            )
+
+        # Apply the groove angle (degrees).
+        try:
+            groove.Angle = angle_val
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Groove angle: {exc}"
+            )
+
+        # Recompute the document so FreeCAD evaluates the Groove feature tree.
+        doc.recompute()
+
+        # Validate the resulting Groove: it must have a valid, non-null solid shape.
+        shape = getattr(groove, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"Groove '{desired_groove_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate, or the ReferenceAxis '{axis}' may be invalid."
+            )
+        try:
+            if getattr(shape, "isNull", lambda: False)():
+                return _fail(
+                    f"Groove '{desired_groove_name}' produced a NULL shape.  The "
+                    f"ReferenceAxis reference to '{axis}' was accepted but not resolved by FreeCAD "
+                    f"(computed axis is Vector(0,0,0)).  This axis reference cannot be used for "
+                    f"Groove on this sketch."
+                )
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"Groove '{desired_groove_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Groove '{desired_groove_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"Groove '{desired_groove_name}' produced no solid.  The sketch profile or "
+                f"axis configuration may not produce a valid solid."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_groove",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "body_name": body_name_used,
+            "groove_name": desired_groove_name,
+            "profile_name": sketch_name,
+            "axis": axis,
+            "angle": angle_val,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 def _op_partdesign_fillet(params: dict[str, Any]) -> dict[str, Any]:
     """Create a native PartDesign::Fillet on edges of an existing solid feature.
 
@@ -8072,6 +8404,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_PAD: _op_sketch_pad,
     OP_SKETCH_POCKET: _op_sketch_pocket,
     OP_SKETCH_REVOLUTION: _op_sketch_revolution,
+    OP_SKETCH_GROOVE: _op_sketch_groove,
     OP_PARTDESIGN_FILLET: _op_partdesign_fillet,
     OP_PARTDESIGN_CHAMFER: _op_partdesign_chamfer,
     OP_PARTDESIGN_LINEAR_PATTERN: _op_partdesign_linear_pattern,

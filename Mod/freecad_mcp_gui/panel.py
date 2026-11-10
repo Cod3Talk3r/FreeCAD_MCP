@@ -757,6 +757,34 @@ class MCPGuiPanel:
         revolution_layout.addWidget(self._revolution_button, 5, 0, 1, 2)
         layout.addWidget(revolution_group)
 
+        # ---- Sketch Groove -------------------------------------------------
+        groove_group = QtWidgets.QGroupBox("Sketch Groove (PartDesign)")
+        groove_layout = QtWidgets.QGridLayout(groove_group)
+        self._groove_sketch_input = QtWidgets.QLineEdit("Sketch1")
+        groove_layout.addWidget(QtWidgets.QLabel("Sketch name:"), 0, 0)
+        groove_layout.addWidget(self._groove_sketch_input, 0, 1)
+        self._groove_name_input = QtWidgets.QLineEdit("Groove")
+        groove_layout.addWidget(QtWidgets.QLabel("Groove name:"), 1, 0)
+        groove_layout.addWidget(self._groove_name_input, 1, 1)
+        self._groove_body_name_input = QtWidgets.QLineEdit("Body")
+        groove_layout.addWidget(QtWidgets.QLabel("Body name:"), 2, 0)
+        groove_layout.addWidget(self._groove_body_name_input, 2, 1)
+        self._groove_axis_input = QtWidgets.QComboBox()
+        self._groove_axis_input.addItems(["X_Axis", "Y_Axis", "Z_Axis"])
+        self._groove_axis_input.setCurrentText("Z_Axis")
+        groove_layout.addWidget(QtWidgets.QLabel("Axis:"), 3, 0)
+        groove_layout.addWidget(self._groove_axis_input, 3, 1)
+        self._groove_angle_input = QtWidgets.QDoubleSpinBox()
+        self._groove_angle_input.setRange(0.001, 360.0)
+        self._groove_angle_input.setValue(360.0)
+        self._groove_angle_input.setDecimals(3)
+        groove_layout.addWidget(QtWidgets.QLabel("Angle (degrees):"), 4, 0)
+        groove_layout.addWidget(self._groove_angle_input, 4, 1)
+        self._groove_button = QtWidgets.QPushButton("Create Groove")
+        self._groove_button.clicked.connect(self._on_sketch_groove)
+        groove_layout.addWidget(self._groove_button, 5, 0, 1, 2)
+        layout.addWidget(groove_group)
+
         # ---- PartDesign Fillet -------------------------------------------
         fillet_group = QtWidgets.QGroupBox("PartDesign Fillet")
         fillet_layout = QtWidgets.QGridLayout(fillet_group)
@@ -2128,6 +2156,50 @@ class MCPGuiPanel:
         self._objects_list.clear()
         self._set_status(
             f"Created Revolution '{result.get('revolution_name', revolution_name)}' from sketch "
+            f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
+            f"axis={axis} angle={angle}deg "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Sketch Groove
+    # ------------------------------------------------------------------
+    def _on_sketch_groove(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        sketch_name = self._groove_sketch_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not sketch_name:
+            self._set_status("Error: Sketch name must not be empty.", error=True)
+            return
+
+        groove_name = self._groove_name_input.text().strip() or "Groove"
+        body_name = self._groove_body_name_input.text().strip() or "Body"
+        axis = self._groove_axis_input.currentText()
+        angle = self._groove_angle_input.value()
+
+        response = self._run_operation(
+            "sketch_groove",
+            {
+                "document_id": document_id,
+                "sketch_name": sketch_name,
+                "axis": axis,
+                "angle": angle,
+                "groove_name": groove_name,
+                "body_name": body_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._objects_list.clear()
+        self._set_status(
+            f"Created Groove '{result.get('groove_name', groove_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
             f"axis={axis} angle={angle}deg "
             f"in workspace document '{document_id}'.",
