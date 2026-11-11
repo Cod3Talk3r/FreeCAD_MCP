@@ -489,7 +489,18 @@ def _op_recompute(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _open_existing_document(_FC, wks, normalized)
+
+        # When the requested document is already open in FreeCAD (e.g. opened
+        # manually outside the MCP workspace), recompute it directly instead of
+        # reopening it from the workspace .fcstd path.  Otherwise preserve the
+        # existing workspace-path fallback exactly.
+        doc = None
+        active = _FC.ActiveDocument
+        if active is not None and getattr(active, "Name", None) == normalized:
+            doc = active
+
+        if doc is None:
+            doc = _open_existing_document(_FC, wks, normalized)
         doc.recompute()
         meta_before = ws_mod.read_meta(wks.meta_path(normalized))
     except Exception as exc:
@@ -576,7 +587,8 @@ def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "op": "list_objects", "error": f"FreeCAD error: {exc}"}
 
     ws_mod.release_lock(lock_path, pid)
-    return {"document_id": normalized, "objects": objects}
+    meta = ws_mod.read_meta(wks.meta_path(normalized))
+    return {"document_id": normalized, "objects": objects, "meta": meta}
 
 
 def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:

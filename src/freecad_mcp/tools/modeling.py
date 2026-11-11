@@ -44,8 +44,22 @@ _CYLINDER_PROPS = {"Radius", "Height"}
 class ObjectInfo(BaseModel):
     """Information about a single document object."""
 
-    name: str = Field(description="Object name inside FreeCAD.")
+    name: str = Field(
+        description=(
+            "Object name inside FreeCAD (the internal Name). This is the stable "
+            "object identity within a document: it is set at creation, is not "
+            "changed by editing the mutable Label, and persists across save/reopen."
+        )
+    )
     type: str = Field(description="FreeCAD TypeId, e.g. 'Part::Box'.")
+    label: Optional[str] = Field(
+        default=None,
+        description=(
+            "User-facing Label. Mutable and not a stable identity; it can be "
+            "changed at any time and is not guaranteed unique. Prefer ``name`` "
+            "for object references in subsequent operations."
+        ),
+    )
     shape_type: Optional[str] = Field(
         default=None, description="Shape.ShapeType if available (e.g. 'Solid')."
     )
@@ -63,10 +77,26 @@ class ObjectInfo(BaseModel):
 class DocumentList(BaseModel):
     """Result of listing objects in a document."""
 
-    document_id: str = Field(description="Validated document identifier.")
+    document_id: str = Field(description="Validated document identifier (document identity).")
     objects: list[ObjectInfo] = Field(description="List of objects with basic info.")
     all_valid: Optional[bool] = Field(
         default=None, description="True if validate_document reports all OK."
+    )
+    revision: Optional[int] = Field(
+        default=None,
+        description="Document metadata revision from the .meta.json sidecar (owned by workspace.py).",
+    )
+    created_at: Optional[str] = Field(
+        default=None,
+        description="Document creation timestamp (ISO-8601) from the .meta.json sidecar.",
+    )
+    last_saved_at: Optional[str] = Field(
+        default=None,
+        description="Last save timestamp (ISO-8601) from the .meta.json sidecar.",
+    )
+    last_modified_at: Optional[str] = Field(
+        default=None,
+        description="Last modification timestamp (ISO-8601) from the .meta.json sidecar.",
     )
 
 
@@ -1609,6 +1639,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             oi = ObjectInfo(
                 name=obj.get("name", ""),
                 type=obj.get("type", ""),
+                label=obj.get("label"),
                 shape_type=obj.get("shape_type"),
                 volume=obj.get("volume"),
                 length=obj.get("length"),
@@ -1619,10 +1650,15 @@ def _register_tools(server: Any, settings: Settings) -> None:
             objects.append(oi)
 
         all_valid = result.get("all_valid")
+        meta = result.get("meta", {}) or {}
         return DocumentList(
             document_id=params.document_id,
             objects=objects,
             all_valid=all_valid,
+            revision=meta.get("revision"),
+            created_at=meta.get("created_at"),
+            last_saved_at=meta.get("last_saved_at"),
+            last_modified_at=meta.get("last_modified_at"),
         )
 
     # ------------------------------------------------------------------
@@ -1647,18 +1683,18 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "inspect_object", bridge_params)
-
-        info = ObjectInfo(
-            name=params.object_name,
-            type=result.get("type", ""),
-            shape_type=result.get("shape_type"),
-            volume=result.get("volume"),
-            length=result.get("length"),
-            width=result.get("width"),
-            height=result.get("height"),
-            radius=result.get("radius"),
+        raw_info = result.get("info", {}) or {}
+        return ObjectInfo(
+            name=raw_info.get("name", params.object_name),
+            type=raw_info.get("type", ""),
+            label=raw_info.get("label"),
+            shape_type=raw_info.get("shape_type"),
+            volume=raw_info.get("volume"),
+            length=raw_info.get("length"),
+            width=raw_info.get("width"),
+            height=raw_info.get("height"),
+            radius=raw_info.get("radius"),
         )
-        return info
 
     # ------------------------------------------------------------------
     # validate_document
