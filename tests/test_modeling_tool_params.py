@@ -78,6 +78,78 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
         modeling.SketchEditLineParams,
         {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0},
     ),
+    (
+        modeling.SketchEditCircleParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0},
+    ),
+    (
+        modeling.SketchEditEllipseParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0},
+    ),
+    (
+        modeling.SketchEditRectangleParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0},
+    ),
+    (
+        modeling.SketchEditTriangleParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0, "vertices": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}]},
+    ),
+    (
+        modeling.SketchEditRegularPolygonParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0, "radius": 1.0, "sides": 5},
+    ),
+    (
+        modeling.SketchEditPolygonParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "geometry_index": 0, "vertices": [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 0.0, "y": 1.0}]},
+    ),
+    (
+        modeling.SketchPadParams,
+        {"document_id": "doc", "sketch_name": "Sketch"},
+    ),
+    (
+        modeling.SketchPocketParams,
+        {"document_id": "doc", "sketch_name": "Sketch"},
+    ),
+    (
+        modeling.SketchRevolutionParams,
+        {"document_id": "doc", "sketch_name": "Sketch"},
+    ),
+    (
+        modeling.SketchGrooveParams,
+        {"document_id": "doc", "sketch_name": "Sketch"},
+    ),
+    (
+        modeling.PartDesignFilletParams,
+        {"document_id": "doc", "object_name": "Box", "edge_indices": [1], "radius": 1.0},
+    ),
+    (
+        modeling.PartDesignChamferParams,
+        {"document_id": "doc", "object_name": "Box", "edge_indices": [1], "size": 1.0},
+    ),
+    (
+        modeling.PartDesignLinearPatternParams,
+        {"document_id": "doc", "object_name": "Box", "direction": "X_Axis", "length": 10.0, "occurrences": 3},
+    ),
+    (
+        modeling.PartDesignPolarPatternParams,
+        {"document_id": "doc", "object_name": "Box", "axis": "Z_Axis", "angle": 360.0, "occurrences": 4},
+    ),
+    (
+        modeling.PartDesignMirroredParams,
+        {"document_id": "doc", "object_name": "Box", "plane": "XY_Plane"},
+    ),
+    (
+        modeling.PartDesignThicknessParams,
+        {"document_id": "doc", "object_name": "Box", "thickness": 1.0},
+    ),
+    (
+        modeling.BooleanFuseParams,
+        {"document_id": "doc", "base_object": "Base", "tool_object": "Tool"},
+    ),
+    (
+        modeling.BooleanCommonParams,
+        {"document_id": "doc", "base_object": "Base", "tool_object": "Tool"},
+    ),
 )
 
 _MODELING_PARAMS_MODELS = tuple(model for model, _ in MODELING_PARAMS_CASES)

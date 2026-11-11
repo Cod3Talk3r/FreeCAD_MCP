@@ -7,6 +7,8 @@
   verification is maintainer-run unless explicitly requested.
 - FreeCAD-gated integration tests: `uv run pytest tests/test_freecad_integration.py -v`
   — skips when no FreeCAD console is found; set `FREECAD_MCP_FREECAD_EXECUTABLE` to override.
+- M12 capability discovery (no FreeCAD needed):
+  `uv run pytest tests/test_m12_capability_discovery.py tests/test_modeling_tool_params.py tests/test_modeling_schemas.py -q`
 - Taiga unit tests (no Taiga/Torch/weights/network needed):
   `uv run pytest tests/test_taiga_runner.py tests/test_taiga_runtime.py tests/test_taiga_adapter.py tests/test_taiga_workflow.py tests/test_taiga_goal.py tests/test_taiga_build.py tests/test_taiga_build_tool.py tests/test_taiga_child.py tests/test_taiga_diagnostic.py tests/test_config.py tests/test_server.py -q`
 - Guarded-loop skeleton tests: `uv run pytest tests/test_taiga_workflow.py -q`.
@@ -107,6 +109,12 @@
 - FreeCAD-dependent and real-Taiga tests skip when their runtime is not configured.
 - Never record unverified results as successful.
 
+- 2026-11-11 (M12): `uv run --offline pytest -q tests/test_m12_capability_discovery.py tests/test_modeling_tool_params.py tests/test_modeling_schemas.py` -> **87 passed**.
+  - Operation/tool registration parity verified: all 45 operations in `runner.OPERATIONS` have corresponding MCP tools (4 diagnostic ops intentionally not tool-exposed: ping, get_version, validate→validate_document alias, delete_object not yet wired).
+  - All 41 `*Params` models verified to expose optional `workspace` field defaulting to None.
+  - Unknown operations rejected with clear error.
+  - All tools have non-empty descriptions and object-type input schemas.
+
 ## Evidence and milestone acceptance
 
 - Unit/schema/backend tests establish project behavior and contracts only; mocked
@@ -124,7 +132,7 @@
 - Taiga workflow fakes prove loop mechanics only. Real Method B requires explicit
   configured runtime/model and actual FreeCAD state/action/execution feedback;
   model downloads must never happen implicitly.
-- Roadmap milestone acceptance criteria are in `.kilo/ROADMAP.md`; report
+- Roadmap milestone acceptance criteria are in `docs/ROADMAP.md`; report
   unavailable runtime tests as skips/unknown, never as passing evidence.
 
 ---

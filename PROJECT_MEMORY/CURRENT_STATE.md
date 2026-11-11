@@ -34,10 +34,16 @@
     metadata side-car, and in-child post-save validation (PartDesign-aware
     `Body.Tip.Shape` inspection).
 
-## Product roadmap baseline (verified 2026-11-10)
+## Product roadmap baseline (verified 2026-11-11)
 
-- Canonical forward plan: [`.kilo/ROADMAP.md`](../.kilo/ROADMAP.md). Historical
+- Canonical forward plan: [`docs/ROADMAP.md`](../docs/ROADMAP.md). Historical
   M0–M11 labels are preserved; planned roadmap continues at M12.
+- **M12 — Capability evidence and tool discoverability (in progress):**
+  - `tests/test_m12_capability_discovery.py` — operation/tool registration parity,
+    unknown-operation rejection, tool description presence, schema validity.
+  - `tests/test_modeling_tool_params.py` — schema coverage extended to all 41
+    `*Params` models (was 22).
+  - `PROJECT_MEMORY/EVIDENCE.md` — evidence format and tier definitions (T1–T6).
 - `src/freecad_mcp/freecad_bridge/runner.py` owns the explicit `OPERATIONS`
   allowlist. It includes document/primitive/parameter/placement/recompute/
   inspection/validation/save/export, tank/coil, Cut/Fuse/Common, Sketcher
@@ -71,7 +77,11 @@
 `server_info`, `freecad_status`, `create_document`, `create_box`,
 `create_cylinder`, `set_parameter`, `recompute`, `list_objects`,
 `inspect_object`, `validate_document`, `save_document`, `export_step`,
-`boolean_cut`, `tank`, `tubular_coil`, `partdesign_fillet`,
+`boolean_cut`, `boolean_fuse`, `boolean_common`, `tank`, `tubular_coil`,
+`sketch_groove`, `sketch_pad`, `sketch_pocket`, `sketch_revolution`,
+`partdesign_fillet`, `partdesign_chamfer`,
+`partdesign_linear_pattern`, `partdesign_polar_pattern`,
+`partdesign_mirrored`, `partdesign_thickness`,
 `taiga_status`, `taiga_score_actions`, `taiga_build`.
 
 ## New files (Phase 1–3)
