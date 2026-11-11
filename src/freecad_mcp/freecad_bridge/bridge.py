@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from freecad_mcp.pathing import for_target, is_windows_path
+from freecad_mcp.pathing import for_target, is_windows_path, to_windows
 
 from .discovery import find_freecad_executable
 from .errors import (
@@ -31,6 +31,7 @@ from .errors import (
     FreeCadTimeoutError,
 )
 from .runner import OP_GET_VERSION, OP_PING
+from .workspace import DEFAULT_WORKSPACE, WORKSPACE_ENV
 
 #: Trim captured streams before embedding them in error messages.
 _STREAM_TAIL = 4000
@@ -91,6 +92,15 @@ class FreeCadBridge:
         )
         target = "windows" if windows_target else "native"
 
+        # When targeting Windows FreeCAD (e.g. WSL launching freecadcmd.exe),
+        # translate any workspace path so the Windows child can open it.
+        # ``to_windows`` leaves already-Windows paths untouched (no double
+        # conversion) and native targets are never translated.
+        if target == "windows":
+            request_params = request.setdefault("params", {})
+            if request_params.get("workspace"):
+                request_params["workspace"] = to_windows(request_params["workspace"])
+
         with tempfile.TemporaryDirectory(prefix="freecad-mcp-") as workdir:
             work = Path(workdir)
             request_path = work / "request.json"
@@ -100,6 +110,16 @@ class FreeCadBridge:
             env = dict(os.environ)
             env["FREECAD_MCP_REQUEST"] = str(request_path)
             env["FREECAD_MCP_RESPONSE"] = str(response_path)
+
+            # Ensure the Windows FreeCAD child never receives an unusable WSL
+            # workspace path: translate an explicit env var, or fall back to a
+            # translated default workspace derived from the current directory.
+            if target == "windows":
+                if env.get(WORKSPACE_ENV):
+                    env[WORKSPACE_ENV] = to_windows(env[WORKSPACE_ENV])
+                else:
+                    env[WORKSPACE_ENV] = str(to_windows(Path.cwd() / DEFAULT_WORKSPACE))
+
             runner_path = for_target(self.runner_path.resolve(), target)
             runner_code = f"import runpy; runpy.run_path({runner_path!r}, run_name='__main__')"
 
