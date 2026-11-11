@@ -424,6 +424,26 @@ class MCPGuiPanel:
         del_layout.addWidget(self._del_geo_button, 2, 0, 1, 2)
         layout.addWidget(del_group)
 
+        # ---- Delete Object -------------------------------------------------
+        del_obj_group = QtWidgets.QGroupBox("Delete Object")
+        del_obj_layout = QtWidgets.QGridLayout(del_obj_group)
+        self._del_obj_name_input = QtWidgets.QLineEdit()
+        del_obj_layout.addWidget(QtWidgets.QLabel("Object name:"), 0, 0)
+        del_obj_layout.addWidget(self._del_obj_name_input, 0, 1)
+        note = QtWidgets.QLabel(
+            "Deletes an object from the workspace document. Deleting a Body "
+            "also removes its contained features (Pad, Pocket, sketches, "
+            "etc.); unrelated objects are not affected. This panel action is "
+            "separate from FreeCAD's native Model Tree right-click Delete."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-size: 11px;")
+        del_obj_layout.addWidget(note, 1, 0, 1, 2)
+        self._del_obj_button = QtWidgets.QPushButton("Delete Object")
+        self._del_obj_button.clicked.connect(self._on_delete_object)
+        del_obj_layout.addWidget(self._del_obj_button, 2, 0, 1, 2)
+        layout.addWidget(del_obj_group)
+
         # ---- Edit Line Geometry in Sketch ----------------------------------
         edit_group = QtWidgets.QGroupBox("Edit Line Geometry in Sketch")
         edit_layout = QtWidgets.QGridLayout(edit_group)
@@ -1678,6 +1698,43 @@ class MCPGuiPanel:
         self._set_status(
             f"Deleted geometry index {geometry_index} from sketch '{sketch_name}' "
             f"in workspace document '{document_id}' ({geometry_count} geometry remaining).",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Object: Delete Object
+    # ------------------------------------------------------------------
+    def _on_delete_object(self) -> None:
+        document_id = self._doc_id_input.text().strip()
+        object_name = self._del_obj_name_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+        if not object_name:
+            self._set_status("Error: Object name must not be empty.", error=True)
+            return
+
+        response = self._run_operation(
+            "delete_object",
+            {
+                "document_id": document_id,
+                "object_name": object_name,
+            },
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        deleted = result.get("deleted", []) if isinstance(result, dict) else []
+        remaining = result.get("remaining", []) if isinstance(result, dict) else []
+        self.refresh_document_label()
+        self._objects_list.clear()
+        deleted_text = ", ".join(deleted) if deleted else "<none>"
+        self._set_status(
+            f"Deleted '{object_name}' in workspace document '{document_id}'. "
+            f"Objects removed: {deleted_text}. Objects remaining: "
+            f"{len(remaining)}.",
             error=False,
         )
 

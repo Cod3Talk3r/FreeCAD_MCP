@@ -586,6 +586,9 @@ class _FakeDoc:
     def saveAs(self, path: str) -> None:
         Path(path).write_bytes(b"fake fcstd")
 
+    def removeObject(self, name: str) -> None:
+        self.objects.pop(name, None)
+
 
 def test_workspace_accepts_string_root(tmp_path: Path) -> None:
     wks = Workspace(root=str(tmp_path))
@@ -639,6 +642,128 @@ def test_open_existing_document_reports_missing_without_creating(tmp_path: Path)
 
     assert fc.open_calls == []
     assert fc.new_calls == []
+
+
+def _make_delete_doc(doc_id: str) -> _FakeDoc:
+    doc = _FakeDoc()
+    doc.Name = doc_id
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = types.SimpleNamespace(Name="BaseSketch", TypeId="Sketcher::SketchObject")
+    pad = types.SimpleNamespace(Name="Pad", TypeId="PartDesign::Pad")
+    groove = types.SimpleNamespace(Name="Groove", TypeId="PartDesign::Groove")
+    body.Group = [sketch, pad, groove]
+    doc.objects["BaseSketch"] = sketch
+    doc.objects["Pad"] = pad
+    doc.objects["Groove"] = groove
+    return doc
+
+
+def test_op_delete_object_removes_regular_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _make_delete_doc("mydoc")
+    doc.addObject("Part::Box", "Box1")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_delete_object(
+        {"document_id": "mydoc", "object_name": "Box1", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["document_id"] == "mydoc"
+    assert result["result"]["deleted"] == ["Box1"]
+    assert "Box1" not in result["result"]["remaining"]
+    assert doc.getObject("Box1") is None
+    assert doc.getObject("Body") is not None  # unrelated object untouched
+
+
+def test_op_delete_object_body_cascades_group_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a Body removes its Group members so no geometry is orphaned."""
+    doc = _make_delete_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_delete_object(
+        {"document_id": "mydoc", "object_name": "Body", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    deleted = result["result"]["deleted"]
+    assert "Body" in deleted
+    assert "BaseSketch" in deleted
+    assert "Pad" in deleted
+    assert "Groove" in deleted
+    assert doc.getObject("Body") is None
+    assert doc.getObject("BaseSketch") is None
+    assert doc.getObject("Pad") is None
+    assert doc.getObject("Groove") is None
+    assert result["result"]["remaining"] == []
+
+
+def test_op_delete_object_deletion_persists_on_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After deleting a Body and saving, reopening the document shows no Body."""
+    doc = _make_delete_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_delete_object(
+        {"document_id": "mydoc", "object_name": "Body", "workspace": str(tmp_path)}
+    )
+    assert result["ok"] is True
+    assert fcstd_path.is_file()
+
+    # Reopen: the saved document no longer contains the Body or its members.
+    reopened = runner._open_existing_document(fc, Workspace(root=tmp_path), "mydoc")
+    assert reopened.getObject("Body") is None
+    assert reopened.getObject("Pad") is None
+    assert reopened.getObject("BaseSketch") is None
+    assert reopened.getObject("Groove") is None
+    assert reopened.getObject("Body") is None
+
+
+def test_op_delete_object_missing_object_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _make_delete_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_delete_object(
+        {"document_id": "mydoc", "object_name": "Nope", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "delete_object"
+    assert "not found" in result["error"].lower()
+
+
+def test_op_delete_object_empty_name_returns_error() -> None:
+    result = runner._op_delete_object(
+        {"document_id": "mydoc", "object_name": "", "workspace": "/tmp"}
+    )
+    assert result["ok"] is False
+    assert result["op"] == "delete_object"
+    assert "object_name" in result["error"].lower()
 
 
 def _validate_shape(

@@ -73,6 +73,7 @@ OP_SKETCH_PAD = "sketch_pad"
 OP_SKETCH_POCKET = "sketch_pocket"
 OP_SKETCH_REVOLUTION = "sketch_revolution"
 OP_SKETCH_GROOVE = "sketch_groove"
+OP_DELETE_OBJECT = "delete_object"
 OP_PARTDESIGN_FILLET = "partdesign_fillet"
 OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
 OP_PARTDESIGN_LINEAR_PATTERN = "partdesign_linear_pattern"
@@ -798,6 +799,115 @@ def _op_save_document(params: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "op": "save_document",
         "result": {"document_id": normalized, "saved_path": str(fcstd_path), "meta_before": meta_before},
+    }
+
+
+def _op_delete_object(params: dict[str, Any]) -> dict[str, Any]:
+    """Delete an object from the document.
+
+    When deleting a ``PartDesign::Body``, its ``Group`` members (contained
+    features such as Pad, Pocket, sketches) are removed first.  FreeCAD's
+    ``doc.removeObject`` on a Body only removes the container and leaves its
+    Group members orphaned -- they remain in the document as valid geometry
+    and survive save/reopen.  Cascading the Group members makes deletion
+    predictable and ensures nothing dependent is silently left behind.
+
+    Objects that are not a Body are removed with ``removeObject`` only; no
+    dependents outside the Body's group are touched.  The document is
+    recomputed, saved atomically, and its revision bumped.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    if not object_name.strip():
+        return {"ok": False, "op": "delete_object", "error": "object_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "delete_object", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env()
+            if not workspace_str
+            else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "delete_object", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "delete_object", "error": lock_status.get("error", "lock failed")}
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "delete_object", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            return _fail(f"object '{object_name}' not found")
+
+        type_id = getattr(obj, "TypeId", "")
+        type_name = type_id.split("::")[-1]
+        deleted: list[str] = []
+
+        # A Body is a container: cascade into its Group members so removing
+        # the Body does not leave contained features (and their geometry)
+        # orphaned in the document.  Delete members first, then the Body.
+        if type_name == "Body":
+            members = list(getattr(obj, "Group", []) or [])
+            for member in members:
+                member_name = getattr(member, "Name", None)
+                if member_name is None:
+                    continue
+                try:
+                    doc.removeObject(member_name)
+                    deleted.append(member_name)
+                except Exception:
+                    # Best-effort cleanup; continue with the remaining members.
+                    pass
+
+        try:
+            doc.removeObject(object_name)
+            deleted.append(object_name)
+        except Exception as exc:
+            return _fail(f"could not delete object '{object_name}': {exc}")
+
+        doc.recompute()
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "delete_object",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "deleted": deleted,
+            "remaining": [o.Name for o in doc.Objects],
+        },
     }
 
 
@@ -8416,6 +8526,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_POCKET: _op_sketch_pocket,
     OP_SKETCH_REVOLUTION: _op_sketch_revolution,
     OP_SKETCH_GROOVE: _op_sketch_groove,
+    OP_DELETE_OBJECT: _op_delete_object,
     OP_PARTDESIGN_FILLET: _op_partdesign_fillet,
     OP_PARTDESIGN_CHAMFER: _op_partdesign_chamfer,
     OP_PARTDESIGN_LINEAR_PATTERN: _op_partdesign_linear_pattern,
