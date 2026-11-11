@@ -4924,22 +4924,49 @@ def groove_pad(tmp_path: Path):
 def _assert_groove_tree(workspace: Path, volume: float, axis: str, angle: float, groove_name: str = "Groove") -> None:
     target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
     path = for_target(workspace / "groovepad.fcstd", target)
+    expected_axis = {"X_Axis": (1.0, 0.0, 0.0), "Y_Axis": (0.0, 1.0, 0.0), "Z_Axis": (0.0, 0.0, 1.0)}[axis]
+    ex, ey, ez = expected_axis
     code = f"""
 import FreeCAD as App
 import PartDesign
 doc = App.openDocument({path!r})
 doc.recompute()
 body = doc.getObject('Body')
-assert body is not None
+sketch2 = doc.getObject('Sketch2')
+pad = doc.getObject('Pad')
+groove = doc.getObject({groove_name!r})
+assert all(obj is not None for obj in (body, sketch2, pad, groove))
+assert groove.TypeId == 'PartDesign::Groove'
+assert groove in body.Group and pad in body.Group and sketch2 in body.Group
 names = [obj.Name for obj in body.Group]
 assert 'Sketch1' in names
 assert 'Pad' in names
 assert 'Sketch2' in names
 assert {groove_name!r} in names
-# NOTE: FreeCAD 1.1.4 does not persist the computed PartDesign::Groove shape,
-# computed Axis, or Profile link through save/reopen.  Volume, solids_count,
-# axis direction, and profile link are verified by the live bridge.run()
-# result instead of the reopened document.
+shape = groove.Shape
+assert shape is not None
+assert not shape.isNull()
+assert shape.isValid()
+solids = list(shape.Solids or [])
+assert len(solids) == 1
+assert abs(shape.Volume - {volume!r}) < 1e-2
+assert shape.Volume > 0
+assert groove.BaseFeature == pad
+assert groove.Profile[0] == sketch2
+ref_axis = groove.ReferenceAxis
+assert ref_axis is not None
+assert ref_axis[0] == sketch2
+subs = list(ref_axis[1])
+assert len(subs) == 1
+assert all(str(s).startswith('Edge') for s in subs)
+axis_vec = groove.Axis
+assert axis_vec is not None
+mag = (axis_vec.x**2 + axis_vec.y**2 + axis_vec.z**2) ** 0.5
+assert mag > 1e-9
+nx, ny, nz = axis_vec.x / mag, axis_vec.y / mag, axis_vec.z / mag
+dot = nx * {ex!r} + ny * {ey!r} + nz * {ez!r}
+assert abs(dot) > 0.99
+assert body.Tip == groove
 print('GROOVE_TREE_OK {axis}')
 """
     process = subprocess.run(
@@ -5042,35 +5069,12 @@ def test_real_freecad_groove_missing_sketch(tmp_path: Path, groove_pad) -> None:
 
 @requires_freecad
 def test_real_freecad_groove_save_reopen(tmp_path: Path, groove_pad) -> None:
-    """Groove persists after save/reopen and remains editable."""
+    """Groove persists after save/reopen: shape, links, axis, tip, and group all survive."""
     bridge, params = groove_pad
     result = bridge.run("sketch_groove", {
         **params, "sketch_name": "Sketch2", "axis": "X_Axis", "angle": 360.0,
     })
-    document = tmp_path / "groovepad.fcstd"
-    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
-    path = for_target(document, target)
-    code = f"""
-import FreeCAD as App
-import PartDesign
-doc = App.openDocument({path!r})
-doc.recompute()
-body = doc.getObject('Body')
-assert body is not None
-names = [obj.Name for obj in body.Group]
-assert 'Pad' in names
-assert 'Sketch2' in names
-assert 'Groove' in names
-# NOTE: FreeCAD 1.1.4 does not persist the computed PartDesign::Groove shape,
-# computed Axis, or Profile link through save/reopen.  Object existence in the
-# Body group is verified; shape/axis/volume are verified by the live bridge.run()
-# result during creation.
-print('GROOVE_REOPEN_OK')
-"""
-    process = subprocess.run(
-        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
-    )
-    assert process.returncode == 0 and "GROOVE_REOPEN_OK" in process.stdout, process.stdout + process.stderr
+    _assert_groove_tree(tmp_path, result["volume"], "X_Axis", 360.0, "Groove")
 
 
 @requires_freecad
