@@ -3029,7 +3029,7 @@ def test_handle_request_dispatches_sketch_delete_geometry(
         {
             "op": runner.OP_SKETCH_DELETE_GEOMETRY,
             "params": {
-                "document_id": "deldel",
+                "document_id": "edit",
                 "workspace": str(tmp_path),
                 "sketch_name": "Sketch1",
                 "geometry_index": 0,
@@ -3040,7 +3040,7 @@ def test_handle_request_dispatches_sketch_delete_geometry(
     assert response["ok"] is True
     assert response["op"] == "sketch_delete_geometry"
     assert response["result"]["deleted_index"] == 0
-    assert response["result"]["geometry_count"] == 0
+    assert response["result"]["geometry_count"] == 3
 
 
 # ---------------------------------------------------------------------------
