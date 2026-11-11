@@ -17,43 +17,51 @@ added only when a milestone needs them.
 Transport, CAD execution, validation, and optional integrations are separate
 concerns and must not leak into each other:
 
-Phase 4 introduces `freecad_mcp.app`, a standard-library application boundary
-shared by interface adapters. Its request, result, error, and backend status
-contracts do not depend on MCP, Qt, FreeCAD, Taiga, or an LLM. Direct operations
-delegate to the existing bridge; Taiga builds delegate to the existing build
-runtime. The MCP tools retain their public schemas and translate at the boundary.
-The existing optional scoring interface remains separate from build execution.
+`freecad_mcp.app` is a standard-library application boundary shared by interface
+adapters. Its request, result, error, inspection and backend-status contracts do
+not depend on MCP, Qt, FreeCAD, Taiga, or an LLM. Direct operations and document
+inspection delegate to the existing bridge; Taiga builds delegate to the
+isolated build runtime. MCP tools translate at the boundary.
 
-The current execution adapters are headless. In-process FreeCAD execution,
-active-document ownership, document inspection, and the GUI workbench remain
-future work; the contracts do not imply that either backend can safely operate
-on an already-open document. No HTTP service is required.
-The direct adapter shares the existing MCP input checks; FreeCAD-side validation
-remains authoritative for document and geometry operations. Backend status
-reports availability as unknown until probed. Direct execution preserves existing
-bridge exceptions, while Taiga build failures return structured result data.
+The native FreeCAD Workbench and dockable panel are implemented and call
+`freecad_mcp.freecad_bridge.runner.handle_request`, using the same explicit
+operation registry as the child bridge. The GUI does not need a network service
+and must not create an independent CAD algorithm path. Its workspace document
+ownership and locking remain governed by the same shared execution behavior.
+GUI-only selection and view state should be translated to explicit operation
+references before mutation.
+
+The existing direct and Taiga build runtimes are headless child-process paths;
+the GUI is a separate in-FreeCAD adapter. The contracts do not imply that the
+headless backend safely edits an arbitrary already-open document. Active-document
+ownership must remain explicit. FreeCAD-side operation validation remains
+authoritative for native document and geometry behavior. Backend availability
+is unknown until probed, and structured operation results/errors should be
+preserved across MCP and GUI.
 
 ```
-        AI agent (e.g. OpenCode)
-                 |
-                 |  MCP (stdio)
-                 v
+         External AI agent                FreeCAD GUI Workbench
+                  |                                |
+                  | MCP (stdio)                    | shared operation dispatch
+                  v                                v
    +-----------------------------------+
    |  server.py                        |  MCP server: registers tools
    |  tools/                           |  tool definitions + input validation
    +-----------------------------------+
                  |
-                 v
+                  |                                |
+                  +---------------+----------------+
+                                  v
    +-----------------------------------+
    |  freecad_bridge/                  |  talks to the real FreeCAD process
    +-----------------------------------+
                  |
                  v
    +-----------------------------------+
-   |  validation/                      |  geometry + model correctness checks
+   |  runner.OPERATIONS                |  fixed, validated FreeCAD operations
    +-----------------------------------+
 
-   integrations/base.py  ->  optional backends (integrations/taiga/)
+   integrations/base.py  ->  optional Taiga / future solver adapters
 ```
 
 ### Module responsibilities
@@ -64,9 +72,10 @@ bridge exceptions, while Taiga build failures return structured result data.
 | `src/freecad_mcp/config.py` | Validated configuration and environment settings. |
 | `src/freecad_mcp/tools/` | MCP tool definitions and typed input validation. |
 | `src/freecad_mcp/freecad_bridge/` | Communication with the FreeCAD application. |
-| `src/freecad_mcp/validation/` | Geometry and model correctness checks. |
+| `src/freecad_mcp/app/` | MCP-independent operation, backend, and inspection contracts/adapters. |
 | `src/freecad_mcp/integrations/base.py` | Dependency-free contract for optional planning backends. |
-| `src/freecad_mcp/integrations/taiga/` | Optional Taiga-S1 adapter, isolated subprocess runtime, and child runner (availability and scoring only; no execution). |
+| `src/freecad_mcp/integrations/taiga/` | Optional isolated Taiga status/scoring/build and guarded workflow. |
+| `Mod/freecad_mcp_gui/` | Native FreeCAD Workbench and panel; UI adapts inputs and dispatches shared operations. |
 
 ## Design principles
 
@@ -161,7 +170,7 @@ Deferred: a long-lived FreeCAD process with an in-memory document is not needed
 for version diagnostics. It will be reconsidered if document state must persist
 across calls without saving to disk.
 
-## Optional integrations (Milestones 5–6)
+## Optional integrations (Taiga and future solvers)
 
 `integrations/base.py` defines a small, dependency-free contract for optional
 backends:
@@ -212,11 +221,40 @@ Key properties:
   executes a command. `plan()` returns `RUNTIME_CONTEXT_REQUIRED` because a
   multi-step plan needs a live state/execution loop.
 
-This is not a PartDesign execution layer. The bridge still exposes only its
-fixed operations, and Taiga's worker/RPC and GUI socket runtime are not adopted.
-Live state capture, action enumeration, action execution, and a Method B build
-path remain deferred until a PartDesign boundary is designed and verified
-against real FreeCAD.
+The core MCP operation runner remains an explicit allowlist. Taiga's general
+interactive live-state/action enumeration and per-action typed execution loop
+are not provided by the guarded `workflow.py` skeleton. The separate
+`taiga_build` path does execute an Expert-driven build in an isolated FreeCAD
+child and validates the saved artifact; it is not interchangeable with a general
+interactive controller. See [`taiga-s1.md`](taiga-s1.md) and the canonical
+[product roadmap](../.kilo/ROADMAP.md).
+
+Future solver integrations (FEM/structural, thermal, CFD/fluid, piping and heat
+transfer) belong behind optional typed adapters with explicit runtime/version,
+input, output, provenance and failure contracts. They must not import into or
+couple the CAD core to a specific solver. Geometry validity and solver
+completion are not engineering certification.
+
+## Extension boundaries and invariants
+
+- Keep MCP and GUI as thin adapters over shared typed operation and inspection
+  contracts. The FreeCAD child runner owns native API calls.
+- Add operations only to the allowlist with explicit schemas, validation,
+  structured errors/results, recompute checks and relevant save/reopen tests.
+- Preserve document ownership, workspace locks, atomic persistence and rollback
+  for mutation paths. Do not introduce a second GUI lock or silently operate on
+  an arbitrary active document.
+- Report fresh, bounded model state after operations. Do not assume topology
+  indices remain stable after feature edits.
+- Native Assembly automation is research-gated: availability of the Assembly
+  module/types is not proof of a safe headless joint/solver API. Do not design a
+  public MCP/GUI abstraction until real FreeCAD 1.1.4 hierarchy, joint, solve,
+  recompute and save/reopen behavior has been demonstrated.
+- Preserve backward compatibility of public MCP schemas where practical; use
+  explicit schema/version changes when behavior must evolve.
+
+The single canonical forward roadmap, including the verified 1.1.4 capability
+matrix and milestone acceptance criteria, is [`.kilo/ROADMAP.md`](../.kilo/ROADMAP.md).
 
 ## Environment facts (recorded during Milestone 0)
 

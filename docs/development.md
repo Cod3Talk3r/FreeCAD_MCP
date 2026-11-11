@@ -38,6 +38,11 @@ Tests in this repository must run **without FreeCAD** unless explicitly marked.
 Tests that need a real FreeCAD instance are separated and clearly labelled, so a
 missing FreeCAD install never looks like a code failure.
 
+Mocked bridge tests prove our contracts and delegation only; they do not
+establish native FreeCAD API behavior. See
+[`PROJECT_MEMORY/TESTING.md`](../PROJECT_MEMORY/TESTING.md) and the canonical
+[product roadmap](../.kilo/ROADMAP.md) for evidence tiers and milestone criteria.
+
 ## FreeCAD discovery (Windows)
 
 FreeCAD ships its own interpreter; the system Python cannot import its modules.
@@ -54,6 +59,13 @@ Verify quickly:
 & "E:\Softwares\FreeCAD\bin\freecadcmd.exe" --version
 ```
 
+Capability research must use the actual installed FreeCAD version. Keep probes
+read-only with respect to user/project documents; use disposable documents and
+temporary paths. Record the exact version, module/type/property availability,
+recompute outcome, shape validity, save/reopen and parametric-edit outcome as
+separate evidence. A module import or object constructor is not proof that a
+feature works. Do not install/download workbenches or models as part of a probe.
+
 The bridge (Milestone 2) must locate FreeCAD via configuration and/or discovery,
 and must never hard-code this machine's absolute path.
 
@@ -69,8 +81,9 @@ and must never hard-code this machine's absolute path.
 ## Milestone checklist
 
 Development proceeds milestone by milestone; each milestone is committed only
-after its acceptance criteria are met, and the next one starts only after
-explicit approval.
+after its acceptance criteria are met. Historical M0-M11 labels are preserved;
+the forward roadmap continues at M12. Consult the canonical roadmap before
+proposing or implementing CAD work.
 
 - [x] M0 — Environment and project initialization
 - [x] M1 — Minimal MCP server (`server.py`, `config.py`, one diagnostic tool, tests)
@@ -79,9 +92,10 @@ explicit approval.
 - [x] M4 — Tank and tubular coil
 - [x] M5 — Taiga-S1 investigation and optional adapter contract
 - [x] M6 — Taiga-S1 isolated runtime integration
-- [ ] M7 — Method A vs Method B comparison framework (only a guarded loop
-  skeleton exists; no execution boundary, no comparison harness)
-- [ ] M8 — Documentation and release preparation
+- [x] M7 — Taiga build execution (isolated Expert-driven build); general Method A
+  vs Method B comparison remains future work
+- [ ] M8 — Product roadmap/documentation milestone; release preparation remains
+  separate
 
 ## Running and inspecting the server
 
@@ -182,6 +196,11 @@ uv run pytest tests/test_freecad_integration.py -v
 The bridge launches `freecadcmd` with `freecad_bridge/runner.py` and exchanges a
 JSON envelope per operation. It is local-only (no sockets), performs only the
 fixed operations listed in `runner.OPERATIONS`, and kills the child on timeout.
+
+The native GUI Workbench is in `Mod/freecad_mcp_gui/`. Verify GUI-only
+selection/view behavior in FreeCAD GUI; do not assume the console can import
+`FreeCADGui` or GUI modules. GUI model mutations should dispatch through the
+shared operation handler rather than implementing CAD algorithms in widgets.
 
 ## Optional Taiga-S1 runtime (M6)
 
@@ -368,9 +387,11 @@ network, or FreeCAD is needed:
 uv run pytest tests/test_taiga_workflow.py -q
 ```
 
-Before a comparison framework can be built, a verified PartDesign execution
-boundary and live state capture are required (see
-[`taiga-s1.md`](taiga-s1.md)).
+Before a fair Method A/Method B comparison can be built, verified live state
+capture, candidate action enumeration, typed execution and feedback are
+required (see [`taiga-s1.md`](taiga-s1.md) and the canonical
+[product roadmap](../.kilo/ROADMAP.md)). The isolated `taiga_build` path is an
+implemented build workflow, not proof of a general interactive controller.
 
 ### Planned comparison framework (not implemented)
 

@@ -3,8 +3,9 @@
 ## Latest verified state
 
 - HEAD: `44f994e` — feat(sketch): add geometry deletion (branch `feat/freecad-mcp`).
-- Working tree contains uncommitted sketch geometry tools and the verified
-  `sketch_edit_line` fix; do not stage or commit without explicit request.
+- Working tree contains uncommitted sketch geometry tools, the verified
+  `sketch_edit_line` fix, and the verified `sketch_edit_ellipse` orientation
+  fix; do not stage or commit without explicit request.
 - Phase 4 M1 (shared application backend layer) and M2 (document & model
   inspection) are committed.
 - Full test suite verified locally (Python 3.11.18): `uv run pytest -q -rs` →
@@ -33,13 +34,45 @@
     metadata side-car, and in-child post-save validation (PartDesign-aware
     `Body.Tip.Shape` inspection).
 
+## Product roadmap baseline (verified 2026-11-10)
+
+- Canonical forward plan: [`.kilo/ROADMAP.md`](../.kilo/ROADMAP.md). Historical
+  M0–M11 labels are preserved; planned roadmap continues at M12.
+- `src/freecad_mcp/freecad_bridge/runner.py` owns the explicit `OPERATIONS`
+  allowlist. It includes document/primitive/parameter/placement/recompute/
+  inspection/validation/save/export, tank/coil, Cut/Fuse/Common, Sketcher
+  geometry creation/edit/inspection, and the implemented PartDesign feature
+  families. Verify operation details in source and tests rather than relying on
+  this summary.
+- Native FreeCAD Workbench and dockable GUI panel exist in
+  `Mod/freecad_mcp_gui/`; panel calls `runner.handle_request` and shares
+  operation logic. It is not yet a mature tree/selection/assembly manager.
+- Taiga status/scoring are isolated and optional; `taiga_build` executes a
+  particular Expert-driven child build with atomic save and post-save validation.
+  General live state capture, action enumeration, typed interactive execution,
+  and fair Method A/B comparison remain incomplete.
+- Bounded disposable console probes on FreeCAD 1.1.4 Revision 20260928 verified
+  imports for Part, PartDesign, Sketcher, Assembly, Import, TechDraw, Path, Fem,
+  Mesh, Draft, Arch and Spreadsheet. A PartDesign Pad recomputed to a valid solid
+  and survived FCStd reopen plus parametric Length edit. A basic Sketcher
+  horizontal constraint probe remained under-constrained. ImportGui is not
+  available in console mode.
+- Assembly module and native workbench source are present, but headless creation
+  of `Assembly::Joint` by `Document.addObject` fails (`not a document object
+  type`). Native hierarchy/joint solving/persistence remain unverified; no MCP or
+  GUI Assembly abstraction should be planned before the roadmap's real-runtime
+  gate passes.
+- No production code was changed for the roadmap milestone. The worktree already
+  contained modified `CURRENT_STATE.md`, `DECISIONS.md`, `TESTING.md`, and
+  `CHANGELOG.md` before this task; preserve that unrelated work.
+
 ## Exposed MCP tools
 
 `server_info`, `freecad_status`, `create_document`, `create_box`,
 `create_cylinder`, `set_parameter`, `recompute`, `list_objects`,
 `inspect_object`, `validate_document`, `save_document`, `export_step`,
-`boolean_cut`, `tank`, `tubular_coil`, `taiga_status`, `taiga_score_actions`,
-`taiga_build`.
+`boolean_cut`, `tank`, `tubular_coil`, `partdesign_fillet`,
+`taiga_status`, `taiga_score_actions`, `taiga_build`.
 
 ## New files (Phase 1–3)
 
@@ -71,6 +104,104 @@
 
 ## Task-specific notes
 
+- 2026-11-08: real FreeCAD 1.1.4 Pocket integration tests pass for normal and
+  reversed cuts. Pad and Pocket must be added to their Body; adding a standalone
+  sketch changes Body.Tip, so the Pocket operation restores the prior Tip first.
+  Reopened documents verify feature links, solid validity, volume, and cut depth.
+  Windows FreeCAD can run from WSL; test workspaces must use Windows-visible paths.
+- 2026-11-09: M11-B `partdesign_chamfer` (native PartDesign::Chamfer) implemented
+  across runner.py, modeling.py, direct.py, panel.py, tests/test_runner.py,
+  tests/test_app_backends.py, tests/test_freecad_integration.py. Verified on real
+  FreeCAD 1.1.4: `PartDesign::Chamfer.Base` is `App::PropertyLinkSub` accepting
+  `(object, [subelement_names])` such as `(Pad, ["Edge7"])`. The Chamfer `Size`
+  property is set, `UseAllEdges = False`, `ChamferType` defaults to 'Equal distance'.
+  Selective edge chamfering produces a valid solid and advances Body.Tip to the
+  Chamfer. A native console probe using `(Pad, ['Edge7'])`, size 3 mm produced a
+  valid solid and made Chamfer the Body tip. The runner uses Base subelement names
+  rather than assigning detached edges to AddSubShape. Real-FreeCAD selective valid
+  chamfer tests pass for one edge (Edge7) and multiple edges ([7, 9]); invalid
+  inputs, save/reopen persistence, and failed-recompute disk rollback verified.
+- 2026-11-09: M11-C `partdesign_linear_pattern` (native PartDesign::LinearPattern)
+  implemented across runner.py, modeling.py, direct.py, panel.py,
+  tests/test_runner.py, tests/test_app_backends.py, tests/test_freecad_integration.py.
+  Verified on real FreeCAD 1.1.4: `PartDesign::LinearPattern` requires `BaseFeature`
+  (target feature), `Originals = [target]` (required — without it the shape is NULL),
+  `Direction` as a LinkSub reference `(object, [edge_subname])` to an edge parallel
+  to the requested principal axis, `Length` (positive float), and `Occurrences`
+  (int >= 2). `FreeCAD.Vector` (not `Part.Vector`) is used for axis direction
+  comparison. Edge direction is found by checking each edge's tangent against the
+  requested axis vector. All three axes (X_Axis, Y_Axis, Z_Axis) produce valid
+  solids; volume scales with occurrence count. Save/reopen persistence and
+  parametric editability verified. Real-FreeCAD tests pass for all three axes;
+  invalid inputs, save/reopen persistence, and failed-recompute disk rollback verified.
+- 2026-11-09: M11-D `partdesign_polar_pattern` (native PartDesign::PolarPattern)
+  implemented across runner.py, modeling.py, direct.py, panel.py,
+  tests/test_runner.py, tests/test_app_backends.py, tests/test_freecad_integration.py.
+  Verified on real FreeCAD 1.1.4: `PartDesign::PolarPattern` requires `BaseFeature`
+  (target feature), `Originals = [target]` (required — without it the shape is NULL),
+  `Axis` as `App::PropertyLinkSub` `(object, [edge_subname])` referencing an edge
+  parallel to the requested principal axis, `Angle` (finite positive float up to 360
+  degrees), and `Occurrences` (int >= 2). `FreeCAD.Vector` is used for axis direction
+  comparison; edge direction is found via `tangentAt(0.5)`. All three axes produce a
+  single valid solid; volume scales non-linearly with angle and occurrences
+  (360°×4 occurrences = 32000 for an 8000-volume base). Save/reopen persistence and
+  parametric editability verified. Real-FreeCAD tests pass for all three axes,
+  360° full rotation, 45° partial angle, invalid inputs, save/reopen persistence,
+  and failed-recompute disk rollback.
+- 2026-11-09: M11-E `partdesign_mirrored` (native PartDesign::Mirrored)
+  implemented across runner.py, modeling.py, direct.py, panel.py,
+  tests/test_runner.py, tests/test_app_backends.py, tests/test_freecad_integration.py.
+  Verified on real FreeCAD 1.1.4: `PartDesign::Mirrored` requires `BaseFeature`
+  (target feature), `Originals = [target]` (required — without it the shape is NULL),
+  `MirrorPlane` as `App::PropertyLinkSub` `(object, [face_subname])` referencing a
+  face whose normal is parallel to the requested principal plane normal
+  (XY_Plane → Z normal, XZ_Plane → Y normal, YZ_Plane → X normal). Face normal is
+  found via `normalAt(0.5, 0.5)`. All three planes produce a single valid solid
+  (volume = 2 × base volume). Save/reopen persistence and parametric editability
+  verified. Real-FreeCAD tests pass for all three planes, invalid inputs,
+  save/reopen persistence, and failed-recompute disk rollback.
+- 2026-11-09: M11-F `partdesign_thickness` (native PartDesign::Thickness)
+  implemented across runner.py, modeling.py, direct.py, panel.py,
+  tests/test_runner.py, tests/test_app_backends.py, tests/test_freecad_integration.py.
+  Verified on real FreeCAD 1.1.4: `PartDesign::Thickness.BaseFeature` links the
+  target feature, `Value` (Quantity, settable as float in mm) is the wall
+  thickness, `Reversed` (bool) controls the offset direction. FreeCAD 1.1.4
+  exposes only Mode='Skin' (no Inward/Outward enumeration). Faces to remove are
+  set via `Base` as a LinkSub `(object, [face_subname1, ...])` (e.g. `(Pad,
+  ['Face6'])`); 1-based face indices are converted to `FaceN` subnames. Without
+  removed faces the solid matches base volume (ineffective); with removed faces
+  volume reduces for inward direction and increases for outward direction (e.g.
+  24000 -> 10128 for one face inward). Volume validation is direction-aware:
+  inward requires result volume < base volume; outward only requires result
+  volume != base volume. `body.addObject()` must be called explicitly to advance
+  Body.Tip. Save/reopen persistence and parametric editability verified.
+  Real-FreeCAD tests pass for outward (volume increases) and inward (volume
+  decreases) directions, single and multiple removed faces, invalid face indices,
+  save/reopen persistence, and failed-recompute disk rollback.
+- 2026-11-09: M11-G `sketch_revolution` (native PartDesign::Revolution)
+  **VERIFIED FIX on real FreeCAD 1.1.4:**
+  `ReferenceAxis` now uses sketch edge subnames (`(sketch, ["EdgeN"])`) instead of
+  `(body.Origin, [axis])` or origin axis object references.
+
+  VERIFIED FreeCAD 1.1.4 behavior:
+  - Body.Origin.Group is EMPTY; axes are in Origin.OriginFeatures but referencing
+    them gives "out of allowed scope" or "Unsupported geometry type".
+  - OriginFeature X_Axis/Y_Axis: "Revolve axis intersects the sketch" → NULL.
+  - OriginFeature Z_Axis: "Axis must not be perpendicular to the sketch plane" → NULL.
+  - **Sketch edge subnames WORK:** (sketch, ["Edge1"]) → Axis=Vector(1,0,0), valid
+    solid, Volume=113097. (sketch, ["Edge2"]) → Axis=Vector(0,1,0), valid solid,
+    Volume=150796.
+
+  Added `_find_revolution_axis_edge()` (runner.py:5467) that finds sketch edges
+  parallel to the requested global axis, accounting for sketch Placement rotation.
+  X_Axis and Y_Axis are supported via sketch edges. Z_Axis cannot be supported on
+  XY-plane sketches (FreeCAD rejects perpendicular axis) → clear validation error.
+
+  All 14 mock tests (test_runner.py) and 9 backend tests (test_app_backends.py)
+  pass; full suites 479 passed. Real-FreeCAD integration tests updated:
+  X/Y axis tests expect success with tree assertion; Z_Axis test expects rejection;
+  invalid axis/angle/missing-sketch tests unchanged; parametric editability and
+  save/reopen tests use X_Axis.
 - Shared agent skills and persistent project memory were added under
   `.agents/skills/` and `PROJECT_MEMORY/`; root `AGENTS.md` routes agents to them.
 - `gen_traceback.py` is an unrelated untracked file; do not modify or stage it.
@@ -142,6 +273,32 @@
 - Tests: full suite 521 passed, 40 skipped (Linux); real FreeCAD integration
   `tests/test_freecad_integration.py -k "sketch_edit_line"` 2 passed against
   FreeCAD 1.1.4.
+
+### Sketch ellipse rotation API (VERIFIED 2026-11-07, FreeCAD 1.1.4)
+
+- `Part.Ellipse` has **no** `MajorDirection` or `MinorDirection` attributes.
+  The real orientation API is `AngleXU` (radians, read-only in practice),
+  `XAxis`/`YAxis` (read-only in practice), `Axis`, `Location`/`Center`.
+  Setting `AngleXU`, `XAxis`, or `YAxis` silently has no effect.
+- `Part.Ellipse.rotate(placement)` mutates the conic in place. It accepts exactly
+  one `Base.Placement` argument (not axis+angle, not Rotation). The placement's
+  rotation angle is interpreted in **degrees** in FreeCAD 1.1.4 (e.g.
+  `Rotation(Vector(0,0,1), 30)` → `AngleXU = pi/6`).
+- Absolute orientation: read current `AngleXU` (degrees), then rotate by
+  `rotation_deg - current_angle_deg` about the ellipse centre. Rotating by the
+  raw requested angle is relative and fails to reset/rotate predictably on
+  repeated edits.
+- Verified on real FreeCAD 1.1.4: repeated edits (30° → 0° → 45° → 360° →
+  -30°) set the requested absolute angle; centre/radii correct; geometry index,
+  geometry ID, construction state, unrelated geometry, and constraints
+  unchanged; orientation and construction state preserved after save/reopen.
+- `sketch_edit_ellipse` now uses mutate-and-reassign of `sketch.Geometry` plus
+  `Part.Ellipse.rotate(Placement(center, Rotation(+Z, delta_deg)))`; constraint
+  rejection behavior unchanged.
+- Tests: focused `tests/test_runner.py -k "sketch_edit_ellipse or inspect_sketch"`
+  26 passed; real FreeCAD integration
+  `tests/test_freecad_integration.py -k "sketch_edit_ellipse"` 2 passed
+  (Windows `freecadcmd.exe` launched from WSL).
 
 ### Phase 0 verification (2026-11-03) — read-only experiments
 All run against real FreeCAD 1.1.4 embedded Python and Taiga upstream at

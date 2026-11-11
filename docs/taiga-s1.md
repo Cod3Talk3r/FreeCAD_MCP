@@ -1,13 +1,14 @@
-# Taiga-S1 integration (Milestones 5–6)
+# Taiga-S1 integration (historical M5–M7 work)
 
 This note records what was verified about **Taiga-S1**, how it relates to this
 project, and the isolated runtime integrated in Milestone 6.
 
-**Decision:** adopt Taiga-S1 behind an optional, import-safe adapter and a
-one-shot subprocess runtime for availability reporting and next-action scoring.
-**Do not** adopt its persistent worker, sockets, or command execution. A full
-Method B execution path remains deferred until the missing PartDesign layer is
-designed and verified against real FreeCAD.
+**Decision:** Taiga-S1 is optional and isolated. The project has isolated status,
+scoring, and an Expert-driven `taiga_build` FreeCAD child workflow. A general
+interactive Method B loop that captures live state, enumerates actions, executes
+each selected action through typed MCP operations and feeds back fresh state
+remains deferred. Do not adopt Taiga's persistent worker or socket server as a
+shortcut around the project's explicit operation and process boundaries.
 
 ## Upstream sources
 
@@ -192,23 +193,26 @@ local directory; this project never downloads them.
 
 Both tools remain usable when Taiga is not installed. Method A is unaffected.
 
-## What is out of scope
+## General interactive Method B: not implemented
 
 The following remain **not implemented**:
 
-- a PartDesign command layer in `freecad_bridge/runner.py`;
 - Taiga's worker/RPC client or GUI socket server;
 - live FreeCAD state capture in a form Taiga accepts;
 - enumerating valid actions from the bridge;
 - applying model-produced commands and recomputing;
-- end-to-end Method B builds and Method A/Method B comparison;
+- general interactive state/action/execution-loop end-to-end tests and a fair
+  Method A/Method B comparison;
 - converting scores into a fabricated multi-step plan.
 
-M7 (comparison framework) must not assume these exist. A later milestone must
-first define the PartDesign execution boundary and verify it against real
-FreeCAD.
+The implemented `taiga_build` is a separate, isolated Expert-driven goal build:
+its child performs feasibility and execution, atomically saves an FCStd artifact,
+writes metadata, and reopens/validates the saved artifact. This proves that
+specific build path, not general interactive live-state control or a fair Method
+A/B comparison. The forward roadmap starts at M12; see
+[`.kilo/ROADMAP.md`](../.kilo/ROADMAP.md).
 
-## Milestone 7 skeleton (`integrations/taiga/workflow.py`)
+## Guarded iterative skeleton (`integrations/taiga/workflow.py`)
 
 `run_iterative_modeling` scores actions through `TaigaBackend`, selects the
 highest-probability action, and terminates on `Done` before anything is

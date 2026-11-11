@@ -11,21 +11,24 @@ inside FreeCAD.
 
 ## Two execution strategies
 
-This project is structured so that two independent approaches can be built and
-fairly compared:
+This project supports two independent approaches, with direct MCP remaining
+usable without the optional Taiga integration:
 
 - **Method A — Direct MCP (primary).** The agent uses this project's MCP tools to
   drive FreeCAD directly. This path must work on its own and never depends on the
   optional integration.
-- **Method B — Taiga-assisted MCP (optional).** An isolated adapter for
-  *Taiga-S1*, wired in behind a clearly defined interface. Taiga's real
-  capabilities and interfaces must be verified before any adapter code exists,
-  and the project must keep working when Taiga is absent, disabled, or
-  incompatible.
+- **Method B — Taiga-assisted CAD automation (optional).** Taiga-S1 runs behind
+  an isolated integration boundary. The existing `taiga_build` executes an
+  Expert-driven build in a child process; general live state/action iteration
+  and fair Method A/B comparison remain future work.
+
+The native FreeCAD GUI Workbench and dockable panel are also a permanent product
+interface. They reuse the shared operation dispatcher rather than maintaining a
+separate CAD implementation.
 
 ## Status
 
-Incremental development. Current progress:
+Incremental development. Historical implementation milestones and current status:
 
 | Milestone | Description | Status |
 | --------- | ----------- | ------ |
@@ -36,32 +39,24 @@ Incremental development. Current progress:
 | 4 | Configurable tank and tubular coil | Done |
 | 5 | Taiga-S1 investigation and optional adapter contract | Done |
 | 6 | Taiga-S1 isolated runtime integration | Done |
-| 7 | Method A vs Method B comparison framework | Planned |
-| 8 | Documentation and release preparation | Planned |
+| 7 | Guarded Taiga workflow skeleton and build path | Implemented with limits |
+| 8 | Product architecture and roadmap documentation | In progress |
 
-The MCP server, its diagnostic tool, and the local FreeCAD bridge (connection and
-version diagnostics) are implemented and tested. Milestone 3 adds direct
-modeling tools (create_box, create_cylinder, set_parameter, recompute,
-list_objects, inspect_object, validate_document, save_document, export_step,
-boolean_cut),
-and Milestone 4 adds tank and tubular coil geometry creation using Part::Box,
-Part::Cylinder, Part::Helix and Part::Pipe primitives through the persistent
-parametric modeling system.
+The current operation surface also includes Boolean Cut/Fuse/Common, document
+and object inspection, placement editing, Sketcher geometry creation/editing,
+PartDesign Pad/Pocket/Groove/Revolution/Fillet/Chamfer/pattern/mirror/thickness,
+and the native FreeCAD GUI panel. See the canonical
+[`product roadmap`](.kilo/ROADMAP.md) for verified capability evidence, current
+gaps, target architecture, milestone dependencies, and acceptance criteria.
 
-Milestone 5 records the verified Taiga-S1 investigation and adds an optional,
-import-safe adapter contract. The adapter reports availability and scores
-candidate commands against a supplied state, but it does not generate plans or
-execute model-produced commands.
+The Taiga integration reports availability, scores candidate actions, and
+provides an isolated Expert-driven `taiga_build` workflow. It does not yet
+provide a general live interactive controller that captures state, enumerates
+actions, executes each selected action and feeds back fresh state.
 
-Milestone 6 adds an isolated, one-shot Taiga-S1 subprocess runtime. Taiga and
-PyTorch are imported only inside a child process running in an explicitly
-configured interpreter, and models are loaded only from a validated local
-directory. Two MCP tools are available: `taiga_status` and
-`taiga_score_actions`. Neither loads weights during status nor executes any
-action. When Taiga is absent, both return structured unavailable results and
-Method A is unaffected. Live FreeCAD state capture, action enumeration, and
-action execution remain out of scope. See
-[`docs/taiga-s1.md`](docs/taiga-s1.md).
+Taiga and PyTorch are imported only in explicitly configured child runtimes;
+model paths are local and no model is downloaded implicitly. When Taiga is
+absent, Method A remains unaffected. See [`docs/taiga-s1.md`](docs/taiga-s1.md).
 
 ## Requirements
 
@@ -83,7 +78,8 @@ uv run freecad-mcp # run the MCP server over stdio
 See [`docs/development.md`](docs/development.md) for environment setup, FreeCAD
 discovery, and the development workflow, and
 [`docs/architecture.md`](docs/architecture.md) for the module layout and design
-principles.
+principles. The detailed future plan is maintained only in
+[`.kilo/ROADMAP.md`](.kilo/ROADMAP.md).
 
 ## Optional Taiga-S1 runtime
 

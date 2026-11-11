@@ -2,6 +2,15 @@
 
 ## Current task
 
+- Product architecture research and canonical forward roadmap documented in
+  `.kilo/ROADMAP.md`, including FreeCAD 1.1.4 capability evidence, explicit
+  Assembly research gate, shared GUI/MCP boundary, solver isolation, and M12+
+  acceptance-driven milestones. Documentation only; no CAD operation code added.
+- Sketch ellipse editing (`sketch_edit_ellipse`) orientation fixed against the
+  verified FreeCAD 1.1.4 API: no `MajorDirection`/`MinorDirection`; use in-place
+  `Part.Ellipse.rotate(Placement(...))` with an absolute angle delta. Focused
+  unit and real FreeCAD integration tests pass. Changes are in the working
+  tree, not committed.
 - Sketch line editing (`sketch_edit_line`) fixed against the verified FreeCAD
   1.1.4 API: no `setGeometry`/`setLine`; use mutate-and-reassign of the
   `Geometry` property. Real FreeCAD integration tests pass. Changes are in the
