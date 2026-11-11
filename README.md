@@ -1,139 +1,254 @@
-# freecad-mcp
+# FreeCAD MCP
 
-Drive [FreeCAD](https://www.freecad.org/) parametric 3D modeling from an AI coding
-agent (for example [OpenCode](https://opencode.ai/)) through the
-[Model Context Protocol](https://modelcontextprotocol.io/) (MCP).
+**Control FreeCAD parametric 3D modeling through AI agents and the Model Context Protocol (MCP).**
 
-The agent talks to a local MCP server, which talks to a real FreeCAD instance
-through a small, explicit bridge. The goal is to let an agent **create, inspect,
-validate, and modify** parametric models — not to run arbitrary generated Python
-inside FreeCAD.
+FreeCAD MCP is an open-source project that connects AI coding agents to [FreeCAD](https://www.freecad.org/) through the [Model Context Protocol](https://modelcontextprotocol.io/).
 
-## Two execution strategies
+It provides a controlled interface for creating, inspecting, validating, and modifying parametric 3D models using FreeCAD's native modeling capabilities.
 
-This project supports two independent approaches, with direct MCP remaining
-usable without the optional Taiga integration:
+The project is designed for engineering-oriented CAD workflows, with an emphasis on reliable operations, persistent documents, reusable modeling features, and integration with external AI agents.
 
-- **Method A — Direct MCP (primary).** The agent uses this project's MCP tools to
-  drive FreeCAD directly. This path must work on its own and never depends on the
-  optional integration.
-- **Method B — Taiga-assisted CAD automation (optional).** Taiga-S1 runs behind
-  an isolated integration boundary. The existing `taiga_build` executes an
-  Expert-driven build in a child process; general live state/action iteration
-  and fair Method A/B comparison remain future work.
+Instead of executing arbitrary AI-generated Python code inside FreeCAD, the project uses an explicit operation interface and a dedicated FreeCAD process to execute supported CAD operations.
 
-The native FreeCAD GUI Workbench and dockable panel are also a permanent product
-interface. They reuse the shared operation dispatcher rather than maintaining a
-separate CAD implementation.
+## Features
 
-## Status
+### Parametric modeling
 
-Incremental development. Historical implementation milestones and current status:
+The current modeling capabilities include:
 
-| Milestone | Description | Status |
-| --------- | ----------- | ------ |
-| 0 | Environment inspection and project initialization | Done |
-| 1 | Minimal MCP server with a diagnostic tool | Done |
-| 2 | FreeCAD bridge (connection + version diagnostics) | Done |
-| 3 | Direct modeling tools (box, cylinder, validate, export STEP) | Done |
-| 4 | Configurable tank and tubular coil | Done |
-| 5 | Taiga-S1 investigation and optional adapter contract | Done |
-| 6 | Taiga-S1 isolated runtime integration | Done |
-| 7 | Guarded Taiga workflow skeleton and build path | Implemented with limits |
-| 8 | Product architecture and roadmap documentation | In progress |
+- **Part primitives:** Boxes, cylinders, tanks, and tubular coils.
+- **Placement editing:** Position objects along the X, Y, and Z axes.
+- **Boolean operations:** Cut, Fuse, and Common.
+- **Sketcher geometry:** Lines, rectangles, circles, triangles, ellipses, regular polygons, and custom polygons.
+- **Sketch editing:** Inspect, add, modify, and delete supported sketch geometry.
+- **PartDesign features:**
+  - Pad and Pocket
+  - Revolution and Groove
+  - Fillet and Chamfer
+  - Linear and Polar Patterns
+  - Mirrored
+  - Thickness
 
-The current operation surface also includes Boolean Cut/Fuse/Common, document
-and object inspection, placement editing, Sketcher geometry creation/editing,
-PartDesign Pad/Pocket/Groove/Revolution/Fillet/Chamfer/pattern/mirror/thickness,
-and the native FreeCAD GUI panel. See the canonical
-[`product roadmap`](docs/ROADMAP.md) for verified capability evidence, current
-gaps, target architecture, milestone dependencies, and acceptance criteria.
+These operations use native FreeCAD objects and features rather than approximating the modeling process with unrelated geometry.
 
-The Taiga integration reports availability, scores candidate actions, and
-provides an isolated Expert-driven `taiga_build` workflow. It does not yet
-provide a general live interactive controller that captures state, enumerates
-actions, executes each selected action and feeds back fresh state.
+### Document and object management
 
-Taiga and PyTorch are imported only in explicitly configured child runtimes;
-model paths are local and no model is downloaded implicitly. When Taiga is
-absent, Method A remains unaffected. See [`docs/taiga-s1.md`](docs/taiga-s1.md).
+The project provides operations for:
+
+- Creating and managing FreeCAD documents.
+- Listing and inspecting document objects.
+- Editing supported object parameters and placements.
+- Recomputing and validating models.
+- Saving and exporting models.
+- Deleting objects through the controlled operation interface.
+
+Document persistence, validation, and safe execution are central parts of the architecture.
+
+### Native FreeCAD GUI Workbench
+
+FreeCAD MCP also provides a native FreeCAD GUI Workbench with a dockable panel.
+
+The GUI provides access to supported modeling and document operations without requiring an external AI agent.
+
+Both the MCP interface and GUI Workbench use the same shared operation layer, avoiding separate implementations of CAD logic.
+
+See the development documentation for setup and usage details.
+
+## Architecture
+
+The project supports two independent execution strategies.
+
+### Method A — Direct MCP (primary)
+
+An external AI agent communicates directly with the FreeCAD MCP server.
+
+The server exposes typed tools and routes supported operations through the shared application and FreeCAD bridge layers.
+
+This is the primary execution strategy and must remain fully usable without Taiga-S1.
+
+### Method B — Taiga-assisted CAD automation (optional)
+
+[Taiga-S1](https://github.com/shhivv/biome-s1) is integrated as an optional component behind an isolated integration boundary.
+
+The existing `taiga_build` workflow supports an Expert-driven build process in a separate child runtime.
+
+A general interactive controller that continuously observes CAD state, selects actions, executes them, and evaluates the resulting state remains future work.
+
+The two strategies are intended to be independently usable and will be evaluated separately as the Taiga integration develops.
+
+### Execution and safety
+
+The architecture follows several principles:
+
+- The MCP parent process does not import FreeCAD.
+- CAD operations execute in a dedicated FreeCAD child process.
+- Supported operations are explicitly registered and allowlisted.
+- Arbitrary generated Python execution inside FreeCAD is not exposed.
+- MCP and GUI interfaces reuse shared operation logic.
+- Taiga and its machine-learning dependencies remain optional and isolated.
+
+For more information, see [Architecture](docs/architecture.md).
+
+## Project Status
+
+Development is incremental and organized into milestones.
+
+Historical milestones M0–M11 are retained for project history. M12 is the latest completed milestone.
+
+The project roadmap contains the detailed implementation status, verified FreeCAD capabilities, outstanding gaps, architectural direction, dependencies, and acceptance criteria.
+
+See the **[Project Roadmap](docs/ROADMAP.md)** for the canonical and up-to-date project plan.
 
 ## Requirements
 
-- Python 3.10+ (development uses a uv-managed CPython 3.14)
-- [uv](https://docs.astral.sh/uv/) for dependency management
-- Git
-- FreeCAD (developed against FreeCAD 1.1.x) — required only for the bridge and
-  modeling milestones, not for the MCP server skeleton
+- Python 3.10 or later.
+- [uv](https://docs.astral.sh/uv/) for Python dependency and environment management.
+- Git.
+- [FreeCAD](https://www.freecad.org/) 1.1.x for CAD operations and GUI integration.
 
-## Quick start (development)
+FreeCAD is not required for FreeCAD-independent MCP server tests, schema validation, or other tests that do not execute native CAD operations.
 
-```bash
-# Install uv if missing: https://docs.astral.sh/uv/getting-started/installation/
-uv sync            # create the environment and install (locked) dependencies
-uv run pytest      # run the test suite
-uv run freecad-mcp # run the MCP server over stdio
-```
+The project is developed and verified primarily against FreeCAD 1.1.4. Other versions may require additional compatibility testing.
 
-See [`docs/development.md`](docs/development.md) for environment setup, FreeCAD
-discovery, and the development workflow, and
-[`docs/architecture.md`](docs/architecture.md) for the module layout and design
-principles. The detailed future plan is maintained only in
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+## Quick Start
 
-## Optional Taiga-S1 runtime
-
-The Taiga tools are optional and off by default. Taiga, PyTorch, and model
-weights are not project dependencies. To enable scoring in a separate
-environment, configure:
-
-- `FREECAD_MCP_TAIGA_PYTHON` — explicit interpreter containing Taiga-S1;
-- `FREECAD_MCP_TAIGA_MODEL` — local directory with `config.json` and
-  `model.safetensors`;
-- `FREECAD_MCP_TAIGA_TIMEOUT_SECONDS` — default `120`;
-- `FREECAD_MCP_TAIGA_DEVICE` — default `cpu`.
-
-The server never falls back to another interpreter and never downloads a model.
-`taiga_status` checks availability without loading weights; `taiga_score_actions`
-scores supplied action ids without executing them. Both return structured
-unavailable results when Taiga is not configured. See
-[`docs/taiga-s1.md`](docs/taiga-s1.md).
-
-## Repository layout
+### 1. Clone the repository
 
 ```bash
-src/freecad_mcp/        # the Python package
-    __init__.py         # version
-    server.py           # MCP server construction + stdio entry point
-    config.py           # environment-based settings
-    tools/              # MCP tool definitions (diagnostics, FreeCAD, modeling, Taiga)
-    freecad_bridge/     # local child-process bridge to FreeCAD
-        runner.py       # runs *inside* FreeCAD; fixed, explicit operations
-    integrations/       # optional backend contract + Taiga-S1 adapter/runtime
-        taiga/runner.py # standalone Taiga child runner; lazily imports Taiga/Torch
-docs/                   # architecture and development notes
-tests/                  # FreeCAD-independent tests + FreeCAD-gated integration tests
+git clone https://github.com/Cod3Talk3r/FreeCAD_MCP
+cd FreeCAD_MCP
 ```
 
-The optional `integrations/` package exists as of Milestone 5; `validation/`
-will be added when the milestone that needs it lands.
+### 2. Install dependencies
+
+```bash
+uv sync
+```
+
+### 3. Configure FreeCAD
+
+Make sure FreeCAD is installed and its executable can be discovered by the project.
+
+If automatic discovery is not suitable for your environment, configure the FreeCAD executable using the project's supported environment settings.
+
+See [Development Guide](docs/development.md) for platform-specific setup and configuration.
+
+### 4. Start the MCP server
+
+```bash
+uv run freecad-mcp
+```
+
+The server communicates over **stdio**, so it should normally be launched by an MCP-compatible client rather than used as a standalone interactive terminal application.
+
+Configure your preferred MCP client to launch the command from the project environment.
+
+The exact client configuration depends on the agent and operating system.
+
+For additional setup instructions, see:
+
+- [Development Guide](docs/development.md)
+- [Architecture](docs/architecture.md)
+
+## FreeCAD GUI Workbench
+
+The project includes a native FreeCAD Workbench and dockable panel under `Mod/freecad_mcp_gui/`.
+
+The GUI provides direct access to supported operations, including modeling, inspection, editing, recomputation, validation, and object deletion.
+
+It uses the same shared operation dispatcher as the MCP server.
+
+See the development documentation for installation and usage instructions.
+
+## Optional Taiga-S1 Integration
+
+Taiga-S1 is optional and disabled by default.
+
+Taiga, PyTorch, and model weights are not required dependencies of the main project.
+
+To enable the optional integration, configure a separate environment containing Taiga-S1 and set the following environment variables:
+
+| Variable | Description |
+|---|---|
+| `FREECAD_MCP_TAIGA_PYTHON` | Explicit Python interpreter containing Taiga-S1 |
+| `FREECAD_MCP_TAIGA_MODEL` | Local model directory containing `config.json` and `model.safetensors` |
+| `FREECAD_MCP_TAIGA_TIMEOUT_SECONDS` | Runtime timeout in seconds; defaults to `120` |
+| `FREECAD_MCP_TAIGA_DEVICE` | Inference device; defaults to `cpu` |
+
+The integration does not automatically download models or fall back to another Python interpreter.
+
+The current tools include:
+
+- `taiga_status` — checks whether the optional runtime is available without loading model weights.
+- `taiga_score_actions` — scores supplied action identifiers without executing them.
+
+The existing `taiga_build` workflow provides an isolated Expert-driven build path.
+
+Method A remains unaffected when Taiga-S1 is not installed or configured.
+
+See [Taiga-S1 Integration](docs/taiga-s1.md) for details.
+
+## Repository Layout
+
+```text
+FreeCAD_MCP/
+├── src/
+│   └── freecad_mcp/
+│       ├── server.py
+│       ├── config.py
+│       ├── tools/
+│       ├── freecad_bridge/
+│       ├── app/
+│       └── integrations/
+│           └── taiga/
+├── Mod/
+│   └── freecad_mcp_gui/
+├── tests/
+├── docs/
+│   ├── ROADMAP.md
+│   ├── architecture.md
+│   ├── development.md
+│   └── taiga-s1.md
+├── PROJECT_MEMORY/
+├── pyproject.toml
+├── uv.lock
+├── AGENTS.md
+└── README.md
+```
+
+The main directories are:
+
+- `src/freecad_mcp/` — MCP server, tools, shared application logic, FreeCAD bridge, and optional integrations.
+- `Mod/freecad_mcp_gui/` — native FreeCAD GUI Workbench and dockable panel.
+- `tests/` — unit, schema, mocked bridge, and FreeCAD-dependent integration tests.
+- `docs/` — user-facing and technical documentation, including the canonical roadmap.
+- `PROJECT_MEMORY/` — project knowledge, architectural decisions, testing evidence, and development history.
+
+## Development
+
+For development setup, environment configuration, testing, and contribution workflow, see:
+
+- [Development Guide](docs/development.md)
+- [Architecture](docs/architecture.md)
+- [Project Roadmap](docs/ROADMAP.md)
+- [Taiga-S1 Integration](docs/taiga-s1.md)
+
+The project uses focused tests during incremental development. Native FreeCAD integration tests should be run against the actual supported FreeCAD installation when validating CAD behavior.
 
 ## AI-Assisted Development
 
-OpenCode and ChatGPT were used as AI-assisted development tools throughout this project.
+AI-assisted tools such as OpenCode, Kilo, and ChatGPT have been used for code exploration, implementation, debugging, testing, and architectural discussions.
 
-OpenCode assisted with code exploration, implementation, debugging, and testing, while ChatGPT was used for technical discussions, architectural decisions, troubleshooting, documentation, and development guidance.
-
-AI-generated suggestions and code were reviewed and tested as part of the development workflow. The project maintainer remains responsible for the project's code, technical decisions, and releases.
+AI-generated suggestions and code are reviewed and tested as part of the development process. The project maintainer remains responsible for the code, technical decisions, and releases.
 
 ## License
 
-Copyright (C) 2026 Mohammad Reza Asadi
+Copyright (C) 2026 Mohammad Reza Asadi.
 
 This project is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**.
 
-You are free to use, study, modify, and redistribute this software under the terms of the license. If you distribute this software or modified versions of it, you must comply with the applicable requirements of the GPL-3.0 license.
+You are free to use, study, modify, and redistribute this software under the terms of the GPL-3.0 license, subject to its conditions.
 
-See the [LICENSE](LICENSE) file for the full license text.
+See the [LICENSE](LICENSE) file for the complete license text.
 
-This project is an independent open-source project and is not affiliated with, endorsed by, or sponsored by the FreeCAD project.
+This is an independent open-source project and is not affiliated with, endorsed by, or sponsored by the FreeCAD project.
