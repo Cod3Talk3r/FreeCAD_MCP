@@ -210,7 +210,7 @@ its child performs feasibility and execution, atomically saves an FCStd artifact
 writes metadata, and reopens/validates the saved artifact. This proves that
 specific build path, not general interactive live-state control or a fair Method
 A/B comparison. The forward roadmap starts at M12; see
-[`.kilo/ROADMAP.md`](../.kilo/ROADMAP.md).
+[`docs/ROADMAP.md`](../docs/ROADMAP.md).
 
 ## Guarded iterative skeleton (`integrations/taiga/workflow.py`)
 

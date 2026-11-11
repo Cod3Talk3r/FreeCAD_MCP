@@ -13,7 +13,7 @@ code and tests are authoritative; memory only records verified facts.
 | `DECISIONS.md` | Task involves a design or implementation choice | Why past decisions were made |
 | `TESTING.md` | Before or after running / changing tests | Commands, verified results, testing limitations |
 | `CHANGELOG.md` | Need historical context or milestone status | Meaningful milestones and commits |
-| `.kilo/ROADMAP.md` | Planning CAD capability work | Canonical forward roadmap, verified FreeCAD 1.1.4 capability evidence, architecture and acceptance criteria |
+| `docs/ROADMAP.md` | Planning CAD capability work | Canonical forward roadmap, verified FreeCAD 1.1.4 capability evidence, architecture and acceptance criteria |
 
 ## Rules
 

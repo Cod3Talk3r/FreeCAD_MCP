@@ -143,7 +143,7 @@ Add new dated decisions here; do not record trivial implementation details.
   Error-handling (invalid axis, angle, missing sketch) works on real FreeCAD;
   successful revolution creation is blocked by this API limitation.
 
-- **D20 — Canonical product roadmap (2026-11-10):** Maintain `.kilo/ROADMAP.md`
+- **D20 — Canonical product roadmap (2026-11-10):** Maintain `docs/ROADMAP.md`
   as the single forward product plan. Preserve historical M0-M11 and continue
   with sequential M12+ milestones. Rationale: one discoverable plan without
   conflicting milestone namespaces or duplicated roadmap copies.

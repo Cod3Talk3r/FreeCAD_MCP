@@ -227,7 +227,7 @@ are not provided by the guarded `workflow.py` skeleton. The separate
 `taiga_build` path does execute an Expert-driven build in an isolated FreeCAD
 child and validates the saved artifact; it is not interchangeable with a general
 interactive controller. See [`taiga-s1.md`](taiga-s1.md) and the canonical
-[product roadmap](../.kilo/ROADMAP.md).
+[product roadmap](../docs/ROADMAP.md).
 
 Future solver integrations (FEM/structural, thermal, CFD/fluid, piping and heat
 transfer) belong behind optional typed adapters with explicit runtime/version,
@@ -254,7 +254,7 @@ completion are not engineering certification.
   explicit schema/version changes when behavior must evolve.
 
 The single canonical forward roadmap, including the verified 1.1.4 capability
-matrix and milestone acceptance criteria, is [`.kilo/ROADMAP.md`](../.kilo/ROADMAP.md).
+matrix and milestone acceptance criteria, is [`docs/ROADMAP.md`](../docs/ROADMAP.md).
 
 ## Environment facts (recorded during Milestone 0)
 

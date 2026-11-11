@@ -46,7 +46,7 @@ The current operation surface also includes Boolean Cut/Fuse/Common, document
 and object inspection, placement editing, Sketcher geometry creation/editing,
 PartDesign Pad/Pocket/Groove/Revolution/Fillet/Chamfer/pattern/mirror/thickness,
 and the native FreeCAD GUI panel. See the canonical
-[`product roadmap`](.kilo/ROADMAP.md) for verified capability evidence, current
+[`product roadmap`](docs/ROADMAP.md) for verified capability evidence, current
 gaps, target architecture, milestone dependencies, and acceptance criteria.
 
 The Taiga integration reports availability, scores candidate actions, and
@@ -79,7 +79,7 @@ See [`docs/development.md`](docs/development.md) for environment setup, FreeCAD
 discovery, and the development workflow, and
 [`docs/architecture.md`](docs/architecture.md) for the module layout and design
 principles. The detailed future plan is maintained only in
-[`.kilo/ROADMAP.md`](.kilo/ROADMAP.md).
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Optional Taiga-S1 runtime
 

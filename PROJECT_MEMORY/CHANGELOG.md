@@ -3,7 +3,7 @@
 ## Current task
 
 - Product architecture research and canonical forward roadmap documented in
-  `.kilo/ROADMAP.md`, including FreeCAD 1.1.4 capability evidence, explicit
+  `docs/ROADMAP.md`, including FreeCAD 1.1.4 capability evidence, explicit
   Assembly research gate, shared GUI/MCP boundary, solver isolation, and M12+
   acceptance-driven milestones. Documentation only; no CAD operation code added.
 - Sketch ellipse editing (`sketch_edit_ellipse`) orientation fixed against the

@@ -28,7 +28,7 @@
 ## Source of Truth
 
 - Source code and tests override potentially outdated project memory.
-- Use `.kilo/ROADMAP.md` as the canonical forward product roadmap; update it only
+- Use `docs/ROADMAP.md` as the canonical forward product roadmap; update it only
   for verified research or explicitly approved planning changes.
 
 ## After Completing Work

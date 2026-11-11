@@ -41,7 +41,7 @@ missing FreeCAD install never looks like a code failure.
 Mocked bridge tests prove our contracts and delegation only; they do not
 establish native FreeCAD API behavior. See
 [`PROJECT_MEMORY/TESTING.md`](../PROJECT_MEMORY/TESTING.md) and the canonical
-[product roadmap](../.kilo/ROADMAP.md) for evidence tiers and milestone criteria.
+[product roadmap](../docs/ROADMAP.md) for evidence tiers and milestone criteria.
 
 ## FreeCAD discovery (Windows)
 
@@ -94,8 +94,9 @@ proposing or implementing CAD work.
 - [x] M6 — Taiga-S1 isolated runtime integration
 - [x] M7 — Taiga build execution (isolated Expert-driven build); general Method A
   vs Method B comparison remains future work
-- [ ] M8 — Product roadmap/documentation milestone; release preparation remains
+- [x] M8 — Product roadmap/documentation milestone; release preparation remains
   separate
+- [x] M12 — Capability evidence and tool discoverability (bounded)
 
 ## Running and inspecting the server
 
@@ -390,7 +391,7 @@ uv run pytest tests/test_taiga_workflow.py -q
 Before a fair Method A/Method B comparison can be built, verified live state
 capture, candidate action enumeration, typed execution and feedback are
 required (see [`taiga-s1.md`](taiga-s1.md) and the canonical
-[product roadmap](../.kilo/ROADMAP.md)). The isolated `taiga_build` path is an
+[product roadmap](../docs/ROADMAP.md)). The isolated `taiga_build` path is an
 implemented build workflow, not proof of a general interactive controller.
 
 ### Planned comparison framework (not implemented)
