@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from freecad_mcp.freecad_bridge import runner
+from freecad_mcp.freecad_bridge import workspace as ws_mod
 from freecad_mcp.freecad_bridge.workspace import Workspace
 
 
@@ -764,6 +765,210 @@ def test_op_delete_object_empty_name_returns_error() -> None:
     assert result["ok"] is False
     assert result["op"] == "delete_object"
     assert "object_name" in result["error"].lower()
+
+
+def _make_save_doc(doc_id: str) -> _FakeDoc:
+    """Create a document with a box for save/recompute tests."""
+    doc = _FakeDoc()
+    doc.Name = doc_id
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    return doc
+
+
+def test_op_save_document_success_increments_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful save_document atomically saves, bumps revision, writes meta."""
+    doc = _make_save_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    _install_fake_freecad(monkeypatch, doc)
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_save_document(
+        {"document_id": "mydoc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "save_document"
+    assert result["result"]["document_id"] == "mydoc"
+    assert result["result"]["saved_path"] == str(fcstd_path)
+    meta_path = tmp_path / "mydoc.meta.json"
+    assert meta_path.is_file()
+    meta = json.loads(meta_path.read_text())
+    assert meta["revision"] == 1
+    assert meta["last_saved_at"] is not None
+    assert fcstd_path.is_file()
+    assert not (tmp_path / "mydoc.lock").exists()
+
+
+def test_op_save_document_lock_failure_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_document returns error when lock cannot be acquired."""
+    doc = _make_save_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    _install_fake_freecad(monkeypatch, doc)
+
+    lock_path = tmp_path / "mydoc.lock"
+    ws_mod.try_acquire_lock(lock_path, pid=999)
+
+    result = runner._op_save_document(
+        {"document_id": "mydoc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "save_document"
+    assert "lock" in result["error"].lower()
+
+
+def test_op_save_document_open_failure_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_document returns error when document cannot be opened."""
+    wks = Workspace(root=tmp_path)
+    target = wks.document_path("mydoc")
+    target.write_bytes(b"corrupt")
+    fc = _FakeFreeCad(open_error=OSError("Invalid project file"))
+
+    result = runner._op_save_document(
+        {"document_id": "mydoc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "save_document"
+    assert "FreeCAD error" in result["error"]
+
+
+def test_op_recompute_success_returns_meta_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful recompute runs doc.recompute() and returns meta_before."""
+    doc = _make_save_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    _install_fake_freecad(monkeypatch, doc)
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_recompute(
+        {"document_id": "mydoc", "workspace": str(tmp_path)}
+    )
+
+    # _op_recompute returns the raw result dict (no "ok" key directly);
+    # the envelope wrapper adds "ok": True via handle_request.
+    assert result["document_id"] == "mydoc"
+    assert "meta_before" in result
+    assert result["meta_before"]["revision"] == 0
+
+
+def test_op_recompute_lock_failure_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute returns error when lock cannot be acquired."""
+    doc = _make_save_doc("mydoc")
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    _install_fake_freecad(monkeypatch, doc)
+
+    lock_path = tmp_path / "mydoc.lock"
+    ws_mod.try_acquire_lock(lock_path, pid=999)
+
+    result = runner._op_recompute(
+        {"document_id": "mydoc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "recompute"
+    assert "lock" in result["error"].lower()
+
+
+def test_op_recompute_uses_active_document_when_names_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recompute uses the already-open active document when its name matches.
+
+    No workspace .fcstd file is required because the document only exists in
+    FreeCAD's memory (opened manually outside the MCP workspace).
+    """
+    doc = _FakeDoc()
+    doc.Name = "box1"
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = doc
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    result = runner._op_recompute(
+        {"document_id": "box1", "workspace": str(tmp_path)}
+    )
+
+    assert result["document_id"] == "box1"
+    assert "meta_before" in result
+
+
+def test_op_recompute_falls_back_to_workspace_when_active_name_mismatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recompute falls back to workspace path when active document name differs."""
+    doc = _FakeDoc()
+    doc.Name = "box1"
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = SimpleNamespace(Name="othername")
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    fcstd_path = tmp_path / "otherdoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_recompute(
+        {"document_id": "otherdoc", "workspace": str(tmp_path)}
+    )
+
+    assert result["document_id"] == "otherdoc"
+    assert "meta_before" in result
+
+
+def test_op_recompute_falls_back_to_workspace_when_no_active_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recompute falls back to workspace path when no document is active."""
+    doc = _FakeDoc()
+    doc.Name = "box1"
+    fc = _FakeFreeCad(doc=doc)
+    # ActiveDocument is None (not set).
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    fcstd_path = tmp_path / "box1.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_recompute(
+        {"document_id": "box1", "workspace": str(tmp_path)}
+    )
+
+    assert result["document_id"] == "box1"
+    assert "meta_before" in result
+
+
+def test_op_recompute_open_failure_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recompute returns error when workspace document cannot be opened."""
+    wks = Workspace(root=tmp_path)
+    target = wks.document_path("mydoc")
+    target.write_bytes(b"corrupt")
+    fc = _FakeFreeCad(open_error=OSError("Invalid project file"))
+
+    result = runner._op_recompute(
+        {"document_id": "mydoc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "recompute"
+    assert "FreeCAD error" in result["error"]
 
 
 def _validate_shape(

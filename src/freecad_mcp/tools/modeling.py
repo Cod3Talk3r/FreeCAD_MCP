@@ -1196,6 +1196,16 @@ class SaveDocumentParams(BaseModel):
     )
 
 
+class DeleteObjectParams(BaseModel):
+    """Parameters for deleting an object from a document."""
+
+    document_id: str = Field(description="Document containing the object to delete.")
+    object_name: str = Field(description="Name of the object to delete.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
 class ExportStepParams(BaseModel):
     """Parameters for exporting objects to STEP format."""
 
@@ -1720,6 +1730,31 @@ def _register_tools(server: Any, settings: Settings) -> None:
             exported_count=0,
             success=True,
         )
+
+    # ------------------------------------------------------------------
+    # delete_object
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="delete_object",
+        title="Delete object",
+        description=(
+            "Delete an object from the workspace document.  If the object is a "
+            "PartDesign::Body, its Group members are removed first so no geometry "
+            "is orphaned.  The document is recomputed, saved atomically, and its "
+            "revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def delete_object_tool(params: DeleteObjectParams) -> dict[str, Any]:
+        """Delete an object and return deletion info."""
+        validate_direct_request("delete_object", params.model_dump())
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "workspace": params.workspace or "",
+        }
+        return _run_bridge_op(bridge, "delete_object", bridge_params)
 
     # ------------------------------------------------------------------
     # export_step

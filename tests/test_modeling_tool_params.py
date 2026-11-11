@@ -34,6 +34,7 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
     (modeling.InspectObjectParams, {"document_id": "doc", "object_name": "Box"}),
     (modeling.ValidateDocParams, {"document_id": "doc"}),
     (modeling.SaveDocumentParams, {"document_id": "doc"}),
+    (modeling.DeleteObjectParams, {"document_id": "doc", "object_name": "Box1"}),
     (modeling.ExportStepParams, {"document_id": "doc"}),
     (
         modeling.BooleanCutParams,
