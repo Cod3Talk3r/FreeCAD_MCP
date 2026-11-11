@@ -107,6 +107,7 @@ class _FakeFreeCad:
     def __init__(self, *, open_error: Exception | None = None, doc: object | None = None) -> None:
         self.open_error = open_error
         self.doc = doc
+        self.ActiveDocument: object | None = None
         self.open_calls: list[str] = []
         self.new_calls: list[str] = []
         self.Vector = _FakeVector
@@ -638,6 +639,164 @@ def test_open_existing_document_reports_missing_without_creating(tmp_path: Path)
 
     assert fc.open_calls == []
     assert fc.new_calls == []
+
+
+def _validate_shape(
+    volume: float = 100.0, shape_type: str = "Solid", valid: bool = True
+) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        ShapeType=shape_type,
+        Volume=volume,
+        isValid=lambda: valid,
+    )
+
+
+def _validate_doc(
+    doc_id: str, objects: list[types.SimpleNamespace]
+) -> _FakeDoc:
+    doc = _FakeDoc()
+    doc.Name = doc_id
+    for obj in objects:
+        doc.objects[obj.Name] = obj
+    return doc
+
+
+def test_op_validate_matches_active_document_no_workspace_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the requested doc is the active document, validate it directly."""
+    active = _validate_doc(
+        "mydoc",
+        [
+            types.SimpleNamespace(
+                Name="Pad1",
+                TypeId="PartDesign::Pad",
+                Shape=_validate_shape(),
+            )
+        ],
+    )
+    fc = _FakeFreeCad(doc=active)
+    fc.ActiveDocument = active
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    result = runner._op_validate({"document_id": "mydoc", "workspace": str(tmp_path)})
+
+    assert result["ok"] is True
+    assert result["result"]["document_id"] == "mydoc"
+    objects = result["result"]["objects"]
+    assert len(objects) == 1
+    assert objects[0]["name"] == "Pad1"
+    assert objects[0]["valid"] is True
+    assert result["result"]["all_valid"] is True
+    # No workspace file lookup should occur for the active document.
+    assert fc.open_calls == []
+    assert fc.new_calls == []
+
+
+def test_op_validate_non_matching_active_document_preserves_workspace_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-matching active document falls back to the workspace .fcstd."""
+    active = _validate_doc(
+        "otherdoc",
+        [
+            types.SimpleNamespace(
+                Name="Pad1",
+                TypeId="PartDesign::Pad",
+                Shape=_validate_shape(),
+            )
+        ],
+    )
+    target = _validate_doc(
+        "mydoc",
+        [
+            types.SimpleNamespace(
+                Name="Pad2",
+                TypeId="PartDesign::Pad",
+                Shape=_validate_shape(),
+            )
+        ],
+    )
+    fc = _FakeFreeCad(doc=target)
+    fc.ActiveDocument = active
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_validate({"document_id": "mydoc", "workspace": str(tmp_path)})
+
+    assert result["ok"] is True
+    assert result["result"]["document_id"] == "mydoc"
+    objects = result["result"]["objects"]
+    assert len(objects) == 1
+    assert objects[0]["name"] == "Pad2"
+    assert fc.open_calls == [str(fcstd_path)]
+    assert fc.new_calls == []
+
+
+def test_op_validate_no_active_document_preserves_workspace_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no active document, validate falls back to the workspace .fcstd."""
+    target = _validate_doc(
+        "mydoc",
+        [
+            types.SimpleNamespace(
+                Name="Pad3",
+                TypeId="PartDesign::Pad",
+                Shape=_validate_shape(),
+            )
+        ],
+    )
+    fc = _FakeFreeCad(doc=target)
+    fc.ActiveDocument = None
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_validate({"document_id": "mydoc", "workspace": str(tmp_path)})
+
+    assert result["ok"] is True
+    assert result["result"]["objects"][0]["name"] == "Pad3"
+    assert fc.open_calls == [str(fcstd_path)]
+    assert fc.new_calls == []
+
+
+def test_op_validate_invalid_object_still_marked_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invalid shapes remain invalid (existing validation behavior unchanged)."""
+    doc = _validate_doc(
+        "mydoc",
+        [
+            types.SimpleNamespace(
+                Name="Bad",
+                TypeId="Part::Box",
+                Shape=_validate_shape(shape_type="Compound", valid=False),
+            )
+        ],
+    )
+    fc = _FakeFreeCad(doc=doc)
+    fc.ActiveDocument = None
+    monkeypatch.setitem(sys.modules, "FreeCAD", fc)
+    monkeypatch.setitem(sys.modules, "Part", types.ModuleType("Part"))
+
+    fcstd_path = tmp_path / "mydoc.fcstd"
+    fcstd_path.write_bytes(b"fake fcstd")
+
+    result = runner._op_validate({"document_id": "mydoc", "workspace": str(tmp_path)})
+
+    assert result["ok"] is True
+    assert result["result"]["all_valid"] is False
+    obj = result["result"]["objects"][0]
+    assert obj["name"] == "Bad"
+    assert obj["valid"] is False
+    assert any("not a Solid" in err for err in obj["errors"])
 
 
 def test_tank_reports_corrupt_existing_document_without_replacement(

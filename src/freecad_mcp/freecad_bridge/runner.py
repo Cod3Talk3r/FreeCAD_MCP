@@ -688,7 +688,18 @@ def _op_validate(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import FreeCAD as _FC
-        doc = _open_existing_document(_FC, wks, normalized)
+
+        # When the requested document is already open in FreeCAD (e.g. opened
+        # manually outside the MCP workspace), validate it directly instead of
+        # reopening it from the workspace .fcstd path.  Otherwise preserve the
+        # existing workspace-path fallback exactly.
+        doc = None
+        active = _FC.ActiveDocument
+        if active is not None and getattr(active, "Name", None) == normalized:
+            doc = active
+
+        if doc is None:
+            doc = _open_existing_document(_FC, wks, normalized)
         results = []
         for obj in doc.Objects:
             obj_result = {"name": obj.Name, "type": obj.TypeId, "valid": True, "errors": []}
