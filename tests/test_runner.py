@@ -2857,6 +2857,158 @@ def test_handle_request_dispatches_inspect_sketch(
     assert response["result"]["sketch_name"] == "Sketch1"
 
 
+def test_inspect_sketch_with_constraints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch exposes individual constraint details with verified-safe fields."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "inspc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    class _FakeConstraint:
+        def __init__(self, **kw):
+            self.Type = kw.get("Type", "Horizontal")
+            self.Name = kw.get("Name", "")
+            self.First = kw.get("First", 0)
+            self.Second = kw.get("Second", -2000)
+            self.Third = kw.get("Third", -2000)
+            self.Value = kw.get("Value", 0.0)
+            self.IsActive = kw.get("IsActive", True)
+            self.Driving = kw.get("Driving", True)
+
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 0, 0), _FakePoint(10, 10, 0))
+    )
+
+    c1 = _FakeConstraint(Type="Horizontal", Name="H1", First=0, Value=0.0, IsActive=True, Driving=True)
+    c2 = _FakeConstraint(Type="Vertical", Name="V1", First=1, Value=0.0, IsActive=True, Driving=True)
+    c3 = _FakeConstraint(Type="Distance", Name="D1", First=0, Second=1, Value=10.0, IsActive=True, Driving=True)
+    sketch.Constraints.extend([c1, c2, c3])
+    sketch.FullyConstrained = False
+    sketch.DoF = 2
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "inspc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "inspect_sketch"
+    assert result["result"]["constraint_count"] == 3
+    assert result["result"]["fully_constrained"] is False
+    assert result["result"]["degrees_of_freedom"] == 2
+
+    constraints = result["result"]["constraints"]
+    assert len(constraints) == 3
+
+    h = constraints[0]
+    assert h["index"] == 0
+    assert h["type"] == "Horizontal"
+    assert h["name"] == "H1"
+    assert h["first"] == 0
+    assert h["second"] == -2000
+    assert h["third"] == -2000
+    assert h["value"] == 0.0
+    assert h["is_active"] is True
+    assert h["driving"] is True
+
+    d = constraints[2]
+    assert d["index"] == 2
+    assert d["type"] == "Distance"
+    assert d["name"] == "D1"
+    assert d["first"] == 0
+    assert d["second"] == 1
+    assert d["value"] == 10.0
+
+
+def test_inspect_sketch_constraints_missing_optional_properties(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch handles constraints with missing optional properties safely."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "inspm", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    class _FakeConstraint:
+        # Only minimal attributes; no Name, Value, IsActive, Driving, Third.
+        def __init__(self):
+            self.Type = "Distance"
+            self.First = 0
+            self.Second = 1
+
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 0, 0), _FakePoint(10, 10, 0))
+    )
+
+    c = _FakeConstraint()
+    sketch.Constraints.append(c)
+    # No FullyConstrained or DoF on the sketch.
+    if hasattr(sketch, "FullyConstrained"):
+        del sketch.FullyConstrained
+    if hasattr(sketch, "DoF"):
+        del sketch.DoF
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "inspm", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["constraint_count"] == 1
+    assert result["result"]["fully_constrained"] is None
+    assert result["result"]["degrees_of_freedom"] is None
+
+    constraints = result["result"]["constraints"]
+    assert len(constraints) == 1
+    c_info = constraints[0]
+    assert c_info["index"] == 0
+    assert c_info["type"] == "Distance"
+    assert c_info["first"] == 0
+    assert c_info["second"] == 1
+    # Missing optional properties are None, not fabricated.
+    assert c_info["name"] is None
+    assert c_info["third"] is None
+    assert c_info["value"] is None
+    assert c_info["is_active"] is None
+    assert c_info["driving"] is None
+
+
+def test_inspect_sketch_empty_constraints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch returns an empty constraints list when none exist."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "inspe", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    # Constraints list is empty (default).
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "inspe", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["constraint_count"] == 0
+    assert result["result"]["constraints"] == []
+    assert result["result"]["fully_constrained"] is None
+    assert result["result"]["degrees_of_freedom"] is None
+
+
 # ---------------------------------------------------------------------------
 # Milestone 9-D2-A: Delete sketch geometry (FreeCAD mocked)
 # ---------------------------------------------------------------------------

@@ -327,8 +327,17 @@ class InspectSketchResult(BaseModel):
     geometry_count: int = Field(description="Number of geometry objects in the sketch.")
     constraint_count: Optional[int] = Field(description="Number of constraints in the sketch.")
     geometries: list[dict[str, Any]] = Field(description="Per-geometry inspection details.")
+    constraints: list[dict[str, Any]] = Field(
+        default=[], description="Per-constraint inspection details (index, type, name, first, second, third, value, is_active, driving)."
+    )
     placement: dict[str, Any] = Field(
         default={}, description="Sketch placement (X/Y/Z) if available, otherwise empty."
+    )
+    fully_constrained: Optional[bool] = Field(
+        default=None, description="Whether the sketch is fully constrained by the solver."
+    )
+    degrees_of_freedom: Optional[int] = Field(
+        default=None, description="Solver degrees of freedom (DoF) remaining in the sketch."
     )
 
 
@@ -2664,8 +2673,11 @@ def _register_tools(server: Any, settings: Settings) -> None:
             type=result.get("type", "Sketcher::SketchObject"),
             geometry_count=result.get("geometry_count", 0),
             constraint_count=result.get("constraint_count"),
+            constraints=result.get("constraints", []),
             geometries=result.get("geometries", []),
             placement=result.get("placement", {}),
+            fully_constrained=result.get("fully_constrained"),
+            degrees_of_freedom=result.get("degrees_of_freedom"),
         )
 
     # ------------------------------------------------------------------

@@ -1761,6 +1761,99 @@ def test_real_freecad_inspect_sketch(tmp_path: Path) -> None:
 
 
 @requires_freecad
+def test_real_freecad_inspect_sketch_constraint_details(tmp_path: Path) -> None:
+    """inspect_sketch exposes individual constraint details from native FreeCAD.
+
+    Creates a sketch with geometry, adds a verified-safe Horizontal constraint
+    via the raw FreeCAD 1.1.4 API (no MCP constraint-creation tool exists yet),
+    then verifies inspect_sketch returns the correct constraint fields against
+    the native sketch.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    # Create document and sketch with geometry.
+    result = bridge.run(
+        "create_document", {"document_id": "skconstr", "workspace": workspace}
+    )
+    saved_path = result["saved_path"]
+    bridge.run(
+        "create_sketch",
+        {"document_id": "skconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "skconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Empty sketch constraint inspection (before adding any constraint).
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["sketch_name"] == "Sketch1"
+    assert info["geometry_count"] == 4  # 4 lines (rectangle)
+    assert info["constraint_count"] == 0
+    assert info["constraints"] == []
+    assert info["type"] == "Sketcher::SketchObject"
+    assert "fully_constrained" in info
+    assert "degrees_of_freedom" in info
+
+    # Add a Horizontal constraint on line 0 via raw freecadcmd subprocess.
+    # No MCP constraint-creation tool exists yet (M14.2); use the FreeCAD API
+    # directly to place a constraint so the inspection read path can be verified
+    # against a real native constraint.
+    constraint_code = (
+        "import FreeCAD as App\n"
+        "import Sketcher\n"
+        "doc = App.openDocument(" + repr(saved_path) + ")\n"
+        "sketch = doc.getObject('Sketch1')\n"
+        "c = Sketcher.Constraint('Horizontal', 0)\n"
+        "c.Name = 'H1'\n"
+        "sketch.addConstraint(c)\n"
+        "sketch.recompute()\n"
+        "doc.save()\n"
+        "App.closeDocument(doc.Name)\n"
+    )
+    proc = subprocess.run(
+        [str(_DISCOVERED), "-c", constraint_code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # Verify inspect_sketch returns the constraint details.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "skconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["constraint_count"] == 1
+    assert len(info["constraints"]) == 1
+
+    c = info["constraints"][0]
+    assert c["index"] == 0
+    assert c["type"] == "Horizontal"
+    assert c["name"] == "H1"
+    assert c["first"] == 0
+    assert c["second"] == -2000
+    assert c["third"] == -2000
+    assert c["value"] == 0.0
+    assert c["is_active"] is True
+    assert c["driving"] is True
+    assert info["fully_constrained"] is False
+    assert isinstance(info["degrees_of_freedom"], int)
+
+
+@requires_freecad
 def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> None:
     """inspect_sketch returns structured errors for missing sketch and wrong type."""
     bridge = FreeCadBridge.from_settings(_settings())

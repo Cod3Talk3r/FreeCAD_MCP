@@ -4010,6 +4010,41 @@ def _op_inspect_sketch(params: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             constraint_count = None
 
+        # Individual constraint details.
+        constraints = []
+        try:
+            constraint_list = list(getattr(sketch, "Constraints", []))
+        except Exception:
+            constraint_list = []
+        for index, constraint in enumerate(constraint_list):
+            constraint_info: dict[str, Any] = {"index": index}
+            for attr, key in (
+                ("Type", "type"),
+                ("Name", "name"),
+                ("First", "first"),
+                ("Second", "second"),
+                ("Third", "third"),
+                ("Value", "value"),
+                ("IsActive", "is_active"),
+                ("Driving", "driving"),
+            ):
+                try:
+                    constraint_info[key] = getattr(constraint, attr)
+                except Exception:
+                    constraint_info[key] = None
+            constraints.append(constraint_info)
+
+        # Solver status.
+        try:
+            fc_val = getattr(sketch, "FullyConstrained", None)
+            fully_constrained = bool(fc_val) if fc_val is not None else None
+        except Exception:
+            fully_constrained = None
+        try:
+            degrees_of_freedom = getattr(sketch, "DoF", None)
+        except Exception:
+            degrees_of_freedom = None
+
         # Sketch placement if available.
         placement_info: dict[str, Any] = {}
         try:
@@ -4042,8 +4077,11 @@ def _op_inspect_sketch(params: dict[str, Any]) -> dict[str, Any]:
             "type": type_id,
             "geometry_count": len(geometries),
             "constraint_count": constraint_count,
+            "constraints": constraints,
             "geometries": geometries,
             "placement": placement_info,
+            "fully_constrained": fully_constrained,
+            "degrees_of_freedom": degrees_of_freedom,
         },
     }
 
