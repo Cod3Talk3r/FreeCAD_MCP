@@ -3763,6 +3763,457 @@ def test_sketch_delete_constraint_rejects_missing_sketch(
 
 
 # ---------------------------------------------------------------------------
+# Sketch edit constraint (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def _make_sketch_with_line_and_circle(doc: _FakeDoc, sketch_name: str = "Sketch1") -> None:
+    """Add a line and a circle to the sketch for constraint tests."""
+    sketch = doc.objects[sketch_name]
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 0, 0), _FakePoint(10, 10, 0))
+    )
+    sketch.Geometry.append(
+        Circle(_FakePoint(5, 5, 0), 3.0)
+    )
+
+
+def _run_edit_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    document_id: str,
+    sketch_name: str,
+    constraint_index: int,
+    constraint_type: str,
+    first_geometry_index: int,
+    second_geometry_index: int | None = None,
+    value: float | None = None,
+    name: str | None = None,
+    workspace: str | None = None,
+) -> dict[str, Any]:
+    """Helper: create sketch with line+circle, add a constraint, then edit it."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": document_id, "workspace": str(tmp_path), "sketch_name": sketch_name}
+    )
+    _make_sketch_with_line_and_circle(doc, sketch_name)
+
+    # Add an initial constraint to edit.
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": document_id,
+            "workspace": str(tmp_path),
+            "sketch_name": sketch_name,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "Orig",
+        }
+    )
+
+    params: dict[str, Any] = {
+        "document_id": document_id,
+        "workspace": str(tmp_path),
+        "sketch_name": sketch_name,
+        "constraint_index": constraint_index,
+        "constraint_type": constraint_type,
+        "first_geometry_index": first_geometry_index,
+    }
+    if second_geometry_index is not None:
+        params["second_geometry_index"] = second_geometry_index
+    if value is not None:
+        params["value"] = value
+    if name is not None:
+        params["name"] = name
+    if workspace is not None:
+        params["workspace"] = workspace
+
+    return runner._op_sketch_edit_constraint(params)
+
+
+def test_sketch_edit_constraint_changes_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint changes a Distance constraint's value."""
+    result = _run_edit_constraint(
+        monkeypatch, tmp_path, "econ", "Sketch1", 0, "Distance", 0, value=25.0, name="NewDist"
+    )
+    assert result["ok"] is True
+    assert result["op"] == "sketch_edit_constraint"
+    assert result["result"]["edited_constraint_index"] == 0
+    assert result["result"]["constraint_count_before"] == 1
+    assert result["result"]["constraint_count_after"] == 1
+
+    before = result["result"]["constraint_before"]
+    assert before["type"] == "Horizontal"
+    assert before["name"] == "Orig"
+
+    after = result["result"]["constraint_after"]
+    assert after["type"] == "Distance"
+    assert after["first"] == 0
+    assert after["value"] == 25.0
+    assert after["name"] == "NewDist"
+
+
+def test_sketch_edit_constraint_changes_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint changes a Horizontal constraint to Vertical."""
+    result = _run_edit_constraint(
+        monkeypatch, tmp_path, "etype", "Sketch1", 0, "Vertical", 0
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_before"]["type"] == "Horizontal"
+    assert result["result"]["constraint_after"]["type"] == "Vertical"
+    assert result["result"]["constraint_after"]["first"] == 0
+
+
+def test_sketch_edit_constraint_first_and_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint works on first and last constraint indices."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "econfl", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_line_and_circle(doc, "Sketch1")
+
+    # Add two constraints.
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": "econfl",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": "econfl",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Vertical",
+            "first_geometry_index": 1,
+        }
+    )
+
+    # Edit last (index 1).
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "econfl",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 1,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 15.0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["edited_constraint_index"] == 1
+    assert result["result"]["constraint_after"]["type"] == "Distance"
+    assert result["result"]["constraint_after"]["value"] == 15.0
+
+    # Edit first (index 0).
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "econfl",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "NewH",
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_after"]["type"] == "Horizontal"
+    assert result["result"]["constraint_after"]["name"] == "NewH"
+
+
+def test_sketch_edit_constraint_preserves_unrelated_constraints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint preserves unrelated constraints."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "epreserve", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_line_and_circle(doc, "Sketch1")
+
+    # Add three constraints.
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": "epreserve",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "H1",
+        }
+    )
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": "epreserve",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Vertical",
+            "first_geometry_index": 1,
+            "name": "V1",
+        }
+    )
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": "epreserve",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 10.0,
+            "name": "D1",
+        }
+    )
+
+    # Edit only the middle constraint (index 1).
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "epreserve",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 1,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 99.0,
+            "name": "VEdited",
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_count_before"] == 3
+    assert result["result"]["constraint_count_after"] == 3
+
+    # Unrelated constraints should still be present.
+    info = runner._op_inspect_sketch(
+        {
+            "document_id": "epreserve",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+        }
+    )
+    assert info["result"]["constraint_count"] == 3
+    names = {c["name"] for c in info["result"]["constraints"]}
+    assert names == {"H1", "VEdited", "D1"}
+
+
+def test_sketch_edit_constraint_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects a negative constraint_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "eneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "eneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": -1,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_constraint_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects an out-of-range constraint_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "eoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "eoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 5,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_edit_constraint_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects a boolean constraint_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "ebool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "ebool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": True,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_edit_constraint_rejects_missing_value_for_dimensional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects a dimensional replacement without a value."""
+    result = _run_edit_constraint(
+        monkeypatch, tmp_path, "eval", "Sketch1", 0, "Radius", 2
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "requires a value" in result["error"].lower()
+
+
+def test_sketch_edit_constraint_rejects_unsupported_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects an unsupported constraint type."""
+    result = _run_edit_constraint(
+        monkeypatch, tmp_path, "eust", "Sketch1", 0, "Coincident", 0
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "not supported" in result["error"].lower()
+    assert "Coincident" in result["error"]
+
+
+def test_sketch_edit_constraint_rejects_geometry_incompatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects Radius on non-circle geometry."""
+    result = _run_edit_constraint(
+        monkeypatch, tmp_path, "egeo", "Sketch1", 0, "Radius", 0, value=5.0
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "circle" in result["error"].lower()
+
+
+def test_sketch_edit_constraint_rollback_on_replacement_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rolls back original when replacement creation fails."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "erollback", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_line_and_circle(doc, "Sketch1")
+
+    # Add an original Horizontal constraint.
+    runner._op_sketch_add_constraint(
+        {
+            "document_id": "erollback",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "Original",
+        }
+    )
+
+    # Make addConstraint fail on the second call (replacement), succeed on first (rollback).
+    sketch = doc.objects["Sketch1"]
+    original_add_constraint = sketch.addConstraint
+    call_count = {"n": 0}
+
+    def _failing_add_constraint(constraint):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated replacement failure")
+        return original_add_constraint(constraint)
+
+    sketch.addConstraint = _failing_add_constraint
+
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "erollback",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "replacement creation failed" in result["error"].lower()
+
+    # Original constraint should be restored (rollback succeeded).
+    assert len(sketch.Constraints) == 1
+    assert sketch.Constraints[0].Name == "Original"
+
+    # Restore the original method.
+    sketch.addConstraint = original_add_constraint
+
+
+def test_sketch_edit_constraint_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint rejects a missing sketch."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "emiss", "workspace": str(tmp_path)})
+
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "emiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "constraint_index": 0,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_edit_constraint"
+    assert "not found" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # Milestone 9-D2-A: Delete sketch geometry (FreeCAD mocked)
 # ---------------------------------------------------------------------------
 

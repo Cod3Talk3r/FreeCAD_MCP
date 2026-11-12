@@ -1077,6 +1077,77 @@ class SketchDeleteConstraintResult(BaseModel):
     )
 
 
+class SketchEditConstraintParams(BaseModel):
+    """Parameters for editing an existing constraint in a sketch.
+
+    Since FreeCAD 1.1.4 constraint ``Type`` and ``Value`` are read-only,
+    editing is implemented as delete + recreate.  The replacement definition
+    follows the same contract as ``sketch_add_constraint``.
+    """
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch containing the constraint to edit.")
+    constraint_index: int = Field(description="Zero-based index of the constraint to edit.")
+    constraint_type: str = Field(
+        description=(
+            "New constraint type. Supported: Horizontal, Vertical, Distance, "
+            "Radius, Diameter, Angle."
+        )
+    )
+    first_geometry_index: int = Field(
+        description="Zero-based index of the first geometry the replacement constraint references."
+    )
+    second_geometry_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "Zero-based index of a second geometry, required for two-geometry "
+            "constraints (Distance between two geometries, Angle)."
+        ),
+    )
+    value: Optional[float] = Field(
+        default=None,
+        description=(
+            "Dimensional value for dimensional constraints (Distance, Radius, "
+            "Diameter, Angle). Not used by Horizontal or Vertical."
+        ),
+    )
+    name: Optional[str] = Field(
+        default=None, description="Optional human-readable name for the replacement constraint."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchEditConstraintResult(BaseModel):
+    """Result of sketch_edit_constraint."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the constraint was edited in.")
+    edited_constraint_index: int = Field(description="Zero-based index of the edited constraint.")
+    constraint_before: dict[str, Any] = Field(
+        description="Inspected details of the original constraint before editing."
+    )
+    constraint_after: dict[str, Any] = Field(
+        description="Inspected details of the replacement constraint after editing."
+    )
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before editing."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after editing."
+    )
+    fully_constrained: Optional[bool] = Field(
+        default=None, description="Whether the sketch is fully constrained by the solver after editing."
+    )
+    degrees_of_freedom: Optional[int] = Field(
+        default=None, description="Solver degrees of freedom (DoF) remaining in the sketch after editing."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the constraint was edited."
+    )
+
+
 class SketchDeleteGeometryParams(BaseModel):
     """Parameters for deleting geometry from an existing sketch."""
 
@@ -2856,6 +2927,59 @@ def _register_tools(server: Any, settings: Settings) -> None:
             sketch_name=result.get("sketch_name", params.sketch_name),
             deleted_constraint_index=result.get("deleted_constraint_index", params.constraint_index),
             deleted_constraint=result.get("deleted_constraint", {}),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
+            fully_constrained=result.get("fully_constrained"),
+            degrees_of_freedom=result.get("degrees_of_freedom"),
+            meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_edit_constraint
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_edit_constraint",
+        title="Edit constraint in sketch",
+        description=(
+            "Edit an existing constraint in a Sketcher::SketchObject by its "
+            "zero-based constraint index.  Since FreeCAD 1.1.4 constraint "
+            "``Type`` and ``Value`` are read-only, editing is implemented as "
+            "delete + recreate with rollback: the original constraint is "
+            "captured before deletion, the replacement is validated before "
+            "mutation, and if replacement creation fails the original is "
+            "restored.  Supported constraint types: Horizontal, Vertical, "
+            "Distance, Radius, Diameter, Angle.  Does not support Coincident "
+            "or other unverified constraint types."
+        ),
+        structured_output=True,
+    )
+    def sketch_edit_constraint_tool(params: SketchEditConstraintParams) -> SketchEditConstraintResult:
+        """Edit a constraint in a sketch and return before/after info."""
+        validate_direct_request("sketch_edit_constraint", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "constraint_index": params.constraint_index,
+            "constraint_type": params.constraint_type,
+            "first_geometry_index": params.first_geometry_index,
+            "workspace": params.workspace or "",
+        }
+        if params.second_geometry_index is not None:
+            bridge_params["second_geometry_index"] = params.second_geometry_index
+        if params.value is not None:
+            bridge_params["value"] = params.value
+        if params.name is not None:
+            bridge_params["name"] = params.name
+        result = _run_bridge_op(bridge, "sketch_edit_constraint", bridge_params)
+
+        return SketchEditConstraintResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            edited_constraint_index=result.get("edited_constraint_index", params.constraint_index),
+            constraint_before=result.get("constraint_before", {}),
+            constraint_after=result.get("constraint_after", {}),
             constraint_count_before=result.get("constraint_count_before"),
             constraint_count_after=result.get("constraint_count_after"),
             fully_constrained=result.get("fully_constrained"),

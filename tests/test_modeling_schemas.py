@@ -19,6 +19,8 @@ from freecad_mcp.tools.modeling import (
     SketchAddTriangleParams,
     SketchDeleteConstraintParams,
     SketchDeleteConstraintResult,
+    SketchEditConstraintParams,
+    SketchEditConstraintResult,
     SketchDeleteGeometryParams,
     SketchEditLineParams,
     TankParams,
@@ -370,6 +372,70 @@ def test_sketch_delete_constraint_result_fields():
     assert r.constraint_count_after == 2
     assert r.fully_constrained is False
     assert r.degrees_of_freedom == 1
+    assert r.meta_before == {"revision": 5}
+
+
+def test_sketch_edit_constraint_params_valid():
+    """Valid SketchEditConstraintParams should be accepted."""
+    p = SketchEditConstraintParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        constraint_index=0,
+        constraint_type="Horizontal",
+        first_geometry_index=0,
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.constraint_index == 0
+    assert p.constraint_type == "Horizontal"
+    assert p.first_geometry_index == 0
+    assert p.second_geometry_index is None
+    assert p.value is None
+    assert p.name is None
+
+
+def test_sketch_edit_constraint_params_with_optional():
+    """SketchEditConstraintParams accepts optional fields."""
+    p = SketchEditConstraintParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        constraint_index=1,
+        constraint_type="Distance",
+        first_geometry_index=0,
+        second_geometry_index=1,
+        value=10.0,
+        name="Edited",
+        workspace="/tmp/ws",
+    )
+    assert p.second_geometry_index == 1
+    assert p.value == 10.0
+    assert p.name == "Edited"
+    assert p.workspace == "/tmp/ws"
+
+
+def test_sketch_edit_constraint_result_fields():
+    """SketchEditConstraintResult should carry before/after info."""
+    r = SketchEditConstraintResult(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        edited_constraint_index=1,
+        constraint_before={"index": 1, "type": "Horizontal", "name": "Orig"},
+        constraint_after={"index": 1, "type": "Distance", "name": "Edited"},
+        constraint_count_before=3,
+        constraint_count_after=3,
+        fully_constrained=False,
+        degrees_of_freedom=2,
+        meta_before={"revision": 5},
+    )
+    assert r.document_id == "mydoc"
+    assert r.sketch_name == "MySketch"
+    assert r.edited_constraint_index == 1
+    assert r.constraint_before["type"] == "Horizontal"
+    assert r.constraint_after["type"] == "Distance"
+    assert r.constraint_count_before == 3
+    assert r.constraint_count_after == 3
+    assert r.fully_constrained is False
+    assert r.degrees_of_freedom == 2
     assert r.meta_before == {"revision": 5}
 
 

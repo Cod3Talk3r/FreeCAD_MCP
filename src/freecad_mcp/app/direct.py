@@ -170,6 +170,39 @@ def validate_direct_request(op: str, params: Any) -> None:
         constraint_index = params.get("constraint_index")
         if isinstance(constraint_index, bool) or not isinstance(constraint_index, int):
             raise ValueError("constraint_index must be an integer (boolean values are not accepted).")
+    elif op == "sketch_edit_constraint":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        constraint_index = params.get("constraint_index")
+        if isinstance(constraint_index, bool) or not isinstance(constraint_index, int):
+            raise ValueError("constraint_index must be an integer (boolean values are not accepted).")
+        constraint_type = params.get("constraint_type", "")
+        supported_types = ("Horizontal", "Vertical", "Distance", "Radius", "Diameter", "Angle")
+        if constraint_type not in supported_types:
+            raise ValueError(
+                f"constraint_type '{constraint_type}' is not supported. "
+                f"Supported types: {', '.join(supported_types)}."
+            )
+        first_index = params.get("first_geometry_index")
+        if isinstance(first_index, bool) or not isinstance(first_index, int):
+            raise ValueError("first_geometry_index must be an integer (boolean values are not accepted).")
+        if first_index < 0:
+            raise ValueError("first_geometry_index must be non-negative.")
+        second_index = params.get("second_geometry_index")
+        if second_index is not None:
+            if isinstance(second_index, bool) or not isinstance(second_index, int):
+                raise ValueError("second_geometry_index must be an integer (boolean values are not accepted).")
+            if second_index < 0:
+                raise ValueError("second_geometry_index must be non-negative.")
+        if constraint_type in ("Distance", "Radius", "Diameter", "Angle"):
+            if params.get("value") is None:
+                raise ValueError(f"constraint_type '{constraint_type}' requires a value.")
+            try:
+                value_val = float(params.get("value"))
+            except (TypeError, ValueError):
+                raise ValueError(f"constraint_type '{constraint_type}' value must be a finite number.")
+            if not math.isfinite(value_val):
+                raise ValueError(f"constraint_type '{constraint_type}' value must be a finite number.")
     elif op == "sketch_edit_line":
         if not params.get("sketch_name", "").strip():
             raise ValueError("sketch_name must not be empty.")

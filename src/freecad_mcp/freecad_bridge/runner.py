@@ -61,6 +61,7 @@ OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_SKETCH_ADD_CONSTRAINT = "sketch_add_constraint"
 OP_SKETCH_DELETE_CONSTRAINT = "sketch_delete_constraint"
+OP_SKETCH_EDIT_CONSTRAINT = "sketch_edit_constraint"
 OP_VALIDATE_REOPEN = "validate_reopen"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
 OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
@@ -3078,6 +3079,342 @@ def _op_sketch_delete_constraint(params: dict[str, Any]) -> dict[str, Any]:
             "deleted_constraint": deleted_constraint_info,
             "constraint_count_before": constraint_count_before,
             "constraint_count_after": constraint_count_after,
+            "fully_constrained": fully_constrained,
+            "degrees_of_freedom": degrees_of_freedom,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_edit_constraint(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit one constraint in an existing sketch (read-modify-write with rollback).
+
+    FreeCAD 1.1.4 constraint ``Type`` and ``Value`` are read-only, so editing is
+    implemented as delete + recreate.  Atomicity is essential:
+
+    1. Capture the original constraint details before deletion.
+    2. Validate the replacement definition before mutating the sketch.
+    3. Delete the original constraint.
+    4. Create the replacement constraint.
+    5. If replacement creation fails, restore the original constraint at the
+       same index (rollback).  If rollback itself fails, report both failures
+       and never report a successful edit.
+    6. Recompute and persist only after a successful edit.
+
+    Supports: Horizontal, Vertical, Distance, Radius, Diameter, Angle.
+    Does not support Coincident or other unverified constraint types.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    constraint_index_param = params.get("constraint_index")
+    constraint_type = params.get("constraint_type") or ""
+    first_index = params.get("first_geometry_index")
+    second_index = params.get("second_geometry_index")
+    value = params.get("value")
+    name = params.get("name")
+    workspace_str = params.get("workspace") or ""
+
+    SUPPORTED_TYPES = ("Horizontal", "Vertical", "Distance", "Radius", "Diameter", "Angle")
+    if constraint_type not in SUPPORTED_TYPES:
+        return {
+            "ok": False,
+            "op": "sketch_edit_constraint",
+            "error": (
+                f"constraint_type '{constraint_type}' is not supported. "
+                f"Supported types: {', '.join(SUPPORTED_TYPES)}."
+            ),
+        }
+
+    # Validate constraint_index: must be an integer, not a boolean.
+    if isinstance(constraint_index_param, bool) or not isinstance(constraint_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_constraint",
+            "error": "constraint_index must be an integer (boolean values are not accepted).",
+        }
+    constraint_index = constraint_index_param
+
+    # Validate first_geometry_index: must be an integer, not a boolean.
+    if isinstance(first_index, bool) or not isinstance(first_index, int):
+        return {
+            "ok": False,
+            "op": "sketch_edit_constraint",
+            "error": "first_geometry_index must be an integer (boolean values are not accepted).",
+        }
+    if first_index < 0:
+        return {
+            "ok": False,
+            "op": "sketch_edit_constraint",
+            "error": "first_geometry_index must be non-negative.",
+        }
+
+    # Validate second_geometry_index when present.
+    if second_index is not None:
+        if isinstance(second_index, bool) or not isinstance(second_index, int):
+            return {
+                "ok": False,
+                "op": "sketch_edit_constraint",
+                "error": "second_geometry_index must be an integer (boolean values are not accepted).",
+            }
+        if second_index < 0:
+            return {
+                "ok": False,
+                "op": "sketch_edit_constraint",
+                "error": "second_geometry_index must be non-negative.",
+            }
+
+    # Validate dimensional value where required.
+    if constraint_type in ("Distance", "Radius", "Diameter", "Angle"):
+        if value is None:
+            return {
+                "ok": False,
+                "op": "sketch_edit_constraint",
+                "error": f"constraint_type '{constraint_type}' requires a value.",
+            }
+        try:
+            value_val = float(value)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "op": "sketch_edit_constraint",
+                "error": f"constraint_type '{constraint_type}' value must be a finite number.",
+            }
+        if math.isnan(value_val) or math.isinf(value_val):
+            return {
+                "ok": False,
+                "op": "sketch_edit_constraint",
+                "error": f"constraint_type '{constraint_type}' value must be a finite number.",
+            }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_edit_constraint", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_edit_constraint", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_edit_constraint", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_edit_constraint", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part module needed before Sketcher loads
+        import Sketcher  # noqa: F401,PLC0415 - register Sketcher types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot edit sketch constraint."
+            )
+
+        # Get current constraint count for range validation.
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            constraint_count_before = 0
+
+        if constraint_index < 0 or constraint_index >= constraint_count_before:
+            return _fail(
+                f"constraint_index {constraint_index} is out of range "
+                f"(valid range: 0 to {constraint_count_before - 1})."
+            )
+
+        # Capture the original constraint's details before any mutation.
+        original_constraint_info: dict[str, Any] = {"index": constraint_index}
+        try:
+            original = list(getattr(sketch, "Constraints", []))[constraint_index]
+            for attr, key in (
+                ("Type", "type"),
+                ("Name", "name"),
+                ("First", "first"),
+                ("Second", "second"),
+                ("Third", "third"),
+                ("Value", "value"),
+                ("IsActive", "is_active"),
+                ("Driving", "driving"),
+            ):
+                try:
+                    original_constraint_info[key] = getattr(original, attr)
+                except Exception:
+                    original_constraint_info[key] = None
+        except Exception:
+            pass
+
+        # Validate geometry indices against the sketch before deleting anything.
+        geometry_list = list(getattr(sketch, "Geometry", []))
+        if first_index >= len(geometry_list):
+            return _fail(
+                f"first_geometry_index {first_index} is out of range "
+                f"(sketch has {len(geometry_list)} geometries)."
+            )
+        if second_index is not None and second_index >= len(geometry_list):
+            return _fail(
+                f"second_geometry_index {second_index} is out of range "
+                f"(sketch has {len(geometry_list)} geometries)."
+            )
+
+        # Verify geometry compatibility with the replacement constraint type.
+        first_geom_type = type(geometry_list[first_index]).__name__
+        if constraint_type in ("Horizontal", "Vertical", "Radius", "Diameter", "Angle"):
+            if constraint_type in ("Radius", "Diameter") and first_geom_type != "Circle":
+                return _fail(
+                    f"constraint_type '{constraint_type}' requires Circle geometry, "
+                    f"but geometry index {first_index} is '{first_geom_type}'."
+                )
+            if constraint_type == "Angle" and first_geom_type != "LineSegment":
+                return _fail(
+                    f"constraint_type 'Angle' requires LineSegment geometry, "
+                    f"but geometry index {first_index} is '{first_geom_type}'."
+                )
+            if constraint_type in ("Horizontal", "Vertical") and first_geom_type != "LineSegment":
+                return _fail(
+                    f"constraint_type '{constraint_type}' requires LineSegment geometry, "
+                    f"but geometry index {first_index} is '{first_geom_type}'."
+                )
+        if second_index is not None:
+            second_geom_type = type(geometry_list[second_index]).__name__
+            if constraint_type == "Angle" and second_geom_type != "LineSegment":
+                return _fail(
+                    f"constraint_type 'Angle' requires LineSegment geometry, "
+                    f"but geometry index {second_index} is '{second_geom_type}'."
+                )
+            if constraint_type == "Distance" and second_geom_type not in ("LineSegment", "Circle"):
+                return _fail(
+                    f"constraint_type 'Distance' requires LineSegment or Circle geometry, "
+                    f"but geometry index {second_index} is '{second_geom_type}'."
+                )
+
+        # Delete the original constraint.
+        sketch.delConstraint(constraint_index)
+        doc.recompute()
+
+        # Build the replacement constraint using the verified constructor signatures.
+        replacement = None
+        try:
+            if constraint_type in ("Horizontal", "Vertical"):
+                replacement = Sketcher.Constraint(constraint_type, first_index)
+            elif constraint_type in ("Radius", "Diameter"):
+                replacement = Sketcher.Constraint(constraint_type, first_index, value_val)
+            elif constraint_type == "Distance":
+                if second_index is not None:
+                    replacement = Sketcher.Constraint(constraint_type, first_index, second_index, value_val)
+                else:
+                    replacement = Sketcher.Constraint(constraint_type, first_index, value_val)
+            elif constraint_type == "Angle":
+                if second_index is None:
+                    # Rollback: restore original constraint before reporting failure.
+                    try:
+                        sketch.addConstraint(original)
+                    except Exception:
+                        pass
+                    doc.recompute()
+                    return _fail(
+                        "constraint_type 'Angle' requires second_geometry_index."
+                    )
+            if name is not None:
+                replacement.Name = name
+
+            constraint_index = sketch.addConstraint(replacement)
+            doc.recompute()
+        except Exception as exc:
+            # Rollback: restore the original constraint at the same index.
+            rollback_error = None
+            try:
+                sketch.addConstraint(original)
+                doc.recompute()
+            except Exception as rollback_exc:
+                rollback_error = str(rollback_exc)
+
+            ws_mod.release_lock(lock_path, pid)
+            detail = f"replacement creation failed: {exc}"
+            if rollback_error:
+                detail += f"; rollback also failed: {rollback_error}"
+            return {"ok": False, "op": "sketch_edit_constraint", "error": detail}
+
+        # Read back the replacement constraint's details.
+        try:
+            edited = list(getattr(sketch, "Constraints", []))[constraint_index]
+            constraint_info: dict[str, Any] = {"index": constraint_index}
+            for attr, key in (
+                ("Type", "type"),
+                ("Name", "name"),
+                ("First", "first"),
+                ("Second", "second"),
+                ("Third", "third"),
+                ("Value", "value"),
+                ("IsActive", "is_active"),
+                ("Driving", "driving"),
+            ):
+                try:
+                    constraint_info[key] = getattr(edited, attr)
+                except Exception:
+                    constraint_info[key] = None
+        except Exception:
+            constraint_info = {"index": constraint_index}
+
+        # Solver state after edit.
+        try:
+            fc_val = getattr(sketch, "FullyConstrained", None)
+            fully_constrained = bool(fc_val) if fc_val is not None else None
+        except Exception:
+            fully_constrained = None
+        try:
+            degrees_of_freedom = getattr(sketch, "DoF", None)
+        except Exception:
+            degrees_of_freedom = None
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "sketch_edit_constraint", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_edit_constraint",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "edited_constraint_index": constraint_index,
+            "constraint_before": original_constraint_info,
+            "constraint_after": constraint_info,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": len(getattr(sketch, "Constraints", [])),
             "fully_constrained": fully_constrained,
             "degrees_of_freedom": degrees_of_freedom,
             "meta_before": meta_before,
@@ -10227,6 +10564,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
     OP_SKETCH_ADD_CONSTRAINT: _op_sketch_add_constraint,
     OP_SKETCH_DELETE_CONSTRAINT: _op_sketch_delete_constraint,
+    OP_SKETCH_EDIT_CONSTRAINT: _op_sketch_edit_constraint,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,
     OP_SKETCH_ADD_TRIANGLE: _op_sketch_add_triangle,
     OP_SKETCH_ADD_ELLIPSE: _op_sketch_add_ellipse,

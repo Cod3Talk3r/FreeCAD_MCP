@@ -2415,6 +2415,388 @@ def test_real_freecad_sketch_delete_constraint_persistence(
 
 
 @requires_freecad
+def test_real_freecad_sketch_edit_constraint_value(
+    tmp_path: Path) -> None:
+    """sketch_edit_constraint changes a dimensional constraint's value."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "econstr", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "econstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "econstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add a Distance constraint between lines 0 and 1.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "econstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 10.0,
+            "name": "D1",
+        },
+    )
+
+    # Edit the Distance value to 25.0.
+    result = bridge.run(
+        "sketch_edit_constraint",
+        {
+            "document_id": "econstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 25.0,
+            "name": "D1Edited",
+        },
+    )
+    assert result["constraint_count_before"] == 1
+    assert result["constraint_count_after"] == 1
+
+    before = result["constraint_before"]
+    assert before["type"] == "Distance"
+    assert before["value"] == 10.0
+    assert before["name"] == "D1"
+
+    after = result["constraint_after"]
+    assert after["type"] == "Distance"
+    assert after["first"] == 0
+    assert after["second"] == 1
+    assert after["value"] == 25.0
+    assert after["name"] == "D1Edited"
+    assert "fully_constrained" in result
+    assert "degrees_of_freedom" in result
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_constraint_change_type(
+    tmp_path: Path) -> None:
+    """sketch_edit_constraint changes constraint type (Horizontal → Vertical)."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "etype", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "etype", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "etype",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add Horizontal on line 0.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "etype",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "H1",
+        },
+    )
+
+    # Change to Vertical.
+    result = bridge.run(
+        "sketch_edit_constraint",
+        {
+            "document_id": "etype",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Vertical",
+            "first_geometry_index": 0,
+            "name": "V1",
+        },
+    )
+    assert result["constraint_count_before"] == 1
+    assert result["constraint_count_after"] == 1
+
+    before = result["constraint_before"]
+    assert before["type"] == "Horizontal"
+    assert before["name"] == "H1"
+
+    after = result["constraint_after"]
+    assert after["type"] == "Vertical"
+    assert after["first"] == 0
+    assert after["name"] == "V1"
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_constraint_multiple_geometries(
+    tmp_path: Path) -> None:
+    """sketch_edit_constraint edits a constraint with two geometry references."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "emulti", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "emulti", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "emulti",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add Distance between lines 0 and 1.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "emulti",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 10.0,
+        },
+    )
+
+    # Edit to change the value.
+    result = bridge.run(
+        "sketch_edit_constraint",
+        {
+            "document_id": "emulti",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 20.0,
+        },
+    )
+    assert result["constraint_count_before"] == 1
+    assert result["constraint_count_after"] == 1
+    after = result["constraint_after"]
+    assert after["first"] == 0
+    assert after["second"] == 1
+    assert after["value"] == 20.0
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_constraint_invalid_requests(
+    tmp_path: Path) -> None:
+    """Invalid sketch_edit_constraint requests leave the sketch unchanged."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "eerr", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "eerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "eerr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "eerr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        },
+    )
+
+    # Out-of-range index.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_constraint",
+            {
+                "document_id": "eerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_index": 5,
+                "constraint_type": "Horizontal",
+                "first_geometry_index": 0,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Missing value for dimensional type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_constraint",
+            {
+                "document_id": "eerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_index": 0,
+                "constraint_type": "Radius",
+                "first_geometry_index": 0,
+            },
+        )
+    assert "requires a value" in str(excinfo.value).lower()
+
+    # Boolean index.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_edit_constraint",
+            {
+                "document_id": "eerr",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_index": True,
+                "constraint_type": "Horizontal",
+                "first_geometry_index": 0,
+            },
+        )
+    assert "boolean" in str(excinfo.value).lower()
+
+    # Verify no constraints were modified.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "eerr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["constraint_count"] == 1
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_constraint_persistence(
+    tmp_path: Path) -> None:
+    """Constraint editing persists after save and reopen."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "econstr2", "workspace": workspace})
+    saved = bridge.run(
+        "save_document",
+        {"document_id": "econstr2", "workspace": workspace},
+    )
+    saved_path = saved["saved_path"]
+
+    bridge.run(
+        "create_sketch",
+        {"document_id": "econstr2", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "econstr2",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add a Distance constraint.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "econstr2",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 10.0,
+        },
+    )
+
+    # Edit the value.
+    bridge.run(
+        "sketch_edit_constraint",
+        {
+            "document_id": "econstr2",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 1,
+            "value": 30.0,
+        },
+    )
+
+    # Save, close/reopen; verify edited constraint persists (type, geometry refs, value).
+    saved = bridge.run("save_document", {"document_id": "econstr2", "workspace": workspace})
+    saved_path = saved["saved_path"]
+    import subprocess as _subprocess
+    code = (
+        "import FreeCAD as App\n"
+        "doc = App.openDocument(" + repr(saved_path) + ")\n"
+        "sk = doc.getObject('Sketch1')\n"
+        "n = len(sk.Constraints)\n"
+        "print('CONSTRAINT_COUNT=' + str(n))\n"
+        "if n > 0:\n"
+        "    c = sk.Constraints[0]\n"
+        "    print('CONSTRAINT_TYPE=' + str(c.Type))\n"
+        "    print('CONSTRAINT_FIRST=' + str(c.First))\n"
+        "    print('CONSTRAINT_SECOND=' + str(c.Second))\n"
+        "    print('CONSTRAINT_VALUE=' + str(c.Value))\n"
+        "\n"
+        "App.closeDocument(doc.Name)\n"
+        "\n"
+    )
+    proc = _subprocess.run(
+        [str(_DISCOVERED)],
+        input=code,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    output = proc.stdout
+    assert "CONSTRAINT_COUNT=1" in output, output
+    assert "CONSTRAINT_TYPE=Distance" in output, output
+    assert "CONSTRAINT_FIRST=0" in output, output
+    assert "CONSTRAINT_SECOND=1" in output, output
+    assert "CONSTRAINT_VALUE=30.0" in output, output
+
+
+@requires_freecad
 def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> None:
     """inspect_sketch returns structured errors for missing sketch and wrong type."""
     bridge = FreeCadBridge.from_settings(_settings())
