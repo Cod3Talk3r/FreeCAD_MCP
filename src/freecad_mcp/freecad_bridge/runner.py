@@ -514,7 +514,17 @@ def _op_recompute(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "op": "recompute", "error": f"FreeCAD error: {exc}"}
 
     ws_mod.release_lock(lock_path, pid)
-    return {"document_id": normalized, "meta_before": meta_before}
+    meta = ws_mod.read_meta(wks.meta_path(normalized))
+    return {
+        "ok": True,
+        "op": "recompute",
+        "result": {
+            "document_id": normalized,
+            "recomputed_at": datetime.now(timezone.utc).isoformat(),
+            "revision": meta.get("revision"),
+            "meta_before": meta_before,
+        },
+    }
 
 
 def _op_list_objects(params: dict[str, Any]) -> dict[str, Any]:

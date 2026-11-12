@@ -858,11 +858,11 @@ def test_op_recompute_success_returns_meta_before(
         {"document_id": "mydoc", "workspace": str(tmp_path)}
     )
 
-    # _op_recompute returns the raw result dict (no "ok" key directly);
-    # the envelope wrapper adds "ok": True via handle_request.
-    assert result["document_id"] == "mydoc"
-    assert "meta_before" in result
-    assert result["meta_before"]["revision"] == 0
+    assert result["ok"] is True
+    assert result["op"] == "recompute"
+    assert result["result"]["document_id"] == "mydoc"
+    assert "meta_before" in result["result"]
+    assert result["result"]["meta_before"]["revision"] == 0
 
 
 def test_op_recompute_lock_failure_returns_error(
@@ -905,8 +905,9 @@ def test_op_recompute_uses_active_document_when_names_match(
         {"document_id": "box1", "workspace": str(tmp_path)}
     )
 
-    assert result["document_id"] == "box1"
-    assert "meta_before" in result
+    assert result["ok"] is True
+    assert result["result"]["document_id"] == "box1"
+    assert "meta_before" in result["result"]
 
 
 def test_op_recompute_falls_back_to_workspace_when_active_name_mismatches(
@@ -927,8 +928,9 @@ def test_op_recompute_falls_back_to_workspace_when_active_name_mismatches(
         {"document_id": "otherdoc", "workspace": str(tmp_path)}
     )
 
-    assert result["document_id"] == "otherdoc"
-    assert "meta_before" in result
+    assert result["ok"] is True
+    assert result["result"]["document_id"] == "otherdoc"
+    assert "meta_before" in result["result"]
 
 
 def test_op_recompute_falls_back_to_workspace_when_no_active_document(
@@ -949,8 +951,9 @@ def test_op_recompute_falls_back_to_workspace_when_no_active_document(
         {"document_id": "box1", "workspace": str(tmp_path)}
     )
 
-    assert result["document_id"] == "box1"
-    assert "meta_before" in result
+    assert result["ok"] is True
+    assert result["result"]["document_id"] == "box1"
+    assert "meta_before" in result["result"]
 
 
 def test_op_recompute_open_failure_returns_error(
