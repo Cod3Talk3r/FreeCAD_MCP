@@ -150,6 +150,19 @@ class StepExportResult(BaseModel):
     success: bool = Field(description="Whether the export completed without error.")
 
 
+class SaveDocumentResult(BaseModel):
+    """Result of saving a document."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    saved_path: str = Field(description="Absolute path to the saved FreeCAD document.")
+    revision: Optional[int] = Field(
+        default=None, description="Document metadata revision after the save, when available."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the save and revision increment."
+    )
+
+
 class BooleanCutResult(BaseModel):
     """Result of boolean_cut."""
 
@@ -1975,8 +1988,8 @@ def _register_tools(server: Any, settings: Settings) -> None:
         ),
         structured_output=True,
     )
-    def save_document_tool(params: SaveDocumentParams) -> StepExportResult:
-        """Save the document and return status."""
+    def save_document_tool(params: SaveDocumentParams) -> SaveDocumentResult:
+        """Save the document and return its persisted path and prior metadata."""
         bridge = _make_bridge(settings)
         bridge_params: dict[str, Any] = {
             "document_id": params.document_id,
@@ -1984,11 +1997,11 @@ def _register_tools(server: Any, settings: Settings) -> None:
         }
         result = _run_bridge_op(bridge, "save_document", bridge_params)
 
-        return StepExportResult(
-            document_id=params.document_id,
-            step_path=result.get("saved_path", ""),
-            exported_count=0,
-            success=True,
+        return SaveDocumentResult(
+            document_id=result["document_id"],
+            saved_path=result["saved_path"],
+            revision=result.get("revision"),
+            meta_before=result.get("meta_before"),
         )
 
     # ------------------------------------------------------------------
@@ -3713,15 +3726,14 @@ def _register_tools(server: Any, settings: Settings) -> None:
         }
         result = _run_bridge_op(bridge, "restore_snapshot", bridge_params)
 
-        result_data = result.get("result", {})
         return RestoreSnapshotResult(
-            document_id=params.document_id,
-            previous_revision=result_data.get("previous_revision", 0),
-            restored_revision=result_data.get("restored_revision", 0),
-            snapshot_revision=result_data.get("snapshot_revision", 0),
-            restored_from_snapshot=result_data.get("restored_from_snapshot", False),
-            preservation_snapshot=result_data.get("preservation_snapshot"),
-            validation=result_data.get("validation"),
+            document_id=result["document_id"],
+            previous_revision=result["previous_revision"],
+            restored_revision=result["restored_revision"],
+            snapshot_revision=result["snapshot_revision"],
+            restored_from_snapshot=result["restored_from_snapshot"],
+            preservation_snapshot=result.get("preservation_snapshot"),
+            validation=result.get("validation"),
         )
 
 # ---------------------------------------------------------------------------

@@ -852,7 +852,12 @@ def _op_save_document(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "op": "save_document",
-        "result": {"document_id": normalized, "saved_path": str(fcstd_path), "meta_before": meta_before},
+        "result": {
+            "document_id": normalized,
+            "saved_path": str(fcstd_path),
+            "revision": meta["revision"],
+            "meta_before": meta_before,
+        },
     }
 
 

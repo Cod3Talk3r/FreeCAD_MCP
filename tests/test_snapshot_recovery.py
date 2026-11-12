@@ -426,4 +426,3 @@ def test_real_restore_missing_snapshot_returns_error(tmp_path: Path) -> None:
             {"document_id": doc_id, "revision": 5, "workspace": str(tmp_path)},
         )
     assert "not found" in str(exc_info.value).lower()
-
