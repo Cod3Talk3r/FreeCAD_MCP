@@ -55,6 +55,7 @@ OP_BOOLEAN_COMMON = "boolean_common"
 OP_SET_PLACEMENT = "set_placement"
 OP_GET_BODY_TIP = "get_body_tip"
 OP_SET_BODY_TIP = "set_body_tip"
+OP_REORDER_BODY_FEATURES = "reorder_body_features"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
@@ -2062,6 +2063,249 @@ def _restore_tip(body: Any, previous_tip: Any, doc: Any) -> None:
         return
     try:
         body.Tip = previous_tip
+        doc.recompute()
+    except Exception:
+        pass
+
+
+def _op_reorder_body_features(params: dict[str, Any]) -> dict[str, Any]:
+    """Reorder the features of a PartDesign::Body within its Group.
+
+    The native FreeCAD API for reordering is ``body.Group = [ordered list]``.
+    FreeCAD itself is permissive about this assignment and will not reject
+    dependency-violating orders, so this operation adds its own validation:
+
+      - ``body_name`` must resolve to a ``PartDesign::Body``.
+      - ``new_order`` must be a non-empty list of object names.
+      - Every name in ``new_order`` must resolve to an existing document object.
+      - Every name in ``new_order`` must be a member of the Body's ``Group``.
+      - The set of names in ``new_order`` must exactly match the current Group
+        membership (no additions or removals).
+      - Dependency order must be preserved: if feature A depends on feature B
+        (``B`` is in ``A.OutList``), then ``B`` must appear before ``A`` in
+        ``new_order``.
+
+    After applying the reorder and recomputing, the current Body.Tip (if any)
+    must still produce a valid Part solid.  If any validation fails, the
+    previous Group order is restored and the operation is rejected with a
+    structured error.
+
+    The document is locked exclusively, recomputed, saved atomically, and its
+    revision is bumped on success.  On any failure the lock is released and the
+    on-disk document is left unmodified (previous Group order preserved).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name = params.get("body_name") or ""
+    new_order = params.get("new_order")
+    workspace_str = params.get("workspace") or ""
+
+    if not body_name.strip():
+        return {"ok": False, "op": "reorder_body_features", "error": "body_name must not be empty."}
+
+    # Validate new_order: must be a non-empty list of strings.
+    if not isinstance(new_order, list) or len(new_order) == 0:
+        return {
+            "ok": False,
+            "op": "reorder_body_features",
+            "error": "new_order must be a non-empty list of object names.",
+        }
+    for name in new_order:
+        if not isinstance(name, str) or not name.strip():
+            return {
+                "ok": False,
+                "op": "reorder_body_features",
+                "error": "new_order must contain only non-empty object name strings.",
+            }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "reorder_body_features", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "reorder_body_features", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "reorder_body_features", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "reorder_body_features", "error": message}
+
+    previous_group: list[Any] = []
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        body = doc.getObject(body_name)
+        if body is None:
+            return _fail(f"object '{body_name}' not found")
+
+        type_id = body.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "Body":
+            return _fail(
+                f"object '{body_name}' is type '{type_id}', not 'PartDesign::Body'; "
+                f"cannot reorder Body features."
+            )
+
+        # Capture the current Group order for restoration on failure.
+        try:
+            previous_group = list(getattr(body, "Group", []) or [])
+        except Exception:
+            previous_group = []
+
+        # Resolve new_order names to document objects.
+        new_order_objects: list[Any] = []
+        for name in new_order:
+            obj = doc.getObject(name)
+            if obj is None:
+                return _fail(f"object '{name}' not found in document '{normalized}'.")
+            new_order_objects.append(obj)
+
+        # Every new_order object must be a member of the Body's Group.
+        # Use identity comparison (not set membership) so the check works even
+        # with test stand-ins that are not hashable.
+        previous_group_ids = {id(g) for g in previous_group}
+        for obj in new_order_objects:
+            if id(obj) not in previous_group_ids:
+                return _fail(
+                    f"object '{getattr(obj, 'Name', obj)}' is not a member of Body "
+                    f"'{body_name}'s Group and cannot be reordered."
+                )
+
+        # The set of objects must exactly match current Group membership.
+        if len(new_order_objects) != len(previous_group):
+            return _fail(
+                "new_order does not match the Body's Group membership: expected "
+                f"{len(previous_group)} members, got {len(new_order_objects)}."
+            )
+        new_order_ids = {id(o) for o in new_order_objects}
+        if new_order_ids != previous_group_ids:
+            missing_ids = previous_group_ids - new_order_ids
+            extra_ids = new_order_ids - previous_group_ids
+            detail = ""
+            if missing_ids:
+                missing = [g for g in previous_group if id(g) in missing_ids]
+                detail += f" missing: {[getattr(o, 'Name', str(o)) for o in missing]}"
+            if extra_ids:
+                extra = [o for o in new_order_objects if id(o) in extra_ids]
+                detail += f" extra: {[getattr(o, 'Name', str(o)) for o in extra]}"
+            return _fail(
+                f"new_order does not match the Body's Group membership.{detail}"
+            )
+
+        # Validate dependency order: if A depends on B (B in A.OutList), B must
+        # appear before A in new_order.  Use id() keys so the check works even
+        # with test stand-ins that are not hashable.
+        position = {id(obj): idx for idx, obj in enumerate(new_order_objects)}
+        for obj in new_order_objects:
+            try:
+                outlist = list(getattr(obj, "OutList", []) or [])
+            except Exception:
+                outlist = []
+            for dep in outlist:
+                dep_id = id(dep)
+                if dep_id in position and position[dep_id] > position[id(obj)]:
+                    return _fail(
+                        f"reorder would break dependencies: object '{getattr(obj, 'Name', obj)}' "
+                        f"depends on '{getattr(dep, 'Name', str(dep))}', which must appear before it."
+                    )
+
+        # Record the previous Tip for validation after reorder.
+        previous_tip = body.Tip
+
+        # Apply the reorder via the native FreeCAD API.
+        try:
+            body.Group = new_order_objects
+        except Exception as exc:
+            return _fail(f"could not reorder Body features: {exc}")
+
+        # Recompute so FreeCAD evaluates the feature tree under the new order.
+        doc.recompute()
+
+        # Verify the current Tip (if any) still produces a valid solid.
+        tip_obj = body.Tip
+        if tip_obj is not None:
+            tip_shape = getattr(tip_obj, "Shape", None)
+            if tip_shape is None:
+                # Restore previous Group order on failure.
+                _restore_group(body, previous_group, doc)
+                return _fail(f"Tip '{getattr(tip_obj, 'Name', tip_obj)}' produces no shape after reorder.")
+            try:
+                if not bool(tip_shape.isValid()):
+                    _restore_group(body, previous_group, doc)
+                    return _fail(
+                        f"Tip '{getattr(tip_obj, 'Name', tip_obj)}' produces an invalid shape after reorder."
+                    )
+            except Exception:
+                _restore_group(body, previous_group, doc)
+                return _fail(f"Tip '{getattr(tip_obj, 'Name', tip_obj)}' shape validation failed after reorder.")
+            try:
+                solids = list(getattr(tip_shape, "Solids", []) or [])
+            except Exception:
+                solids = []
+            if not solids:
+                _restore_group(body, previous_group, doc)
+                return _fail(f"Tip '{getattr(tip_obj, 'Name', tip_obj)}' produces no solid after reorder.")
+
+        # Persist atomically and bump the revision.
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "reorder_body_features", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "reorder_body_features",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name,
+            "new_order": [getattr(o, "Name", str(o)) for o in new_order_objects],
+            "previous_order": [getattr(o, "Name", str(o)) for o in previous_group],
+            "tip_name": getattr(body.Tip, "Name", None) if body.Tip is not None else None,
+            "tip_type": getattr(body.Tip, "TypeId", None) if body.Tip is not None else None,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _restore_group(body: Any, previous_group: list[Any], doc: Any) -> None:
+    """Best-effort restoration of a previous Body.Group order after a failed validation.
+
+    Never raises: a failed reorder_body_features must leave the Body's Group
+    unchanged and must not compound the problem with a secondary exception.
+    """
+    if not previous_group:
+        return
+    try:
+        body.Group = previous_group
         doc.recompute()
     except Exception:
         pass
@@ -8794,6 +9038,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SET_PLACEMENT: _op_set_placement,
     OP_GET_BODY_TIP: _op_get_body_tip,
     OP_SET_BODY_TIP: _op_set_body_tip,
+    OP_REORDER_BODY_FEATURES: _op_reorder_body_features,
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,

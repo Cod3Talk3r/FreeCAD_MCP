@@ -789,6 +789,19 @@ class SetBodyTipParams(BaseModel):
     )
 
 
+class ReorderBodyFeaturesParams(BaseModel):
+    """Parameters for reordering features within a PartDesign::Body's Group."""
+
+    document_id: str = Field(description="Existing document containing the Body.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body whose features to reorder.")
+    new_order: list[str] = Field(
+        description="Ordered list of internal object names defining the new Body.Group order. Must contain exactly the current Group members."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
 class CreateSketchParams(BaseModel):
     """Parameters for creating a Sketcher::SketchObject."""
 
@@ -1664,6 +1677,36 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "workspace": params.workspace or "",
         }
         return _run_bridge_op(bridge, "set_body_tip", bridge_params)
+
+    # ------------------------------------------------------------------
+    # reorder_body_features
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="reorder_body_features",
+        title="Reorder body features",
+        description=(
+            "Reorder the features within a PartDesign::Body's Group using a "
+            "new ordered list of internal object names.  The reorder is only "
+            "accepted if every object remains a Group member, the membership "
+            "set is unchanged, and dependency order (OutList/InList) is "
+            "preserved.  After reordering, the current Body.Tip must still "
+            "produce a valid Part solid; otherwise the previous Group order is "
+            "restored and the operation is rejected.  The document is locked, "
+            "recomputed, saved atomically, and its revision is bumped on "
+            "success.  Use stable internal object names, not mutable Labels."
+        ),
+        structured_output=True,
+    )
+    def reorder_body_features_tool(params: ReorderBodyFeaturesParams) -> dict[str, Any]:
+        """Reorder the features of a PartDesign::Body and return the new order."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "new_order": params.new_order,
+            "workspace": params.workspace or "",
+        }
+        return _run_bridge_op(bridge, "reorder_body_features", bridge_params)
 
     # ------------------------------------------------------------------
     # recompute
