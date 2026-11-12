@@ -218,6 +218,18 @@ class CreateSketchResult(BaseModel):
     edges: int = Field(description="Number of Sketcher geometries in the sketch (0 on creation).")
 
 
+class CreateBodyResult(BaseModel):
+    """Result of create_body."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    body_name: str = Field(description="Name of the new Body object.")
+    type: str = Field(description="FreeCAD TypeId, 'PartDesign::Body'.")
+    features: int = Field(description="Number of features in the Body (0 on creation).")
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the Body was created."
+    )
+
+
 class SketchAddRectangleResult(BaseModel):
     """Result of sketch_add_rectangle."""
 
@@ -851,6 +863,16 @@ class CreateSketchParams(BaseModel):
 
     document_id: str = Field(description="Existing document to add the sketch to.")
     sketch_name: str = Field(default="Sketch", description="Name for the new Sketch object.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class CreateBodyParams(BaseModel):
+    """Parameters for creating a native PartDesign::Body."""
+
+    document_id: str = Field(description="Existing document to add the Body to.")
+    body_name: str = Field(default="Body", description="Name for the new PartDesign::Body object.")
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -2266,6 +2288,39 @@ def _register_tools(server: Any, settings: Settings) -> None:
             type=result.get("type", "Sketcher::SketchObject"),
             plane=result.get("plane", "XY"),
             edges=result.get("edges", 0),
+        )
+
+    # ------------------------------------------------------------------
+    # create_body
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="create_body",
+        title="Create a PartDesign Body",
+        description=(
+            "Create a native PartDesign::Body in an existing document.  The "
+            "Body is the container for PartDesign features such as Pad, Pocket, "
+            "and sketches.  A Body with the same name must not already exist; "
+            "object names are unique within a FreeCAD document.  The document "
+            "is locked exclusively during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def create_body_tool(params: CreateBodyParams) -> CreateBodyResult:
+        """Create a Body and return its info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "create_body", bridge_params)
+
+        return CreateBodyResult(
+            document_id=params.document_id,
+            body_name=result.get("body_name", params.body_name),
+            type=result.get("type", "PartDesign::Body"),
+            features=result.get("features", 0),
+            meta_before=result.get("meta_before"),
         )
 
     # ------------------------------------------------------------------

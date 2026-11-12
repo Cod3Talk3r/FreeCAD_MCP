@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from freecad_mcp.tools.modeling import (
+    CreateBodyParams,
+    CreateBodyResult,
     CreateSketchParams,
     InspectSketchParams,
     SketchAddCircleParams,
@@ -86,6 +88,28 @@ def test_create_sketch_params_defaults():
     """CreateSketchParams should default the sketch name."""
     p = CreateSketchParams(document_id="mydoc")
     assert p.sketch_name == "Sketch"
+
+
+def test_create_body_params_valid():
+    """Valid CreateBodyParams should be accepted."""
+    p = CreateBodyParams(document_id="mydoc", body_name="MyBody")
+    assert p.document_id == "mydoc"
+    assert p.body_name == "MyBody"
+
+
+def test_create_body_params_defaults():
+    """CreateBodyParams should default the body name."""
+    p = CreateBodyParams(document_id="mydoc")
+    assert p.body_name == "Body"
+
+
+def test_create_body_result_fields():
+    """CreateBodyResult should carry the created body info."""
+    r = CreateBodyResult(document_id="mydoc", body_name="MyBody", type="PartDesign::Body", features=0)
+    assert r.document_id == "mydoc"
+    assert r.body_name == "MyBody"
+    assert r.type == "PartDesign::Body"
+    assert r.features == 0
 
 
 def test_sketch_add_rectangle_params_valid():

@@ -1438,6 +1438,60 @@ def test_sketch_add_rectangle_creates_four_connected_segments(
     assert not (tmp_path / "skdoc.lock").exists()
 
 
+def test_sequential_operations_after_sketch_add_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subsequent operation after sketch_add_rectangle must not hit a stale lock.
+
+    Regression test: _op_sketch_add_rectangle previously left its lock file in
+    place on success (release_lock was unreachable after an early return inside
+    the except block), so the very next bridge call failed with
+    "document locked by alive process".
+    """
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document(
+        {"document_id": "seqdoc", "workspace": str(tmp_path)}
+    )
+    runner._op_create_sketch(
+        {"document_id": "seqdoc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    # First operation: add rectangle to the sketch.
+    result1 = runner._op_sketch_add_rectangle(
+        {
+            "document_id": "seqdoc",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 5.0,
+            "height": 5.0,
+        }
+    )
+    assert result1["ok"] is True
+    assert result1["result"]["edges_added"] == 4
+    assert not (tmp_path / "seqdoc.lock").exists(), "lock must be released after sketch_add_rectangle"
+
+    # Second operation immediately after: must acquire the lock cleanly.
+    result2 = runner._op_create_box(
+        {
+            "document_id": "seqdoc",
+            "workspace": str(tmp_path),
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+        }
+    )
+    assert result2["ok"] is True
+    assert result2["op"] == "create_box"
+    assert not (tmp_path / "seqdoc.lock").exists(), "lock must be released after create_box"
+
+    # Box1 must exist in the document.
+    assert doc.getObject("Box1") is not None
+
+
 def test_sketch_add_circle_creates_circle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     doc = _FakeDoc()
     _install_fake_freecad(monkeypatch, doc)
@@ -6937,6 +6991,109 @@ def test_sketch_pad_reuses_existing_body(
         1 for obj in doc.objects.values() if getattr(obj, "TypeId", "") == "PartDesign::Body"
     )
     assert body_count == 1
+
+
+def test_create_body_creates_partdesign_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """create_body adds a native PartDesign::Body with an empty Group."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    result = runner._op_create_body(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "create_body"
+    assert result["result"]["document_id"] == "edit"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["type"] == "PartDesign::Body"
+    assert result["result"]["features"] == 0
+
+    body = doc.objects["Body"]
+    assert getattr(body, "TypeId", "") == "PartDesign::Body"
+    assert body.Group == []
+
+
+def test_create_body_rejects_name_clash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """create_body rejects a Body name that already exists in the document."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_body(
+        {"document_id": "edit", "workspace": str(tmp_path), "body_name": "Body"}
+    )
+
+    result = runner._op_create_body(
+        {"document_id": "edit", "workspace": str(tmp_path), "body_name": "Body"}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "create_body"
+    assert "already exists" in result["error"].lower()
+    # The first Body is untouched.
+    assert (
+        sum(
+            1
+            for o in doc.objects.values()
+            if getattr(o, "TypeId", "") == "PartDesign::Body"
+        )
+        == 1
+    )
+
+
+def test_sketch_pad_reuses_explicitly_created_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_pad adds a standalone sketch to a Body created via create_body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_body(
+        {"document_id": "edit", "workspace": str(tmp_path), "body_name": "MyBody"}
+    )
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    # Verify sketch is standalone (not in any Body) before the pad.
+    assert all(sketch not in getattr(o, "Group", []) for o in doc.objects.values())
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "body_name": "MyBody",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pad"
+    assert result["result"]["body_name"] == "MyBody"
+
+    # The sketch was added to the explicitly created Body; no extra Body created.
+    body = doc.objects["MyBody"]
+    assert sketch in body.Group
+    assert (
+        sum(
+            1
+            for o in doc.objects.values()
+            if getattr(o, "TypeId", "") == "PartDesign::Body"
+        )
+        == 1
+    )
 
 
 def test_sketch_pad_missing_sketch(

@@ -56,6 +56,7 @@ OP_SET_PLACEMENT = "set_placement"
 OP_GET_BODY_TIP = "get_body_tip"
 OP_SET_BODY_TIP = "set_body_tip"
 OP_REORDER_BODY_FEATURES = "reorder_body_features"
+OP_CREATE_BODY = "create_body"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_VALIDATE_REOPEN = "validate_reopen"
@@ -2355,6 +2356,97 @@ def _restore_group(body: Any, previous_group: list[Any], doc: Any) -> None:
         pass
 
 
+def _op_create_body(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native ``PartDesign::Body`` in the workspace document.
+
+    The Body is created with ``doc.addObject("PartDesign::Body", body_name)``
+    and saved atomically.  Object names are unique within a FreeCAD document, so
+    a Body with the same name must not already exist; an exact name clash is
+    reported as a structured error rather than silently renaming the Body,
+    because downstream tools (Pad, Pocket, Body.Tip) reference the Body by
+    name.  The document is locked exclusively during the operation.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name = params.get("body_name") or "Body"
+    workspace_str = params.get("workspace") or ""
+
+    if not body_name.strip():
+        return {"ok": False, "op": "create_body", "error": "body_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "create_body", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "create_body", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "create_body", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "create_body", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_or_create_document(_FC, wks, normalized)
+
+        if doc.getObject(body_name) is not None:
+            return _fail(f"object '{body_name}' already exists in document '{normalized}'.")
+
+        try:
+            body = doc.addObject("PartDesign::Body", body_name)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Body: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "create_body", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "create_body",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name,
+            "type": "PartDesign::Body",
+            "features": 0,
+            "meta_before": meta_before,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # New operation handlers for Milestone 9-A (Sketcher 2D geometry)
 # ---------------------------------------------------------------------------
@@ -2537,22 +2629,22 @@ def _op_sketch_add_rectangle(params: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return _fail(f"FreeCAD error: {exc}")
 
-        ws_mod.release_lock(lock_path, pid)
-        return {
-            "ok": True,
-            "op": "sketch_add_rectangle",
-            "result": {
-                "document_id": normalized,
-                "sketch_name": sketch_name,
-                "x": x_val,
-                "y": y_val,
-                "width": width_val,
-                "height": height_val,
-                "edges_added": 4,
-                "total_edges": len(getattr(sketch, "Geometry", [])),
-                "meta_before": meta_before,
-            },
-        }
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_rectangle",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "x": x_val,
+            "y": y_val,
+            "width": width_val,
+            "height": height_val,
+            "edges_added": 4,
+            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "meta_before": meta_before,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -6229,7 +6321,8 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
             )
 
         # Determine the Body: reuse an existing Body that contains the sketch,
-        # or create a new Body and add the sketch to it.
+        # or an explicitly named Body supplied by the caller (even when the
+        # sketch is not yet a member of it), or create a new Body.
         body = None
         try:
             for obj in getattr(doc, "Objects", []) or []:
@@ -6245,7 +6338,19 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
             body = None
 
         if body is None:
-            # No existing Body contains the sketch.  Create a new Body.
+            # Reuse an explicitly named Body if it already exists.  This lets a
+            # caller create a Body first (create_body) and then add a standalone
+            # sketch to it via the Pad operation.
+            try:
+                named_body = doc.getObject(body_name)
+            except Exception:
+                named_body = None
+            if named_body is not None and getattr(named_body, "TypeId", "") == "PartDesign::Body":
+                body = named_body
+
+        if body is None:
+            # No existing Body hosts the sketch and no matching named Body
+            # exists.  Create a new Body.
             # Avoid name clashes.
             counter = 0
             desired_body_name = body_name
@@ -6258,17 +6363,19 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
                 return _fail(
                     f"FreeCAD could not create a PartDesign::Body: {exc}"
                 )
-            # Add the sketch to the Body.  This preserves the sketch's identity,
-            # geometry, and parametric editability.
-            try:
-                body.addObject(sketch)
-            except Exception as exc:
-                return _fail(
-                    f"FreeCAD could not add sketch to Body: {exc}.  The sketch may already "
-                    f"belong to another Body or may not be suitable for PartDesign."
-                )
 
         body_name_used = getattr(body, "Name", body_name)
+
+        # Add the sketch to the Body if it is not already a member.  This
+        # preserves the sketch's identity, geometry, and parametric editability.
+        try:
+            if sketch not in getattr(body, "Group", []) and sketch not in getattr(body, "outList", []):
+                body.addObject(sketch)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not add sketch to Body: {exc}.  The sketch may already "
+                f"belong to another Body or may not be suitable for PartDesign."
+            )
 
         # Create the Pad.  Avoid name clashes.
         counter = 0
@@ -9643,6 +9750,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_GET_BODY_TIP: _op_get_body_tip,
     OP_SET_BODY_TIP: _op_set_body_tip,
     OP_REORDER_BODY_FEATURES: _op_reorder_body_features,
+    OP_CREATE_BODY: _op_create_body,
     OP_VALIDATE_REOPEN: _op_validate_reopen,
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
