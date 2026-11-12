@@ -1339,6 +1339,34 @@ class ListSnapshotsResult(BaseModel):
     count: int = Field(description="Number of snapshots listed.")
 
 
+class RestoreSnapshotParams(BaseModel):
+    """Parameters for restoring a document from a revision snapshot."""
+
+    document_id: str = Field(description="Document to restore.")
+    revision: int = Field(
+        description="Revision number of the snapshot to restore."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class RestoreSnapshotResult(BaseModel):
+    """Result of restoring a document from a revision snapshot."""
+
+    document_id: str = Field(description="Document that was restored.")
+    previous_revision: int = Field(description="Revision number before restoration.")
+    restored_revision: int = Field(description="Revision number after restoration.")
+    snapshot_revision: int = Field(description="Revision number of the snapshot used.")
+    restored_from_snapshot: bool = Field(description="Whether the restore came from a snapshot.")
+    preservation_snapshot: Optional[dict[str, Any]] = Field(
+        default=None, description="Preservation snapshot info (current state before restore)."
+    )
+    validation: Optional[dict[str, Any]] = Field(
+        default=None, description="Reopen validation results after restoration."
+    )
+
+
 class DeleteObjectParams(BaseModel):
     """Parameters for deleting an object from a document."""
 
@@ -3657,6 +3685,43 @@ def _register_tools(server: Any, settings: Settings) -> None:
             document_id=params.document_id,
             snapshots=result.get("snapshots", []),
             count=result.get("count", 0),
+        )
+
+    # ------------------------------------------------------------------
+    # restore_snapshot
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="restore_snapshot",
+        title="Restore document from snapshot",
+        description=(
+            "Restore a document from a selected revision snapshot.  Before "
+            "replacing the current document, its state is preserved as a "
+            "preservation snapshot.  After atomic replacement, the restored "
+            "document is validated via reopen validation.  If validation "
+            "fails, the previous artifact is restored.  Snapshots are "
+            "identified by document ID and revision number."
+        ),
+        structured_output=True,
+    )
+    def restore_snapshot_tool(params: RestoreSnapshotParams) -> RestoreSnapshotResult:
+        """Restore a document from a revision snapshot and return recovery info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "revision": params.revision,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "restore_snapshot", bridge_params)
+
+        result_data = result.get("result", {})
+        return RestoreSnapshotResult(
+            document_id=params.document_id,
+            previous_revision=result_data.get("previous_revision", 0),
+            restored_revision=result_data.get("restored_revision", 0),
+            snapshot_revision=result_data.get("snapshot_revision", 0),
+            restored_from_snapshot=result_data.get("restored_from_snapshot", False),
+            preservation_snapshot=result_data.get("preservation_snapshot"),
+            validation=result_data.get("validation"),
         )
 
 # ---------------------------------------------------------------------------

@@ -712,6 +712,115 @@ def create_snapshot(
     }
 
 
+def restore_snapshot(
+    workspace: Workspace,
+    document_id: str,
+    revision: int,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """Restore *document_id* from the snapshot at *revision*.
+
+    Before replacing the current document, preserves its current state as a
+    preservation snapshot (best-effort).  The current ``.fcstd`` artifact and
+    its metadata sidecar are then atomically replaced with the snapshot's
+    copies.  Revision metadata is updated to a new revision (previous + 1) to
+    avoid silently reusing an old revision number.
+
+    The caller is responsible for validating the restored document (e.g. via
+    ``validate_reopen``) and rolling back using the preservation snapshot if
+    validation fails.
+
+    Safety: a failed atomic replace leaves the current document intact.
+
+    Returns a dict with restoration info (``ok: True``) or an error dict
+    (``ok: False``).
+    """
+    pid = pid or os.getpid()
+
+    # Find the target snapshot
+    snapshot_fcstd = snapshot_path(workspace, document_id, revision)
+    snapshot_meta = snapshot_meta_path(workspace, document_id, revision)
+
+    if not snapshot_fcstd.is_file():
+        return {
+            "ok": False,
+            "error": (
+                f"snapshot at revision {revision} not found for document "
+                f"'{document_id}'"
+            ),
+        }
+    if not snapshot_meta.is_file():
+        return {
+            "ok": False,
+            "error": (
+                f"snapshot metadata at revision {revision} not found for "
+                f"document '{document_id}'"
+            ),
+        }
+
+    fcstd_src = workspace.document_path(document_id)
+    meta_src = workspace.meta_path(document_id)
+
+    # Read current meta for previous revision
+    current_meta = read_meta(meta_src) if meta_src.is_file() else {}
+    previous_revision = current_meta.get("revision", 0)
+
+    # Preserve current state as a preservation snapshot (best-effort).
+    # Never block a restore because preservation failed.
+    preservation_snapshot: dict[str, Any] | None = None
+    if fcstd_src.is_file():
+        try:
+            preservation_result = create_snapshot(
+                workspace, document_id, previous_revision, pid=pid
+            )
+            if preservation_result.get("ok"):
+                preservation_snapshot = preservation_result
+        except Exception:
+            pass
+
+    # Atomic replace current .fcstd with snapshot .fcstd.
+    def _write_fcstd_tmp(tmp_path: Path) -> None:
+        tmp_path.write_bytes(snapshot_fcstd.read_bytes())
+
+    try:
+        atomic_save(fcstd_src, _write_fcstd_tmp)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"failed to restore document: {exc}",
+        }
+
+    # Replace current meta with snapshot-derived meta at a new revision.
+    try:
+        snapshot_meta_data = read_meta(snapshot_meta)
+        new_meta: dict[str, Any] = {
+            "revision": previous_revision + 1,
+            "document_id": document_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "restored_from_revision": revision,
+            "restored_from_snapshot": True,
+            "source_revision": snapshot_meta_data.get("revision"),
+            "source_last_saved_at": snapshot_meta_data.get("last_saved_at"),
+        }
+        write_meta(meta_src, new_meta)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"failed to write metadata after restore: {exc}",
+        }
+
+    return {
+        "ok": True,
+        "document_id": document_id,
+        "previous_revision": previous_revision,
+        "restored_revision": previous_revision + 1,
+        "snapshot_revision": revision,
+        "restored_from_snapshot": True,
+        "snapshot_path": str(snapshot_fcstd),
+        "preservation_snapshot": preservation_snapshot,
+    }
+
+
 # ---------------------------------------------------------------------------
 # High-level convenience: create-document workflow
 # ---------------------------------------------------------------------------

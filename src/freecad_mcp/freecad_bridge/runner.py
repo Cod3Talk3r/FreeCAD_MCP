@@ -86,6 +86,7 @@ OP_PARTDESIGN_MIRRORED = "partdesign_mirrored"
 OP_PARTDESIGN_THICKNESS = "partdesign_thickness"
 OP_CREATE_SNAPSHOT = "create_snapshot"
 OP_LIST_SNAPSHOTS = "list_snapshots"
+OP_RESTORE_SNAPSHOT = "restore_snapshot"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -2969,6 +2970,142 @@ def _op_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
             "document_id": normalized,
             "snapshots": snapshots,
             "count": len(snapshots),
+        },
+    }
+
+
+def _op_restore_snapshot(params: dict[str, Any]) -> dict[str, Any]:
+    """Restore a document from a selected revision snapshot.
+
+    Identifies snapshots by document ID and revision (never arbitrary paths).
+    Before replacing the current document, preserves its current state as a
+    preservation snapshot.  After atomic replacement, validates the restored
+    document via reopen validation.  If validation fails, rolls back to the
+    preservation snapshot.
+
+    Returns ``ok: True`` with a structured report (restored revision, previous
+    revision, validation results, recovery snapshot info) or ``ok: False``
+    with a structured error.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    workspace_str = params.get("workspace") or ""
+    revision = params.get("revision")
+
+    if not isinstance(revision, int) or revision < 0:
+        return {
+            "ok": False,
+            "op": "restore_snapshot",
+            "error": "revision must be a non-negative integer",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "restore_snapshot", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "restore_snapshot", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {
+            "ok": False,
+            "op": "restore_snapshot",
+            "error": lock_status.get("error", "lock failed"),
+        }
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "restore_snapshot", "error": message}
+
+    # Restore from snapshot (preserves current state as preservation snapshot)
+    restore_result = ws_mod.restore_snapshot(wks, normalized, revision, pid=pid)
+    if not restore_result.get("ok"):
+        ws_mod.release_lock(lock_path, pid)
+        return {
+            "ok": False,
+            "op": "restore_snapshot",
+            "error": restore_result.get("error", "restore failed"),
+        }
+
+    previous_revision = restore_result["previous_revision"]
+    restored_revision = restore_result["restored_revision"]
+    snapshot_revision = restore_result["snapshot_revision"]
+    preservation_snapshot = restore_result.get("preservation_snapshot")
+
+    # Validate the restored document via reopen validation.
+    validation_result = _op_validate_reopen(
+        {"document_id": normalized, "workspace": workspace_str or ""}
+    )
+
+    if not validation_result.get("ok"):
+        # Validation itself failed to run; try rollback.
+        rollback_ok = False
+        if preservation_snapshot:
+            try:
+                rollback_result = ws_mod.restore_snapshot(
+                    wks, normalized, previous_revision, pid=pid
+                )
+                rollback_ok = rollback_result.get("ok", False)
+            except Exception:
+                rollback_ok = False
+        ws_mod.release_lock(lock_path, pid)
+        return {
+            "ok": False,
+            "op": "restore_snapshot",
+            "error": f"validation failed: {validation_result.get('error', 'unknown error')}",
+            "rolled_back": rollback_ok,
+            "previous_revision": previous_revision,
+            "restored_revision": restored_revision,
+        }
+
+    report = validation_result.get("result", {})
+    if not report.get("all_passed", False):
+        # Validation found discrepancies; rollback to preservation snapshot.
+        rollback_ok = False
+        if preservation_snapshot:
+            try:
+                rollback_result = ws_mod.restore_snapshot(
+                    wks, normalized, previous_revision, pid=pid
+                )
+                rollback_ok = rollback_result.get("ok", False)
+            except Exception:
+                rollback_ok = False
+        ws_mod.release_lock(lock_path, pid)
+        return {
+            "ok": False,
+            "op": "restore_snapshot",
+            "error": "restored document failed validation; rolled back",
+            "validation_failures": report.get("failures", []),
+            "rolled_back": rollback_ok,
+            "previous_revision": previous_revision,
+            "restored_revision": restored_revision,
+        }
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "restore_snapshot",
+        "result": {
+            "document_id": normalized,
+            "previous_revision": previous_revision,
+            "restored_revision": restored_revision,
+            "snapshot_revision": snapshot_revision,
+            "restored_from_snapshot": True,
+            "preservation_snapshot": preservation_snapshot,
+            "validation": {
+                "all_passed": report.get("all_passed", False),
+                "object_count": report.get("object_count", 0),
+                "checks": report.get("checks", []),
+            },
         },
     }
 
@@ -9531,6 +9668,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PARTDESIGN_THICKNESS: _op_partdesign_thickness,
     OP_CREATE_SNAPSHOT: _op_create_snapshot,
     OP_LIST_SNAPSHOTS: _op_list_snapshots,
+    OP_RESTORE_SNAPSHOT: _op_restore_snapshot,
 }
 
 
