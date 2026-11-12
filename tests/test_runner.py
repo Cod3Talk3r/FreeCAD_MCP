@@ -282,6 +282,9 @@ class _FakeSketch:
         self.Constraints.append(constraint)
         return len(self.Constraints) - 1
 
+    def delConstraint(self, index: int) -> None:
+        del self.Constraints[index]
+
 
 class _FakeBoundBox:
     """Minimal stand-in for a FreeCAD BoundBox."""
@@ -3527,6 +3530,241 @@ def test_sketch_delete_geometry_missing_sketch(
     assert result["ok"] is False
     assert result["op"] == "sketch_delete_geometry"
     assert "not found" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Sketch delete constraint (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def test_sketch_delete_constraint_deletes_constraint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint removes a constraint and captures its details."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "dcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    class _FakeConstraint:
+        def __init__(self, **kw):
+            self.Type = kw.get("Type", "Horizontal")
+            self.Name = kw.get("Name", "")
+            self.First = kw.get("First", 0)
+            self.Second = kw.get("Second", -2000)
+            self.Third = kw.get("Third", -2000)
+            self.Value = kw.get("Value", 0.0)
+            self.IsActive = kw.get("IsActive", True)
+            self.Driving = kw.get("Driving", True)
+
+    c1 = _FakeConstraint(Type="Horizontal", Name="H1", First=0, Value=0.0)
+    c2 = _FakeConstraint(Type="Vertical", Name="V1", First=1, Value=0.0)
+    c3 = _FakeConstraint(Type="Distance", Name="D1", First=0, Second=1, Value=10.0)
+    sketch.Constraints.extend([c1, c2, c3])
+    sketch.FullyConstrained = False
+    sketch.DoF = 3
+
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 1,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_delete_constraint"
+    assert result["result"]["sketch_name"] == "Sketch1"
+    assert result["result"]["deleted_constraint_index"] == 1
+    assert result["result"]["constraint_count_before"] == 3
+    assert result["result"]["constraint_count_after"] == 2
+
+    deleted = result["result"]["deleted_constraint"]
+    assert deleted["index"] == 1
+    assert deleted["type"] == "Vertical"
+    assert deleted["name"] == "V1"
+    assert deleted["first"] == 1
+    assert deleted["second"] == -2000
+    assert deleted["value"] == 0.0
+    assert deleted["is_active"] is True
+    assert deleted["driving"] is True
+
+    assert result["result"]["fully_constrained"] is False
+    assert result["result"]["degrees_of_freedom"] == 3
+
+    # Vertical constraint removed from sketch.
+    assert len(sketch.Constraints) == 2
+    assert sketch.Constraints[0].Name == "H1"
+    assert sketch.Constraints[1].Name == "D1"
+
+
+def test_sketch_delete_constraint_deletes_first_and_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint works on first and last constraint indices."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "dconend", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    class _FakeConstraint:
+        def __init__(self, **kw):
+            self.Type = kw.get("Type", "Horizontal")
+            self.Name = kw.get("Name", "")
+            self.First = kw.get("First", 0)
+            self.Second = kw.get("Second", -2000)
+            self.Third = kw.get("Third", -2000)
+            self.Value = kw.get("Value", 0.0)
+            self.IsActive = kw.get("IsActive", True)
+            self.Driving = kw.get("Driving", True)
+
+    sketch.Constraints.append(_FakeConstraint(Type="Horizontal", Name="H1", First=0))
+    sketch.Constraints.append(_FakeConstraint(Type="Vertical", Name="V1", First=1))
+
+    # Delete first.
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dconend",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["deleted_constraint_index"] == 0
+    assert result["result"]["constraint_count_before"] == 2
+    assert result["result"]["constraint_count_after"] == 1
+    assert len(sketch.Constraints) == 1
+    assert sketch.Constraints[0].Name == "V1"
+
+    # Delete last (now index 0).
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dconend",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["deleted_constraint_index"] == 0
+    assert result["result"]["constraint_count_before"] == 1
+    assert result["result"]["constraint_count_after"] == 0
+    assert len(sketch.Constraints) == 0
+
+
+def test_sketch_delete_constraint_rejects_negative_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint rejects a negative constraint_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "dconneg", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Constraints.append(
+        type("C", (), {"Type": "Horizontal", "Name": "H1"})()
+    )
+
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dconneg",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": -1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_constraint"
+    assert "out of range" in result["error"].lower()
+    assert len(sketch.Constraints) == 1  # nothing deleted
+
+
+def test_sketch_delete_constraint_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint rejects an out-of-range constraint_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "dconoor", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Constraints.append(
+        type("C", (), {"Type": "Horizontal", "Name": "H1"})()
+    )
+
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dconoor",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 5,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_constraint"
+    assert "out of range" in result["error"].lower()
+    assert len(sketch.Constraints) == 1  # nothing deleted
+
+
+def test_sketch_delete_constraint_rejects_boolean_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint rejects a boolean constraint_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "dconbool", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dconbool",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": True,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_constraint"
+    assert "boolean" in result["error"].lower()
+
+
+def test_sketch_delete_constraint_rejects_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint rejects a missing sketch."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "dconmiss", "workspace": str(tmp_path)})
+
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dconmiss",
+            "workspace": str(tmp_path),
+            "sketch_name": "NoSuchSketch",
+            "constraint_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_delete_constraint"
+    assert "not found" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9-D2-A: Delete sketch geometry (FreeCAD mocked)
+# ---------------------------------------------------------------------------
 
 
 def test_sketch_delete_geometry_wrong_object_type(

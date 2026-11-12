@@ -17,6 +17,8 @@ from freecad_mcp.tools.modeling import (
     SketchAddRectangleParams,
     SketchAddRegularPolygonParams,
     SketchAddTriangleParams,
+    SketchDeleteConstraintParams,
+    SketchDeleteConstraintResult,
     SketchDeleteGeometryParams,
     SketchEditLineParams,
     TankParams,
@@ -322,6 +324,53 @@ def test_sketch_add_constraint_result_fields():
     assert r.constraint["type"] == "Horizontal"
     assert r.fully_constrained is False
     assert r.degrees_of_freedom == 2
+
+
+def test_sketch_delete_constraint_params_valid():
+    """Valid SketchDeleteConstraintParams should be accepted."""
+    p = SketchDeleteConstraintParams(
+        document_id="mydoc", sketch_name="MySketch", constraint_index=0
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.constraint_index == 0
+    assert p.workspace is None
+
+
+def test_sketch_delete_constraint_params_with_workspace():
+    """SketchDeleteConstraintParams accepts optional workspace."""
+    p = SketchDeleteConstraintParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        constraint_index=3,
+        workspace="/tmp/ws",
+    )
+    assert p.constraint_index == 3
+    assert p.workspace == "/tmp/ws"
+
+
+def test_sketch_delete_constraint_result_fields():
+    """SketchDeleteConstraintResult should carry deletion info."""
+    r = SketchDeleteConstraintResult(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        deleted_constraint_index=1,
+        deleted_constraint={"index": 1, "type": "Vertical", "name": "V1"},
+        constraint_count_before=3,
+        constraint_count_after=2,
+        fully_constrained=False,
+        degrees_of_freedom=1,
+        meta_before={"revision": 5},
+    )
+    assert r.document_id == "mydoc"
+    assert r.sketch_name == "MySketch"
+    assert r.deleted_constraint_index == 1
+    assert r.deleted_constraint["type"] == "Vertical"
+    assert r.constraint_count_before == 3
+    assert r.constraint_count_after == 2
+    assert r.fully_constrained is False
+    assert r.degrees_of_freedom == 1
+    assert r.meta_before == {"revision": 5}
 
 
 def test_sketch_delete_geometry_params_valid():

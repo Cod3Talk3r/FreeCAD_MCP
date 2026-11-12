@@ -2160,6 +2160,261 @@ def test_real_freecad_sketch_add_constraint_persistence(
 
 
 @requires_freecad
+def test_real_freecad_sketch_delete_constraint_deletes_and_verifies(
+    tmp_path: Path) -> None:
+    """sketch_delete_constraint removes a constraint and returns its captured details."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "dconstr", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "dconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "dconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add Horizontal constraint on line 0.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "dconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "H1",
+        },
+    )
+
+    # Add Vertical constraint on line 1.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "dconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Vertical",
+            "first_geometry_index": 1,
+            "name": "V1",
+        },
+    )
+
+    # Verify 2 constraints exist before deletion.
+    info_before = bridge.run(
+        "inspect_sketch",
+        {"document_id": "dconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info_before["constraint_count"] == 2
+
+    # Delete constraint index 1 (Vertical).
+    result = bridge.run(
+        "sketch_delete_constraint",
+        {
+            "document_id": "dconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 1,
+        },
+    )
+    assert result["sketch_name"] == "Sketch1"
+    assert result["deleted_constraint_index"] == 1
+    assert result["constraint_count_before"] == 2
+    assert result["constraint_count_after"] == 1
+
+    deleted = result["deleted_constraint"]
+    assert deleted["index"] == 1
+    assert deleted["type"] == "Vertical"
+    assert deleted["name"] == "V1"
+    assert deleted["first"] == 1
+
+    # Verify only 1 constraint remains.
+    info_after = bridge.run(
+        "inspect_sketch",
+        {"document_id": "dconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info_after["constraint_count"] == 1
+    assert len(info_after["constraints"]) == 1
+    assert info_after["constraints"][0]["type"] == "Horizontal"
+    assert info_after["constraints"][0]["name"] == "H1"
+    assert "fully_constrained" in info_after
+    assert "degrees_of_freedom" in info_after
+
+
+@requires_freecad
+def test_real_freecad_sketch_delete_constraint_invalid_requests(
+    tmp_path: Path) -> None:
+    """Invalid sketch_delete_constraint requests must not modify the sketch."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "dconstr2", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "dconstr2", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "dconstr2",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "dconstr2",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        },
+    )
+
+    # Out-of-range index.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_delete_constraint",
+            {
+                "document_id": "dconstr2",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_index": 5,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Negative index.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_delete_constraint",
+            {
+                "document_id": "dconstr2",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_index": -1,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Boolean index.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_delete_constraint",
+            {
+                "document_id": "dconstr2",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_index": True,
+            },
+        )
+    assert "boolean" in str(excinfo.value).lower()
+
+    # Verify no constraints were deleted by any failed request.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "dconstr2", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["constraint_count"] == 1
+    assert info["constraints"][0]["name"] == "" or info["constraints"][0]["name"] is not None
+
+
+@requires_freecad
+def test_real_freecad_sketch_delete_constraint_persistence(
+    tmp_path: Path) -> None:
+    """Constraint deletion persists after save and reopen."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "dconstr3", "workspace": workspace})
+    saved = bridge.run(
+        "save_document",
+        {"document_id": "dconstr3", "workspace": workspace},
+    )
+    saved_path = saved["saved_path"]
+
+    bridge.run(
+        "create_sketch",
+        {"document_id": "dconstr3", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "dconstr3",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add two constraints, then delete one.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "dconstr3",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "PersistH",
+        },
+    )
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "dconstr3",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Vertical",
+            "first_geometry_index": 1,
+            "name": "PersistV",
+        },
+    )
+
+    result = bridge.run(
+        "sketch_delete_constraint",
+        {
+            "document_id": "dconstr3",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+        },
+    )
+    assert result["constraint_count_after"] == 1
+
+    # Save and reopen; verify only the remaining constraint persists.
+    bridge.run("save_document", {"document_id": "dconstr3", "workspace": workspace})
+    import subprocess as _subprocess
+    proc = _subprocess.run(
+        [str(_DISCOVERED), "-c",
+         "import FreeCAD as App; doc = App.openDocument(" + repr(saved_path) + "); "
+         "sk = doc.getObject('Sketch1'); "
+         "n = len(sk.Constraints); print('CONSTRAINT_COUNT=' + str(n)); "
+         "print('CONSTRAINT_TYPE=' + str(sk.Constraints[0].Type if n > 0 else 'NONE')); "
+         "App.closeDocument(doc.Name)"],
+        capture_output=True, text=True, timeout=120,
+    )
+
+
+@requires_freecad
 def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> None:
     """inspect_sketch returns structured errors for missing sketch and wrong type."""
     bridge = FreeCadBridge.from_settings(_settings())

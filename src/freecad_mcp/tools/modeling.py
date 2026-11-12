@@ -1040,6 +1040,43 @@ class SketchAddConstraintResult(BaseModel):
     )
 
 
+class SketchDeleteConstraintParams(BaseModel):
+    """Parameters for deleting a constraint from an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to delete the constraint from.")
+    constraint_index: int = Field(description="Zero-based index of the constraint to delete.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchDeleteConstraintResult(BaseModel):
+    """Result of sketch_delete_constraint."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the constraint was deleted from.")
+    deleted_constraint_index: int = Field(description="Zero-based index of the deleted constraint.")
+    deleted_constraint: dict[str, Any] = Field(
+        description="Inspected details of the deleted constraint (captured before removal)."
+    )
+    constraint_count_before: Optional[int] = Field(
+        default=None, description="Number of constraints before deletion."
+    )
+    constraint_count_after: Optional[int] = Field(
+        default=None, description="Number of constraints after deletion."
+    )
+    fully_constrained: Optional[bool] = Field(
+        default=None, description="Whether the sketch is fully constrained by the solver after deletion."
+    )
+    degrees_of_freedom: Optional[int] = Field(
+        default=None, description="Solver degrees of freedom (DoF) remaining in the sketch after deletion."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the constraint was deleted."
+    )
+
+
 class SketchDeleteGeometryParams(BaseModel):
     """Parameters for deleting geometry from an existing sketch."""
 
@@ -2779,6 +2816,48 @@ def _register_tools(server: Any, settings: Settings) -> None:
             constraint_index=result.get("constraint_index", -1),
             constraint=result.get("constraint", {}),
             constraint_count=result.get("constraint_count", 0),
+            fully_constrained=result.get("fully_constrained"),
+            degrees_of_freedom=result.get("degrees_of_freedom"),
+            meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_delete_constraint
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_delete_constraint",
+        title="Delete constraint from sketch",
+        description=(
+            "Delete one constraint from an existing Sketcher::SketchObject "
+            "by its zero-based constraint index.  The deleted constraint's "
+            "details are captured before removal.  The document is locked "
+            "exclusively during the operation, recomputed, saved atomically, "
+            "and its revision is bumped.  Deleting a constraint may invalidate "
+            "downstream features that depended on it; solver state is reported "
+            "after deletion so callers can assess impact."
+        ),
+        structured_output=True,
+    )
+    def sketch_delete_constraint_tool(params: SketchDeleteConstraintParams) -> SketchDeleteConstraintResult:
+        """Delete a constraint from a sketch and return its info."""
+        validate_direct_request("sketch_delete_constraint", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "constraint_index": params.constraint_index,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_delete_constraint", bridge_params)
+
+        return SketchDeleteConstraintResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            deleted_constraint_index=result.get("deleted_constraint_index", params.constraint_index),
+            deleted_constraint=result.get("deleted_constraint", {}),
+            constraint_count_before=result.get("constraint_count_before"),
+            constraint_count_after=result.get("constraint_count_after"),
             fully_constrained=result.get("fully_constrained"),
             degrees_of_freedom=result.get("degrees_of_freedom"),
             meta_before=result.get("meta_before"),

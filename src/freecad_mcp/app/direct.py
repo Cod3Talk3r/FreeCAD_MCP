@@ -164,6 +164,12 @@ def validate_direct_request(op: str, params: Any) -> None:
         geometry_index = params.get("geometry_index")
         if isinstance(geometry_index, bool) or not isinstance(geometry_index, int):
             raise ValueError("geometry_index must be an integer (boolean values are not accepted).")
+    elif op == "sketch_delete_constraint":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        constraint_index = params.get("constraint_index")
+        if isinstance(constraint_index, bool) or not isinstance(constraint_index, int):
+            raise ValueError("constraint_index must be an integer (boolean values are not accepted).")
     elif op == "sketch_edit_line":
         if not params.get("sketch_name", "").strip():
             raise ValueError("sketch_name must not be empty.")

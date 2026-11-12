@@ -60,6 +60,7 @@ OP_CREATE_BODY = "create_body"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_SKETCH_ADD_CONSTRAINT = "sketch_add_constraint"
+OP_SKETCH_DELETE_CONSTRAINT = "sketch_delete_constraint"
 OP_VALIDATE_REOPEN = "validate_reopen"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
 OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
@@ -2915,6 +2916,168 @@ def _op_sketch_add_constraint(params: dict[str, Any]) -> dict[str, Any]:
             "constraint_index": constraint_index,
             "constraint": constraint_info,
             "constraint_count": len(getattr(sketch, "Constraints", [])),
+            "fully_constrained": fully_constrained,
+            "degrees_of_freedom": degrees_of_freedom,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_delete_constraint(params: dict[str, Any]) -> dict[str, Any]:
+    """Delete one constraint from an existing sketch (read-modify-write).
+
+    Validates that the target object exists and is a Sketcher::SketchObject,
+    validates constraint_index strictly (integer, not boolean, in range), then
+    deletes exactly the requested constraint via FreeCAD's delConstraint.
+    Captures the deleted constraint's details before removal so callers can
+    verify what was removed. The document is recomputed, saved atomically, and
+    its revision is bumped.
+
+    Deleting a constraint may invalidate downstream features (e.g. Pad or
+    Pocket) that depended on it. FreeCAD does not automatically remove
+    dependent features when a constraint is deleted; this operation reports
+    the actual solver state after deletion so callers can assess impact.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    constraint_index_param = params.get("constraint_index")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate constraint_index: must be an integer, not a boolean.
+    if isinstance(constraint_index_param, bool) or not isinstance(constraint_index_param, int):
+        return {
+            "ok": False,
+            "op": "sketch_delete_constraint",
+            "error": "constraint_index must be an integer (boolean values are not accepted).",
+        }
+
+    constraint_index = constraint_index_param
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_delete_constraint", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_delete_constraint", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_delete_constraint", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_delete_constraint", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot delete sketch constraint."
+            )
+
+        # Get current constraint count for range validation.
+        try:
+            constraint_count_before = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            constraint_count_before = 0
+
+        if constraint_index < 0 or constraint_index >= constraint_count_before:
+            return _fail(
+                f"constraint_index {constraint_index} is out of range "
+                f"(valid range: 0 to {constraint_count_before - 1})."
+            )
+
+        # Capture the deleted constraint's details before removal.
+        deleted_constraint_info: dict[str, Any] = {"index": constraint_index}
+        try:
+            deleted = list(getattr(sketch, "Constraints", []))[constraint_index]
+            for attr, key in (
+                ("Type", "type"),
+                ("Name", "name"),
+                ("First", "first"),
+                ("Second", "second"),
+                ("Third", "third"),
+                ("Value", "value"),
+                ("IsActive", "is_active"),
+                ("Driving", "driving"),
+            ):
+                try:
+                    deleted_constraint_info[key] = getattr(deleted, attr)
+                except Exception:
+                    deleted_constraint_info[key] = None
+        except Exception:
+            pass
+
+        # Delete the constraint.
+        sketch.delConstraint(constraint_index)
+        doc.recompute()
+
+        # Record constraint count after deletion.
+        constraint_count_after = None
+        try:
+            constraint_count_after = len(getattr(sketch, "Constraints", []))
+        except Exception:
+            constraint_count_after = constraint_count_before - 1
+
+        # Solver state after deletion.
+        try:
+            fc_val = getattr(sketch, "FullyConstrained", None)
+            fully_constrained = bool(fc_val) if fc_val is not None else None
+        except Exception:
+            fully_constrained = None
+        try:
+            degrees_of_freedom = getattr(sketch, "DoF", None)
+        except Exception:
+            degrees_of_freedom = None
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "sketch_delete_constraint", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_delete_constraint",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "deleted_constraint_index": constraint_index,
+            "deleted_constraint": deleted_constraint_info,
+            "constraint_count_before": constraint_count_before,
+            "constraint_count_after": constraint_count_after,
             "fully_constrained": fully_constrained,
             "degrees_of_freedom": degrees_of_freedom,
             "meta_before": meta_before,
@@ -10063,6 +10226,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
     OP_SKETCH_ADD_CONSTRAINT: _op_sketch_add_constraint,
+    OP_SKETCH_DELETE_CONSTRAINT: _op_sketch_delete_constraint,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,
     OP_SKETCH_ADD_TRIANGLE: _op_sketch_add_triangle,
     OP_SKETCH_ADD_ELLIPSE: _op_sketch_add_ellipse,
