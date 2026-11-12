@@ -662,6 +662,19 @@ def _op_inspect_object(params: dict[str, Any]) -> dict[str, Any]:
                 info["constraint_count"] = len(obj.Constraints)
             except Exception:
                 pass
+        # Dependency relationships via native InList/OutList.
+        #   depends_on  = objects this object references/uses (OutList).
+        #   depended_on_by = objects that reference this object (InList).
+        try:
+            outlist = list(getattr(obj, "OutList", []) or [])
+            info["depends_on"] = [getattr(o, "Name", str(o)) for o in outlist]
+        except Exception:
+            info["depends_on"] = []
+        try:
+            inlist = list(getattr(obj, "InList", []) or [])
+            info["depended_on_by"] = [getattr(o, "Name", str(o)) for o in inlist]
+        except Exception:
+            info["depended_on_by"] = []
     except Exception as exc:
         try:
             ws_mod.release_lock(lock_path, pid)

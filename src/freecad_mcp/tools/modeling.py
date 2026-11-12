@@ -72,6 +72,20 @@ class ObjectInfo(BaseModel):
     radius: Optional[float] = Field(
         default=None, description="Radius in mm (cylinders)."
     )
+    depends_on: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of objects this object depends on (native OutList). "
+            "Stable internal object names, not mutable Labels."
+        ),
+    )
+    depended_on_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of objects that depend on this object (native InList). "
+            "Stable internal object names, not mutable Labels."
+        ),
+    )
 
 
 class DocumentList(BaseModel):
@@ -1811,6 +1825,8 @@ def _register_tools(server: Any, settings: Settings) -> None:
             width=raw_info.get("width"),
             height=raw_info.get("height"),
             radius=raw_info.get("radius"),
+            depends_on=raw_info.get("depends_on", []),
+            depended_on_by=raw_info.get("depended_on_by", []),
         )
 
     # ------------------------------------------------------------------

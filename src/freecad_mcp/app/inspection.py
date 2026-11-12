@@ -56,6 +56,8 @@ class ObjectInspection:
     shape_null: bool = False
     shape: ShapeInfo | None = None
     properties: Mapping[str, Any] = field(default_factory=dict)
+    depends_on: list[str] = field(default_factory=list)
+    depended_on_by: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -260,4 +262,6 @@ class DirectInspectionBackend:
             shape_null=shape_null,
             shape=shape,
             properties=properties,
+            depends_on=[str(n) for n in (info.get("depends_on") or [])],
+            depended_on_by=[str(n) for n in (info.get("depended_on_by") or [])],
         )
