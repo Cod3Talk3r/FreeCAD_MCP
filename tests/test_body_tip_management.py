@@ -1,4 +1,4 @@
-"""Focused tests for M13.3 PartDesign Body.Tip management.
+"""Focused tests for PartDesign Body.Tip management.
 
 Mock tests run without FreeCAD: the runner is driven by fakes imported from
 ``tests.test_runner``.  Real-FreeCAD integration tests are skipped when the

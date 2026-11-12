@@ -1,4 +1,4 @@
-"""Focused tests for M13.4 PartDesign Body feature reordering.
+"""Focused tests for PartDesign Body feature reordering.
 
 Mock tests run without FreeCAD: the runner is driven by fakes imported from
 ``tests.test_runner``.  Real-FreeCAD integration tests are skipped when the

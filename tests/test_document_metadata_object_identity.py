@@ -1,4 +1,4 @@
-"""M13.2: Object metadata and stable object identity tests.
+"""Object metadata and stable object identity tests.
 
 Unit/schema tests run without FreeCAD. Real-FreeCAD integration tests are
 skipped when the freecad console executable is unavailable.
