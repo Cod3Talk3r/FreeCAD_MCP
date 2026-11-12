@@ -2797,6 +2797,241 @@ def test_real_freecad_sketch_edit_constraint_persistence(
 
 
 @requires_freecad
+def test_real_freecad_sketch_constraints_end_to_end(
+    tmp_path: Path) -> None:
+    """Complete sketcher constraint lifecycle through MCP stdio.
+
+    create_document -> save -> create_sketch -> add_rectangle -> inspect ->
+    add Horizontal -> inspect -> add Distance -> inspect -> edit Distance ->
+    inspect -> delete Horizontal -> inspect -> save -> close/reopen -> inspect.
+
+    Every call goes through the MCP bridge (stdio); no runner handlers are
+    invoked directly. Constraint indices are taken from actual inspect_sketch
+    responses rather than assumed. Solver fields are verified at every
+    checkpoint.
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+    document_id = "e2econstr"
+    sketch_name = "Sketch1"
+
+    # 1. Create and save a document.
+    bridge.run("create_document", {"document_id": document_id, "workspace": workspace})
+    saved = bridge.run(
+        "save_document", {"document_id": document_id, "workspace": workspace}
+    )
+    saved_path = saved["saved_path"]
+
+    # 2. Create a Sketch.
+    bridge.run(
+        "create_sketch",
+        {"document_id": document_id, "workspace": workspace, "sketch_name": sketch_name},
+    )
+
+    # 3. Add a rectangle via the existing MCP geometry tool.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "sketch_name": sketch_name,
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    def inspect() -> dict:
+        return bridge.run(
+            "inspect_sketch",
+            {
+                "document_id": document_id,
+                "workspace": workspace,
+                "sketch_name": sketch_name,
+            },
+        )
+
+    def constraint_index_by_type(
+        constraint_type: str, name: str | None = None
+    ) -> int:
+        info = inspect()
+        for c in info["constraints"]:
+            if c["type"] == constraint_type and (
+                name is None or c.get("name") == name
+            ):
+                return c["index"]
+        raise AssertionError(
+            f"constraint {constraint_type} {name} not found: {info['constraints']}"
+        )
+
+    # 4. Initial inspection: empty constraint list, solver fields present.
+    info = inspect()
+    assert info["sketch_name"] == sketch_name
+    assert info["geometry_count"] == 4  # 4 lines (rectangle)
+    assert info["constraint_count"] == 0
+    assert info["constraints"] == []
+    assert isinstance(info["fully_constrained"], bool)
+    assert isinstance(info["degrees_of_freedom"], int)
+
+    # 5. Add a Horizontal constraint to line 0.
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "sketch_name": sketch_name,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "H1",
+        },
+    )
+
+    # 6. Inspect: Horizontal present, count 1, solver fields valid.
+    info = inspect()
+    assert info["constraint_count"] == 1
+    h_index = constraint_index_by_type("Horizontal", "H1")
+    h = info["constraints"][h_index]
+    assert h["type"] == "Horizontal"
+    assert h["first"] == 0
+    assert h["name"] == "H1"
+    assert info["fully_constrained"] is not None
+    assert isinstance(info["degrees_of_freedom"], int)
+
+    # 7. Add a Distance constraint between lines 0 and 2 (vertical separation).
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "sketch_name": sketch_name,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 2,
+            "value": 10.0,
+            "name": "D1",
+        },
+    )
+
+    # 8. Inspect: both constraints, count 2, solver fields valid.
+    info = inspect()
+    assert info["constraint_count"] == 2
+    h_index = constraint_index_by_type("Horizontal", "H1")
+    d_index = constraint_index_by_type("Distance", "D1")
+    assert h_index != d_index
+    d = info["constraints"][d_index]
+    assert d["type"] == "Distance"
+    assert d["first"] == 0
+    assert d["second"] == 2
+    assert d["value"] == 10.0
+    assert d["name"] == "D1"
+    assert isinstance(info["fully_constrained"], bool)
+    assert isinstance(info["degrees_of_freedom"], int)
+
+    # 9. Edit the Distance constraint value to 30.0.
+    bridge.run(
+        "sketch_edit_constraint",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "sketch_name": sketch_name,
+            "constraint_index": d_index,
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "second_geometry_index": 2,
+            "value": 30.0,
+            "name": "D1Edited",
+        },
+    )
+
+    # 10. Inspect: Distance value updated, Horizontal preserved, count 2.
+    info = inspect()
+    assert info["constraint_count"] == 2
+    d_index_after = constraint_index_by_type("Distance", "D1Edited")
+    h_index_after = constraint_index_by_type("Horizontal", "H1")
+    assert d_index_after != h_index_after
+    d_after = info["constraints"][d_index_after]
+    assert d_after["type"] == "Distance"
+    assert d_after["value"] == 30.0
+    assert d_after["name"] == "D1Edited"
+    # Horizontal preserved (unrelated constraint unchanged across edit).
+    h_after = info["constraints"][h_index_after]
+    assert h_after["type"] == "Horizontal"
+    assert h_after["name"] == "H1"
+    assert isinstance(info["fully_constrained"], bool)
+    assert isinstance(info["degrees_of_freedom"], int)
+
+    # 11. Delete the Horizontal constraint.
+    bridge.run(
+        "sketch_delete_constraint",
+        {
+            "document_id": document_id,
+            "workspace": workspace,
+            "sketch_name": sketch_name,
+            "constraint_index": h_index_after,
+        },
+    )
+
+    # 12. Inspect: only Distance remains, count 1, index reset to 0, solver fields.
+    info = inspect()
+    assert info["constraint_count"] == 1
+    assert len(info["constraints"]) == 1
+    remaining = info["constraints"][0]
+    assert remaining["index"] == 0
+    assert remaining["type"] == "Distance"
+    assert remaining["value"] == 30.0
+    assert remaining["name"] == "D1Edited"
+    assert isinstance(info["fully_constrained"], bool)
+    assert isinstance(info["degrees_of_freedom"], int)
+
+    # 13. Save, close, and reopen the document.
+    saved = bridge.run(
+        "save_document", {"document_id": document_id, "workspace": workspace}
+    )
+    saved_path = saved["saved_path"]
+    import subprocess as _subprocess
+    code = (
+        "import FreeCAD as App\n"
+        "doc = App.openDocument(" + repr(saved_path) + ")\n"
+        "sk = doc.getObject('Sketch1')\n"
+        "n = len(sk.Constraints)\n"
+        "print('CONSTRAINT_COUNT=' + str(n))\n"
+        "if n > 0:\n"
+        "    c = sk.Constraints[0]\n"
+        "    print('CONSTRAINT_TYPE=' + str(c.Type))\n"
+        "    print('CONSTRAINT_VALUE=' + str(c.Value))\n"
+        "    print('CONSTRAINT_NAME=' + str(c.Name))\n"
+        "\n"
+        "App.closeDocument(doc.Name)\n"
+        "\n"
+    )
+    proc = _subprocess.run(
+        [str(_DISCOVERED)],
+        input=code,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    output = proc.stdout
+    assert "CONSTRAINT_COUNT=1" in output, output
+    assert "CONSTRAINT_TYPE=Distance" in output, output
+    assert "CONSTRAINT_VALUE=30.0" in output, output
+
+    # 14. Inspect the reopened Sketch via MCP (reopens from file).
+    info = inspect()
+    assert info["constraint_count"] == 1
+    assert len(info["constraints"]) == 1
+    final = info["constraints"][0]
+    assert final["index"] == 0
+    assert final["type"] == "Distance"
+    assert final["value"] == 30.0
+    assert final["name"] == "D1Edited"
+    assert isinstance(info["fully_constrained"], bool)
+    assert isinstance(info["degrees_of_freedom"], int)
+
+
+@requires_freecad
 def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> None:
     """inspect_sketch returns structured errors for missing sketch and wrong type."""
     bridge = FreeCadBridge.from_settings(_settings())
