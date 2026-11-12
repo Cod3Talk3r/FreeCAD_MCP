@@ -53,6 +53,8 @@ OP_BOOLEAN_CUT = "boolean_cut"
 OP_BOOLEAN_FUSE = "boolean_fuse"
 OP_BOOLEAN_COMMON = "boolean_common"
 OP_SET_PLACEMENT = "set_placement"
+OP_GET_BODY_TIP = "get_body_tip"
+OP_SET_BODY_TIP = "set_body_tip"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
@@ -1791,6 +1793,278 @@ def _op_set_placement(params: dict[str, Any]) -> dict[str, Any]:
             "meta_before": meta_before,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# New operation handlers for Milestone 13.3 (PartDesign Body.Tip management)
+# ---------------------------------------------------------------------------
+
+def _op_get_body_tip(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the current Tip of a PartDesign::Body.
+
+    Reads (does not modify) ``Body.Tip`` and reports the Tip's internal Name,
+    TypeId, and bounded shape information.  The document is locked exclusively
+    during the read so the Tip cannot change concurrently.  No recompute or
+    save is performed for a read-only inspection.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name = params.get("body_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    if not body_name.strip():
+        return {"ok": False, "op": "get_body_tip", "error": "body_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "get_body_tip", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "get_body_tip", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "get_body_tip", "error": lock_status.get("error", "lock failed")}
+
+    tip_name: str | None = None
+    tip_type: str | None = None
+    tip_shape_info: dict[str, Any] | None = None
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        body = doc.getObject(body_name)
+        if body is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "get_body_tip", "error": f"object '{body_name}' not found"}
+
+        type_id = body.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "Body":
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "get_body_tip",
+                "error": f"object '{body_name}' is type '{type_id}', not 'PartDesign::Body'.",
+            }
+
+        tip = body.Tip
+        if tip is not None:
+            tip_name = getattr(tip, "Name", None)
+            tip_type = getattr(tip, "TypeId", None)
+            # Bounded shape information for the Tip, if it exposes one.
+            shape = getattr(tip, "Shape", None)
+            if shape is not None:
+                tip_shape_info = {}
+                try:
+                    tip_shape_info["valid"] = bool(shape.isValid()) if hasattr(shape, "isValid") else None
+                except Exception:
+                    tip_shape_info["valid"] = None
+                try:
+                    tip_shape_info["volume"] = float(shape.Volume) if hasattr(shape, "Volume") else None
+                except Exception:
+                    tip_shape_info["volume"] = None
+                try:
+                    tip_shape_info["solids_count"] = len(list(getattr(shape, "Solids", []) or []))
+                except Exception:
+                    tip_shape_info["solids_count"] = None
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "get_body_tip", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "get_body_tip",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name,
+            "tip_name": tip_name,
+            "tip_type": tip_type,
+            "tip_shape": tip_shape_info,
+        },
+    }
+
+
+def _op_set_body_tip(params: dict[str, Any]) -> dict[str, Any]:
+    """Set the Tip of a PartDesign::Body to an existing feature of that Body.
+
+    Validation rules:
+      - ``body_name`` must resolve to a ``PartDesign::Body``.
+      - ``tip_name`` must resolve to an existing object.
+      - the Tip object must be a member of the Body's ``Group``.
+      - after assigning the Tip and recomputing, the Tip must produce a valid
+        Part solid (non-null, valid shape with at least one solid).  If this
+        check fails the previous Tip is restored and the operation is rejected.
+
+    The document is locked exclusively, recomputed, saved atomically, and its
+    revision is bumped on success.  On any failure the lock is released and the
+    on-disk document is left unmodified (previous Tip preserved).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name = params.get("body_name") or ""
+    tip_name = params.get("tip_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    if not body_name.strip():
+        return {"ok": False, "op": "set_body_tip", "error": "body_name must not be empty."}
+    if not tip_name.strip():
+        return {"ok": False, "op": "set_body_tip", "error": "tip_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "set_body_tip", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "set_body_tip", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "set_body_tip", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "set_body_tip", "error": message}
+
+    previous_tip: Any = None
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        body = doc.getObject(body_name)
+        if body is None:
+            return _fail(f"object '{body_name}' not found")
+
+        type_id = body.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "Body":
+            return _fail(
+                f"object '{body_name}' is type '{type_id}', not 'PartDesign::Body'; "
+                f"cannot manage Body.Tip."
+            )
+
+        tip = doc.getObject(tip_name)
+        if tip is None:
+            return _fail(f"object '{tip_name}' not found")
+
+        # The Tip must belong to this Body (be a member of its Group).
+        try:
+            group = list(getattr(body, "Group", []) or [])
+        except Exception:
+            group = []
+        if tip not in group:
+            return _fail(
+                f"object '{tip_name}' is not a member of Body '{body_name}'; "
+                f"it cannot be the Body's Tip."
+            )
+
+        # Record the previous Tip so it can be restored if validation fails.
+        previous_tip = body.Tip
+
+        # Assign the new Tip.
+        try:
+            body.Tip = tip
+        except Exception as exc:
+            return _fail(f"could not set Body.Tip to '{tip_name}': {exc}")
+
+        # Recompute so FreeCAD evaluates the feature tree under the new Tip.
+        doc.recompute()
+
+        # Verify the selected Tip produces a valid expected solid after recompute.
+        tip_obj = body.Tip
+        tip_shape = getattr(tip_obj, "Shape", None) if tip_obj is not None else None
+        if tip_shape is None:
+            _restore_tip(body, previous_tip, doc)
+            return _fail(f"Tip '{tip_name}' produces no shape after recompute.")
+
+        try:
+            if not bool(tip_shape.isValid()):
+                _restore_tip(body, previous_tip, doc)
+                return _fail(f"Tip '{tip_name}' produces an invalid shape after recompute.")
+        except Exception:
+            _restore_tip(body, previous_tip, doc)
+            return _fail(f"Tip '{tip_name}' shape validation failed after recompute.")
+
+        try:
+            solids = list(getattr(tip_shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            _restore_tip(body, previous_tip, doc)
+            return _fail(f"Tip '{tip_name}' produces no solid after recompute.")
+
+        # Persist atomically and bump the revision.
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "set_body_tip", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "set_body_tip",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name,
+            "tip_name": tip_name,
+            "previous_tip_name": (
+                getattr(previous_tip, "Name", None) if previous_tip is not None else None
+            ),
+            "tip_type": getattr(body.Tip, "TypeId", None) if body.Tip is not None else None,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _restore_tip(body: Any, previous_tip: Any, doc: Any) -> None:
+    """Best-effort restoration of a previous Body.Tip after a failed validation.
+
+    Never raises: a failed set_body_tip must leave the Body's Tip unchanged and
+    must not compound the problem with a secondary exception.
+    """
+    if previous_tip is None:
+        return
+    try:
+        body.Tip = previous_tip
+        doc.recompute()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -8518,6 +8792,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_BOOLEAN_FUSE: _op_boolean_fuse,
     OP_BOOLEAN_COMMON: _op_boolean_common,
     OP_SET_PLACEMENT: _op_set_placement,
+    OP_GET_BODY_TIP: _op_get_body_tip,
+    OP_SET_BODY_TIP: _op_set_body_tip,
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,

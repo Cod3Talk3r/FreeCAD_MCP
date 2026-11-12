@@ -766,6 +766,29 @@ class SetPlacementParams(BaseModel):
     )
 
 
+class GetBodyTipParams(BaseModel):
+    """Parameters for reading the Tip of an existing PartDesign::Body."""
+
+    document_id: str = Field(description="Existing document containing the Body.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body whose Tip to read.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SetBodyTipParams(BaseModel):
+    """Parameters for changing the Tip of an existing PartDesign::Body."""
+
+    document_id: str = Field(description="Existing document containing the Body.")
+    body_name: str = Field(default="Body", description="Name of the PartDesign::Body whose Tip to set.")
+    tip_name: str = Field(
+        description="Internal Name of the feature to set as the Body's Tip. Must be a member of the Body's Group."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
 class CreateSketchParams(BaseModel):
     """Parameters for creating a Sketcher::SketchObject."""
 
@@ -1590,6 +1613,57 @@ def _register_tools(server: Any, settings: Settings) -> None:
             radius=result.get("radius"),
         )
         return info
+
+    # ------------------------------------------------------------------
+    # get_body_tip
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="get_body_tip",
+        title="Get body tip",
+        description=(
+            "Return the current Tip of a PartDesign::Body: its internal Name, "
+            "TypeId, and bounded shape information (validity, volume, solid "
+            "count).  This is a read-only inspection; it does not modify the "
+            "document.  Use stable internal object names, not mutable Labels."
+        ),
+        structured_output=True,
+    )
+    def get_body_tip_tool(params: GetBodyTipParams) -> dict[str, Any]:
+        """Read the Tip of a PartDesign::Body and return bounded tip info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "workspace": params.workspace or "",
+        }
+        return _run_bridge_op(bridge, "get_body_tip", bridge_params)
+
+    # ------------------------------------------------------------------
+    # set_body_tip
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="set_body_tip",
+        title="Set body tip",
+        description=(
+            "Set the Tip of a PartDesign::Body to an existing feature that is "
+            "already a member of that Body's Group.  The Tip must produce a "
+            "valid Part solid after recompute; otherwise the previous Tip is "
+            "restored and the operation is rejected.  The document is locked, "
+            "recomputed, saved atomically, and its revision is bumped on "
+            "success.  Use stable internal object names, not mutable Labels."
+        ),
+        structured_output=True,
+    )
+    def set_body_tip_tool(params: SetBodyTipParams) -> dict[str, Any]:
+        """Set the Tip of a PartDesign::Body and return the updated tip info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "tip_name": params.tip_name,
+            "workspace": params.workspace or "",
+        }
+        return _run_bridge_op(bridge, "set_body_tip", bridge_params)
 
     # ------------------------------------------------------------------
     # recompute
