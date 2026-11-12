@@ -1854,6 +1854,312 @@ def test_real_freecad_inspect_sketch_constraint_details(tmp_path: Path) -> None:
 
 
 @requires_freecad
+def test_real_freecad_sketch_add_constraint_all_types(tmp_path: Path) -> None:
+    """Add each verified-safe constraint type via MCP and verify against native FreeCAD.
+
+    Supported types: Horizontal, Vertical, Distance, Radius, Diameter, Angle.
+    Geometry: line0 (horizontal), line1 (vertical), circle2 (for Radius/Diameter).
+    """
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "cconstr", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "cconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+
+    # Add two lines and a circle.
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "cconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "cconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 3.0,
+        },
+    )
+
+    # Geometry indices: lines 0-3 (rectangle), circle 4.
+    # line0 = bottom edge (horizontal already), line1 = right edge (vertical already).
+    # We'll add constraints on lines that aren't already constrained that way.
+
+    cases = [
+        ("Horizontal", 0, None, None, {"type": "Horizontal", "first": 0}),
+        ("Vertical", 1, None, None, {"type": "Vertical", "first": 1}),
+        ("Distance", 0, 1, 5.0, {"type": "Distance", "first": 0, "second": 1, "value": 5.0}),
+        ("Radius", 4, None, 7.0, {"type": "Radius", "first": 4, "value": 7.0}),
+        ("Diameter", 4, None, 14.0, {"type": "Diameter", "first": 4, "value": 14.0}),
+        ("Angle", 0, 1, 90.0, {"type": "Angle", "first": 0, "second": 1, "value": 90.0}),
+    ]
+
+    for constraint_type, first_idx, second_idx, val, expected in cases:
+        params: dict = {
+            "document_id": "cconstr",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": constraint_type,
+            "first_geometry_index": first_idx,
+        }
+        if second_idx is not None:
+            params["second_geometry_index"] = second_idx
+        if val is not None:
+            params["value"] = val
+
+        result = bridge.run("sketch_add_constraint", params)
+        assert result is not None, f"{constraint_type}: result was None"
+        assert result["constraint_type"] == constraint_type
+        assert result["constraint_index"] >= 0
+
+        c = result["constraint"]
+        assert c["type"] == expected["type"], f"{constraint_type}: type mismatch"
+        assert c["first"] == expected["first"], f"{constraint_type}: first mismatch"
+        if "second" in expected:
+            assert c["second"] == expected["second"], f"{constraint_type}: second mismatch"
+        if "value" in expected:
+            assert c["value"] == expected["value"], f"{constraint_type}: value mismatch"
+
+    # Verify all constraints are present via inspect_sketch.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "cconstr", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["constraint_count"] == len(cases)
+    assert len(info["constraints"]) == len(cases)
+
+    # Verify solver fields are present.
+    assert "fully_constrained" in info
+    assert "degrees_of_freedom" in info
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_constraint_invalid_requests(
+    tmp_path: Path) -> None:
+    """Invalid sketch_add_constraint requests must not leave partial constraints."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "cconstr2", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "cconstr2", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "cconstr2",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Unsupported constraint type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_constraint",
+            {
+                "document_id": "cconstr2",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_type": "Coincident",
+                "first_geometry_index": 0,
+            },
+        )
+    assert "not supported" in str(excinfo.value).lower()
+
+    # Geometry index out of range.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_constraint",
+            {
+                "document_id": "cconstr2",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_type": "Horizontal",
+                "first_geometry_index": 99,
+            },
+        )
+    assert "out of range" in str(excinfo.value).lower()
+
+    # Missing value for dimensional type.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_constraint",
+            {
+                "document_id": "cconstr2",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_type": "Radius",
+                "first_geometry_index": 4,
+            },
+        )
+    assert "requires a value" in str(excinfo.value).lower()
+
+    # Verify no constraints were added by any of the failed requests.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "cconstr2", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["constraint_count"] == 0
+    assert info["constraints"] == []
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_constraint_geometry_type_mismatch(
+    tmp_path: Path) -> None:
+    """Constraint type incompatible with geometry type must be rejected."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "cconstr3", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "cconstr3", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "cconstr3",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_circle",
+        {
+            "document_id": "cconstr3",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "center_x": 5.0,
+            "center_y": 5.0,
+            "radius": 3.0,
+        },
+    )
+
+    # Radius on a line (not a circle) should fail.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_constraint",
+            {
+                "document_id": "cconstr3",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_type": "Radius",
+                "first_geometry_index": 0,
+                "value": 5.0,
+            },
+        )
+    assert "circle" in str(excinfo.value).lower()
+
+    # Horizontal on a circle should fail.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run(
+            "sketch_add_constraint",
+            {
+                "document_id": "cconstr3",
+                "workspace": workspace,
+                "sketch_name": "Sketch1",
+                "constraint_type": "Horizontal",
+                "first_geometry_index": 4,
+            },
+        )
+    assert "linesegment" in str(excinfo.value).lower()
+
+    # Verify no constraints were added.
+    info = bridge.run(
+        "inspect_sketch",
+        {"document_id": "cconstr3", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    assert info["constraint_count"] == 0
+    assert info["constraints"] == []
+
+
+@requires_freecad
+def test_real_freecad_sketch_add_constraint_persistence(
+    tmp_path: Path) -> None:
+    """Constraint persists after save and reopen."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "cconstr4", "workspace": workspace})
+    saved = bridge.run(
+        "save_document",
+        {"document_id": "cconstr4", "workspace": workspace},
+    )
+    saved_path = saved["saved_path"]
+
+    bridge.run(
+        "create_sketch",
+        {"document_id": "cconstr4", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "cconstr4",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    # Add a Horizontal constraint.
+    result = bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "cconstr4",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "PersistH",
+        },
+    )
+    assert result["constraint_count"] == 1
+
+    # Save and reopen.
+    bridge.run("save_document", {"document_id": "cconstr4", "workspace": workspace})
+    import subprocess as _subprocess
+    proc = _subprocess.run(
+        [str(_DISCOVERED), "-c",
+         f"import FreeCAD as App; doc = App.openDocument({saved_path!r}); "
+         f"sk = doc.getObject('Sketch1'); "
+         f"print('CONSTRAINT_COUNT=' + str(len(sk.Constraints))); "
+         f"print('CONSTRAINT_TYPE=' + str(sk.Constraints[0].Type)); "
+         f"App.closeDocument(doc.Name)"],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    output = proc.stdout
+    assert "CONSTRAINT_COUNT=1" in output, output
+    assert "CONSTRAINT_TYPE=Horizontal" in output, output
+
+
+@requires_freecad
 def test_real_freecad_inspect_sketch_missing_and_wrong_type(tmp_path: Path) -> None:
     """inspect_sketch returns structured errors for missing sketch and wrong type."""
     bridge = FreeCadBridge.from_settings(_settings())

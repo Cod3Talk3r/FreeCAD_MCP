@@ -59,6 +59,7 @@ OP_REORDER_BODY_FEATURES = "reorder_body_features"
 OP_CREATE_BODY = "create_body"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
+OP_SKETCH_ADD_CONSTRAINT = "sketch_add_constraint"
 OP_VALIDATE_REOPEN = "validate_reopen"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
 OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
@@ -2648,8 +2649,277 @@ def _op_sketch_add_rectangle(params: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# New operation handlers for Milestone 13 (persistence / reopen validation)
+# New operation handlers for Milestone 14.2 (Add Sketch Constraints)
 # ---------------------------------------------------------------------------
+
+
+def _op_sketch_add_constraint(params: dict[str, Any]) -> dict[str, Any]:
+    """Add a verified Sketcher constraint to an existing sketch.
+
+    Supports: Horizontal, Vertical, Distance, Radius, Diameter, Angle.
+
+    Constructor signatures (verified against FreeCAD 1.1.4):
+      Constraint("Horizontal", first_geometry_index)
+      Constraint("Vertical", first_geometry_index)
+      Constraint("Distance", first_geometry_index, value)
+      Constraint("Distance", first_geometry_index, second_geometry_index, value)
+      Constraint("Radius", geometry_index, value)
+      Constraint("Diameter", geometry_index, value)
+      Constraint("Angle", first_geometry_index, second_geometry_index, value)
+
+    The document is locked exclusively during the operation, recomputed,
+    saved atomically, and its revision is bumped.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    constraint_type = params.get("constraint_type") or ""
+    first_index = params.get("first_geometry_index")
+    second_index = params.get("second_geometry_index")
+    value = params.get("value")
+    name = params.get("name")
+    workspace_str = params.get("workspace") or ""
+
+    # Supported constraint types.
+    SUPPORTED_TYPES = ("Horizontal", "Vertical", "Distance", "Radius", "Diameter", "Angle")
+    if constraint_type not in SUPPORTED_TYPES:
+        return {
+            "ok": False,
+            "op": "sketch_add_constraint",
+            "error": (
+                f"constraint_type '{constraint_type}' is not supported. "
+                f"Supported types: {', '.join(SUPPORTED_TYPES)}."
+            ),
+        }
+
+    # Validate first_geometry_index.
+    if isinstance(first_index, bool) or not isinstance(first_index, int):
+        return {
+            "ok": False,
+            "op": "sketch_add_constraint",
+            "error": "first_geometry_index must be an integer (boolean values are not accepted).",
+        }
+    if first_index < 0:
+        return {
+            "ok": False,
+            "op": "sketch_add_constraint",
+            "error": "first_geometry_index must be non-negative.",
+        }
+
+    # Validate second_geometry_index when present.
+    if second_index is not None:
+        if isinstance(second_index, bool) or not isinstance(second_index, int):
+            return {
+                "ok": False,
+                "op": "sketch_add_constraint",
+                "error": "second_geometry_index must be an integer (boolean values are not accepted).",
+            }
+        if second_index < 0:
+            return {
+                "ok": False,
+                "op": "sketch_add_constraint",
+                "error": "second_geometry_index must be non-negative.",
+            }
+
+    # Validate dimensional value where required.
+    if constraint_type in ("Distance", "Radius", "Diameter", "Angle"):
+        if value is None:
+            return {
+                "ok": False,
+                "op": "sketch_add_constraint",
+                "error": f"constraint_type '{constraint_type}' requires a value.",
+            }
+        try:
+            value_val = float(value)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "op": "sketch_add_constraint",
+                "error": f"constraint_type '{constraint_type}' value must be a finite number.",
+            }
+        if math.isnan(value_val) or math.isinf(value_val):
+            return {
+                "ok": False,
+                "op": "sketch_add_constraint",
+                "error": f"constraint_type '{constraint_type}' value must be a finite number.",
+            }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_add_constraint", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_add_constraint", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_add_constraint", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_add_constraint", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part module needed before Sketcher loads
+        import Sketcher  # noqa: F401,PLC0415 - register Sketcher types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add constraint."
+            )
+
+        # Validate geometry indices against the sketch.
+        geometry_list = list(getattr(sketch, "Geometry", []))
+        if first_index >= len(geometry_list):
+            return _fail(
+                f"first_geometry_index {first_index} is out of range "
+                f"(sketch has {len(geometry_list)} geometries)."
+            )
+        if second_index is not None and second_index >= len(geometry_list):
+            return _fail(
+                f"second_geometry_index {second_index} is out of range "
+                f"(sketch has {len(geometry_list)} geometries)."
+            )
+
+        # Verify geometry compatibility with constraint type.
+        first_geom_type = type(geometry_list[first_index]).__name__
+        if constraint_type in ("Horizontal", "Vertical", "Radius", "Diameter", "Angle"):
+            if constraint_type in ("Radius", "Diameter") and first_geom_type != "Circle":
+                return _fail(
+                    f"constraint_type '{constraint_type}' requires Circle geometry, "
+                    f"but geometry index {first_index} is '{first_geom_type}'."
+                )
+            if constraint_type == "Angle" and first_geom_type != "LineSegment":
+                return _fail(
+                    f"constraint_type 'Angle' requires LineSegment geometry, "
+                    f"but geometry index {first_index} is '{first_geom_type}'."
+                )
+            if constraint_type in ("Horizontal", "Vertical") and first_geom_type != "LineSegment":
+                return _fail(
+                    f"constraint_type '{constraint_type}' requires LineSegment geometry, "
+                    f"but geometry index {first_index} is '{first_geom_type}'."
+                )
+        if second_index is not None:
+            second_geom_type = type(geometry_list[second_index]).__name__
+            if constraint_type == "Angle" and second_geom_type != "LineSegment":
+                return _fail(
+                    f"constraint_type 'Angle' requires LineSegment geometry, "
+                    f"but geometry index {second_index} is '{second_geom_type}'."
+                )
+            if constraint_type == "Distance" and second_geom_type not in ("LineSegment", "Circle"):
+                return _fail(
+                    f"constraint_type 'Distance' requires LineSegment or Circle geometry, "
+                    f"but geometry index {second_index} is '{second_geom_type}'."
+                )
+
+        # Build the constraint using the verified constructor signatures.
+        constraint = None
+
+        if constraint_type in ("Horizontal", "Vertical"):
+            constraint = Sketcher.Constraint(constraint_type, first_index)
+        elif constraint_type in ("Radius", "Diameter"):
+            constraint = Sketcher.Constraint(constraint_type, first_index, value_val)
+        elif constraint_type == "Distance":
+            if second_index is not None:
+                constraint = Sketcher.Constraint(constraint_type, first_index, second_index, value_val)
+            else:
+                constraint = Sketcher.Constraint(constraint_type, first_index, value_val)
+        elif constraint_type == "Angle":
+            if second_index is None:
+                return _fail(
+                    "constraint_type 'Angle' requires second_geometry_index."
+                )
+            constraint = Sketcher.Constraint(constraint_type, first_index, second_index, value_val)
+
+        if name is not None:
+            constraint.Name = name
+
+        constraint_index = sketch.addConstraint(constraint)
+        doc.recompute()
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "sketch_add_constraint", "error": f"FreeCAD error: {exc}"}
+
+    # Read back the created constraint and solver state for the result.
+    try:
+        created = list(getattr(sketch, "Constraints", []))[constraint_index]
+        constraint_info: dict[str, Any] = {"index": constraint_index}
+        for attr, key in (
+            ("Type", "type"),
+            ("Name", "name"),
+            ("First", "first"),
+            ("Second", "second"),
+            ("Third", "third"),
+            ("Value", "value"),
+            ("IsActive", "is_active"),
+            ("Driving", "driving"),
+        ):
+            try:
+                constraint_info[key] = getattr(created, attr)
+            except Exception:
+                constraint_info[key] = None
+    except Exception:
+        constraint_info = {"index": constraint_index}
+
+    try:
+        fc_val = getattr(sketch, "FullyConstrained", None)
+        fully_constrained = bool(fc_val) if fc_val is not None else None
+    except Exception:
+        fully_constrained = None
+    try:
+        degrees_of_freedom = getattr(sketch, "DoF", None)
+    except Exception:
+        degrees_of_freedom = None
+
+    fcstd_path = wks.document_path(normalized)
+
+    def _write_tmp(tmp_path: str) -> None:
+        doc.saveAs(str(tmp_path))
+
+    ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+    meta = ws_mod.read_meta(wks.meta_path(normalized))
+    meta["revision"] = meta.get("revision", 0) + 1
+    meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+    ws_mod.write_meta(wks.meta_path(normalized), meta)
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_add_constraint",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "constraint_type": constraint_type,
+            "constraint_index": constraint_index,
+            "constraint": constraint_info,
+            "constraint_count": len(getattr(sketch, "Constraints", [])),
+            "fully_constrained": fully_constrained,
+            "degrees_of_freedom": degrees_of_freedom,
+            "meta_before": meta_before,
+        },
+    }
 
 
 def _capture_document_state(doc: Any) -> dict[str, dict[str, Any]]:
@@ -9792,6 +10062,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_VALIDATE_REOPEN: _op_validate_reopen,
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
+    OP_SKETCH_ADD_CONSTRAINT: _op_sketch_add_constraint,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,
     OP_SKETCH_ADD_TRIANGLE: _op_sketch_add_triangle,
     OP_SKETCH_ADD_ELLIPSE: _op_sketch_add_ellipse,

@@ -10,6 +10,8 @@ from freecad_mcp.tools.modeling import (
     CreateSketchParams,
     InspectSketchParams,
     SketchAddCircleParams,
+    SketchAddConstraintParams,
+    SketchAddConstraintResult,
     SketchAddEllipseParams,
     SketchAddPolygonParams,
     SketchAddRectangleParams,
@@ -263,6 +265,63 @@ def test_inspect_sketch_params_defaults():
     """InspectSketchParams defaults workspace to None."""
     p = InspectSketchParams(document_id="mydoc", sketch_name="MySketch")
     assert p.workspace is None
+
+
+def test_sketch_add_constraint_params_valid():
+    """Valid SketchAddConstraintParams should be accepted."""
+    p = SketchAddConstraintParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        constraint_type="Horizontal",
+        first_geometry_index=0,
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.constraint_type == "Horizontal"
+    assert p.first_geometry_index == 0
+    assert p.second_geometry_index is None
+    assert p.value is None
+    assert p.name is None
+
+
+def test_sketch_add_constraint_params_with_optional():
+    """SketchAddConstraintParams accepts optional fields."""
+    p = SketchAddConstraintParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        constraint_type="Distance",
+        first_geometry_index=0,
+        second_geometry_index=1,
+        value=10.0,
+        name="MyConstraint",
+        workspace="/tmp/ws",
+    )
+    assert p.second_geometry_index == 1
+    assert p.value == 10.0
+    assert p.name == "MyConstraint"
+    assert p.workspace == "/tmp/ws"
+
+
+def test_sketch_add_constraint_result_fields():
+    """SketchAddConstraintResult should carry constraint info."""
+    r = SketchAddConstraintResult(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        constraint_type="Horizontal",
+        constraint_index=0,
+        constraint={"index": 0, "type": "Horizontal", "name": "H1"},
+        constraint_count=1,
+        fully_constrained=False,
+        degrees_of_freedom=2,
+    )
+    assert r.document_id == "mydoc"
+    assert r.sketch_name == "MySketch"
+    assert r.constraint_type == "Horizontal"
+    assert r.constraint_index == 0
+    assert r.constraint_count == 1
+    assert r.constraint["type"] == "Horizontal"
+    assert r.fully_constrained is False
+    assert r.degrees_of_freedom == 2
 
 
 def test_sketch_delete_geometry_params_valid():

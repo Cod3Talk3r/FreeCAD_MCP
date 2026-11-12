@@ -984,6 +984,62 @@ class InspectSketchParams(BaseModel):
     )
 
 
+class SketchAddConstraintParams(BaseModel):
+    """Parameters for adding a Sketcher constraint to an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to add the constraint to.")
+    constraint_type: str = Field(
+        description=(
+            "Type of constraint to add. Supported: Horizontal, Vertical, Distance, "
+            "Radius, Diameter, Angle."
+        )
+    )
+    first_geometry_index: int = Field(
+        description="Zero-based index of the first geometry the constraint references."
+    )
+    second_geometry_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "Zero-based index of a second geometry, required for two-geometry "
+            "constraints (Distance between two geometries, Angle)."
+        ),
+    )
+    value: Optional[float] = Field(
+        default=None,
+        description=(
+            "Dimensional value for dimensional constraints (Distance, Radius, "
+            "Diameter, Angle). Not used by Horizontal or Vertical."
+        ),
+    )
+    name: Optional[str] = Field(
+        default=None, description="Optional human-readable name for the constraint."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddConstraintResult(BaseModel):
+    """Result of sketch_add_constraint."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch the constraint was added to.")
+    constraint_type: str = Field(description="Type of constraint that was added.")
+    constraint_index: int = Field(description="Zero-based index of the new constraint in the sketch.")
+    constraint: dict[str, Any] = Field(description="Inspected details of the created constraint.")
+    constraint_count: int = Field(description="Total number of constraints in the sketch after creation.")
+    fully_constrained: Optional[bool] = Field(
+        default=None, description="Whether the sketch is fully constrained by the solver."
+    )
+    degrees_of_freedom: Optional[int] = Field(
+        default=None, description="Solver degrees of freedom (DoF) remaining in the sketch."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the constraint was added."
+    )
+
+
 class SketchDeleteGeometryParams(BaseModel):
     """Parameters for deleting geometry from an existing sketch."""
 
@@ -2678,6 +2734,54 @@ def _register_tools(server: Any, settings: Settings) -> None:
             placement=result.get("placement", {}),
             fully_constrained=result.get("fully_constrained"),
             degrees_of_freedom=result.get("degrees_of_freedom"),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_constraint
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_constraint",
+        title="Add constraint to sketch",
+        description=(
+            "Add a verified Sketcher constraint to an existing "
+            "Sketcher::SketchObject. Supported constraint types: Horizontal, "
+            "Vertical, Distance, Radius, Diameter, Angle. The document is "
+            "locked exclusively during the operation, recomputed, saved "
+            "atomically, and its revision is bumped. Does not support "
+            "Coincident or other unverified constraint types."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_constraint_tool(params: SketchAddConstraintParams) -> SketchAddConstraintResult:
+        """Add a constraint to a sketch and return its info."""
+        validate_direct_request("sketch_add_constraint", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "constraint_type": params.constraint_type,
+            "first_geometry_index": params.first_geometry_index,
+            "workspace": params.workspace or "",
+        }
+        if params.second_geometry_index is not None:
+            bridge_params["second_geometry_index"] = params.second_geometry_index
+        if params.value is not None:
+            bridge_params["value"] = params.value
+        if params.name is not None:
+            bridge_params["name"] = params.name
+        result = _run_bridge_op(bridge, "sketch_add_constraint", bridge_params)
+
+        return SketchAddConstraintResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            constraint_type=result.get("constraint_type", params.constraint_type),
+            constraint_index=result.get("constraint_index", -1),
+            constraint=result.get("constraint", {}),
+            constraint_count=result.get("constraint_count", 0),
+            fully_constrained=result.get("fully_constrained"),
+            degrees_of_freedom=result.get("degrees_of_freedom"),
+            meta_before=result.get("meta_before"),
         )
 
     # ------------------------------------------------------------------

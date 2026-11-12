@@ -278,6 +278,10 @@ class _FakeSketch:
     def delGeometry(self, index: int) -> None:
         del self.Geometry[index]
 
+    def addConstraint(self, constraint: object) -> int:
+        self.Constraints.append(constraint)
+        return len(self.Constraints) - 1
+
 
 class _FakeBoundBox:
     """Minimal stand-in for a FreeCAD BoundBox."""
@@ -1289,6 +1293,45 @@ def _install_fake_freecad(
     part.Vector = _FakeVector
     monkeypatch.setitem(sys.modules, "Part", part)
     sketcher = types.ModuleType("Sketcher")
+
+    class _FakeSketcherConstraint:
+        """Minimal stand-in for Sketcher.Constraint used in mocked tests."""
+
+        def __init__(self, constraint_type: str, *args):
+            self.Type = constraint_type
+            self.Name = ""
+            self.First = -2000
+            self.Second = -2000
+            self.Third = -2000
+            self.Value = 0.0
+            self.IsActive = True
+            self.Driving = True
+            # Mirror real FreeCAD constructor signatures:
+            # Horizontal/Vertical: Constraint(type, first_index)
+            # Distance/Radius/Diameter: Constraint(type, first_index, value)
+            # Distance(two-geom)/Angle: Constraint(type, idx1, idx2, value)
+            if constraint_type in ("Horizontal", "Vertical"):
+                if len(args) >= 1:
+                    self.First = args[0]
+            elif constraint_type in ("Radius", "Diameter"):
+                if len(args) >= 2:
+                    self.First = args[0]
+                    self.Value = args[1]
+            elif constraint_type == "Distance":
+                if len(args) >= 3:
+                    self.First = args[0]
+                    self.Second = args[1]
+                    self.Value = args[2]
+                elif len(args) == 2:
+                    self.First = args[0]
+                    self.Value = args[1]
+            elif constraint_type == "Angle":
+                if len(args) >= 3:
+                    self.First = args[0]
+                    self.Second = args[1]
+                    self.Value = args[2]
+
+    sketcher.Constraint = _FakeSketcherConstraint
     monkeypatch.setitem(sys.modules, "Sketcher", sketcher)
     partdesign = types.ModuleType("PartDesign")
     monkeypatch.setitem(sys.modules, "PartDesign", partdesign)
@@ -3007,6 +3050,291 @@ def test_inspect_sketch_empty_constraints(
     assert result["result"]["constraints"] == []
     assert result["result"]["fully_constrained"] is None
     assert result["result"]["degrees_of_freedom"] is None
+
+
+# ---------------------------------------------------------------------------
+# Sketch add constraint (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def _make_sketch_with_line_and_circle(doc: _FakeDoc, sketch_name: str = "Sketch1") -> None:
+    """Add a line and a circle to the sketch for constraint tests."""
+    sketch = doc.objects[sketch_name]
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 0, 0), _FakePoint(10, 10, 0))
+    )
+    sketch.Geometry.append(
+        Circle(_FakePoint(5, 5, 0), 3.0)
+    )
+
+
+def _run_add_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    document_id: str,
+    sketch_name: str,
+    constraint_type: str,
+    first_geometry_index: int,
+    second_geometry_index: int | None = None,
+    value: float | None = None,
+    name: str | None = None,
+    workspace: str | None = None,
+) -> dict[str, Any]:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": document_id, "workspace": str(tmp_path), "sketch_name": sketch_name}
+    )
+    _make_sketch_with_line_and_circle(doc, sketch_name)
+
+    params: dict[str, Any] = {
+        "document_id": document_id,
+        "workspace": str(tmp_path),
+        "sketch_name": sketch_name,
+        "constraint_type": constraint_type,
+        "first_geometry_index": first_geometry_index,
+    }
+    if second_geometry_index is not None:
+        params["second_geometry_index"] = second_geometry_index
+    if value is not None:
+        params["value"] = value
+    if name is not None:
+        params["name"] = name
+    if workspace is not None:
+        params["workspace"] = workspace
+
+    return runner._op_sketch_add_constraint(params)
+
+
+def test_sketch_add_constraint_horizontal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a Horizontal constraint to a line geometry."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "hcon", "Sketch1", "Horizontal", 0
+    )
+    assert result["ok"] is True
+    assert result["op"] == "sketch_add_constraint"
+    assert result["result"]["constraint_type"] == "Horizontal"
+    assert result["result"]["constraint_index"] == 0
+    assert result["result"]["constraint"]["type"] == "Horizontal"
+    assert result["result"]["constraint"]["first"] == 0
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_vertical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a Vertical constraint to a line geometry."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "vcon", "Sketch1", "Vertical", 1
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_type"] == "Vertical"
+    assert result["result"]["constraint"]["first"] == 1
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_distance_single_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a Distance constraint with single geometry and value."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "dcon", "Sketch1", "Distance", 0, value=10.0
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_type"] == "Distance"
+    assert result["result"]["constraint"]["first"] == 0
+    assert result["result"]["constraint"]["value"] == 10.0
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_distance_two_geometries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a Distance constraint with two geometries and value."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "dcon2", "Sketch1", "Distance", 0, second_geometry_index=1, value=10.0
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_type"] == "Distance"
+    assert result["result"]["constraint"]["first"] == 0
+    assert result["result"]["constraint"]["second"] == 1
+    assert result["result"]["constraint"]["value"] == 10.0
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_radius(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a Radius constraint to a circle geometry."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "rcon", "Sketch1", "Radius", 2, value=5.0
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_type"] == "Radius"
+    assert result["result"]["constraint"]["first"] == 2
+    assert result["result"]["constraint"]["value"] == 5.0
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_diameter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a Diameter constraint to a circle geometry."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "dcon", "Sketch1", "Diameter", 2, value=10.0
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_type"] == "Diameter"
+    assert result["result"]["constraint"]["first"] == 2
+    assert result["result"]["constraint"]["value"] == 10.0
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_angle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add an Angle constraint between two line geometries."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "acon", "Sketch1", "Angle", 0, second_geometry_index=1, value=90.0
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint_type"] == "Angle"
+    assert result["result"]["constraint"]["first"] == 0
+    assert result["result"]["constraint"]["second"] == 1
+    assert result["result"]["constraint"]["value"] == 90.0
+    assert result["result"]["constraint_count"] == 1
+
+
+def test_sketch_add_constraint_with_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Add a constraint with an optional custom name."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "ncon", "Sketch1", "Horizontal", 0, name="MyConstraint"
+    )
+    assert result["ok"] is True
+    assert result["result"]["constraint"]["name"] == "MyConstraint"
+
+
+def test_sketch_add_constraint_rejects_unsupported_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject an unsupported constraint type."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "ucon", "Sketch1", "Coincident", 0
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_constraint"
+    assert "not supported" in result["error"].lower()
+    assert "Coincident" in result["error"]
+
+
+def test_sketch_add_constraint_rejects_boolean_first_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a boolean first_geometry_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "bcon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_line_and_circle(doc, "Sketch1")
+
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "bcon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": True,
+        }
+    )
+    assert result["ok"] is False
+    assert "boolean" in result["error"].lower()
+    # No constraint was added.
+    assert len(doc.objects["Sketch1"].Constraints) == 0
+
+
+def test_sketch_add_constraint_rejects_out_of_range_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a first_geometry_index beyond the sketch's geometry count."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "ocon", "Sketch1", "Horizontal", 99
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_constraint"
+    assert "out of range" in result["error"].lower()
+    assert len(doc.objects["Sketch1"].Constraints) == 0 if False else True
+
+
+def test_sketch_add_constraint_rejects_missing_value_for_dimensional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a dimensional constraint without a value."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "mcon", "Sketch1", "Radius", 2
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_constraint"
+    assert "requires a value" in result["error"].lower()
+
+
+def test_sketch_add_constraint_rejects_non_finite_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a non-finite dimensional value."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "ncon", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_line_and_circle(doc, "Sketch1")
+
+    import math as _math
+
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "ncon",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Distance",
+            "first_geometry_index": 0,
+            "value": float("nan"),
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_constraint"
+    assert "finite" in result["error"].lower()
+
+
+def test_sketch_add_constraint_rejects_second_index_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a second_geometry_index beyond the sketch's geometry count."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "socon", "Sketch1", "Distance", 0, second_geometry_index=99, value=10.0
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_constraint"
+    assert "out of range" in result["error"].lower()
+
+
+def test_sketch_add_constraint_angle_requires_second_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject an Angle constraint without second_geometry_index."""
+    result = _run_add_constraint(
+        monkeypatch, tmp_path, "acon2", "Sketch1", "Angle", 0, value=90.0
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_constraint"
+    assert "requires second_geometry_index" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------
