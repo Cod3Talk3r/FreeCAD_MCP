@@ -58,6 +58,7 @@ OP_SET_BODY_TIP = "set_body_tip"
 OP_REORDER_BODY_FEATURES = "reorder_body_features"
 OP_CREATE_SKETCH = "create_sketch"
 OP_SKETCH_ADD_RECTANGLE = "sketch_add_rectangle"
+OP_VALIDATE_REOPEN = "validate_reopen"
 OP_SKETCH_ADD_CIRCLE = "sketch_add_circle"
 OP_SKETCH_ADD_TRIANGLE = "sketch_add_triangle"
 OP_SKETCH_ADD_ELLIPSE = "sketch_add_ellipse"
@@ -2516,19 +2517,315 @@ def _op_sketch_add_rectangle(params: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return _fail(f"FreeCAD error: {exc}")
 
+        ws_mod.release_lock(lock_path, pid)
+        return {
+            "ok": True,
+            "op": "sketch_add_rectangle",
+            "result": {
+                "document_id": normalized,
+                "sketch_name": sketch_name,
+                "x": x_val,
+                "y": y_val,
+                "width": width_val,
+                "height": height_val,
+                "edges_added": 4,
+                "total_edges": len(getattr(sketch, "Geometry", [])),
+                "meta_before": meta_before,
+            },
+        }
+
+
+# ---------------------------------------------------------------------------
+# New operation handlers for Milestone 13 (persistence / reopen validation)
+# ---------------------------------------------------------------------------
+
+
+def _capture_document_state(doc: Any) -> dict[str, dict[str, Any]]:
+    """Snapshot the inspectable state of every object in *doc*.
+
+    Returns a mapping ``object_name -> state`` where ``state`` contains the
+    stable internal ``name``, FreeCAD ``type``, dependency relationships
+    (``depends_on`` = OutList, ``depended_on_by`` = InList), bounded shape
+    information (validity, volume), parametric properties (Length/Width/
+    Height/Radius) and, for PartDesign::Body objects, the ``tip_name`` of the
+    current ``Body.Tip``.
+
+    Nothing read here is mutated; the snapshot is safe to take before and
+    after a close/reopen cycle for comparison.
+    """
+    states: dict[str, dict[str, Any]] = {}
+    for obj in getattr(doc, "Objects", []) or []:
+        name = getattr(obj, "Name", "")
+        state: dict[str, Any] = {
+            "name": name,
+            "type": getattr(obj, "TypeId", ""),
+            "depends_on": [],
+            "depended_on_by": [],
+            "shape_valid": None,
+            "volume": None,
+            "length": None,
+            "width": None,
+            "height": None,
+            "radius": None,
+            "tip_name": None,
+        }
+        try:
+            outlist = list(getattr(obj, "OutList", []) or [])
+            state["depends_on"] = [getattr(o, "Name", str(o)) for o in outlist]
+        except Exception:
+            state["depends_on"] = []
+        try:
+            inlist = list(getattr(obj, "InList", []) or [])
+            state["depended_on_by"] = [getattr(o, "Name", str(o)) for o in inlist]
+        except Exception:
+            state["depended_on_by"] = []
+        shape = getattr(obj, "Shape", None)
+        if shape is not None:
+            try:
+                state["shape_valid"] = bool(shape.isValid()) if hasattr(shape, "isValid") else None
+            except Exception:
+                state["shape_valid"] = None
+            try:
+                state["volume"] = float(shape.Volume) if hasattr(shape, "Volume") else None
+            except Exception:
+                state["volume"] = None
+        for prop in ("Length", "Width", "Height", "Radius"):
+            if hasattr(obj, prop):
+                try:
+                    state[prop.lower()] = float(getattr(obj, prop))
+                except Exception:
+                    state[prop.lower()] = None
+        type_id = getattr(obj, "TypeId", "")
+        type_name = type_id.split("::")[-1]
+        if type_name == "Body":
+            tip = getattr(obj, "Tip", None)
+            state["tip_name"] = getattr(tip, "Name", None) if tip is not None else None
+        states[name] = state
+    return states
+
+
+def _compare_document_states(
+    before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Compare *before* and *after* document snapshots and build a report.
+
+    Returns a dict with ``checks`` (list of per-check dicts), ``all_passed``,
+    ``failures`` (list of human-readable strings) and ``object_count``.
+    """
+    checks: list[dict[str, Any]] = []
+    failures: list[str] = []
+
+    before_names = set(before.keys())
+    after_names = set(after.keys())
+
+    # 1. Object identities preserved.
+    objects_preserved = before_names == after_names
+    checks.append(
+        {
+            "name": "objects_preserved",
+            "passed": objects_preserved,
+            "detail": f"{len(after_names)}/{len(before_names)} objects present after reopen",
+        }
+    )
+    if not objects_preserved:
+        missing = sorted(before_names - after_names)
+        extra = sorted(after_names - before_names)
+        failures.append(f"object membership changed: missing={missing}, extra={extra}")
+
+    common_names = before_names & after_names
+
+    # 2. Object types preserved.
+    types_ok = True
+    for name in sorted(common_names):
+        if before[name].get("type") != after[name].get("type"):
+            types_ok = False
+            failures.append(f"object '{name}' type changed from {before[name].get('type')!r} to {after[name].get('type')!r}")
+    checks.append(
+        {
+            "name": "types_preserved",
+            "passed": types_ok,
+            "detail": f"types unchanged for {len(common_names)} common objects",
+        }
+    )
+
+    # 3. Dependency relationships preserved (OutList/InList).
+    deps_ok = True
+    for name in sorted(common_names):
+        if before[name].get("depends_on") != after[name].get("depends_on"):
+            deps_ok = False
+            failures.append(
+                f"object '{name}' depends_on changed: "
+                f"{before[name].get('depends_on')} -> {after[name].get('depends_on')}"
+            )
+        if before[name].get("depended_on_by") != after[name].get("depended_on_by"):
+            deps_ok = False
+            failures.append(
+                f"object '{name}' depended_on_by changed: "
+                f"{before[name].get('depended_on_by')} -> {after[name].get('depended_on_by')}"
+            )
+    checks.append(
+        {
+            "name": "dependencies_preserved",
+            "passed": deps_ok,
+            "detail": "dependency (InList/OutList) relationships unchanged",
+        }
+    )
+
+    # 4. Geometry validity after reopen (objects that have a shape must be valid).
+    geometry_ok = True
+    for name in sorted(common_names):
+        sv = after[name].get("shape_valid")
+        if sv is not None and not sv:
+            geometry_ok = False
+            failures.append(f"object '{name}' shape invalid after reopen")
+    checks.append(
+        {
+            "name": "geometry_valid_after_reopen",
+            "passed": geometry_ok,
+            "detail": "all shaped objects report a valid shape after reopen",
+        }
+    )
+
+    # 5. Body.Tip preserved for PartDesign::Body objects.
+    tip_ok = True
+    for name in sorted(common_names):
+        before_tip = before[name].get("tip_name")
+        after_tip = after[name].get("tip_name")
+        if before_tip is not None or after_tip is not None:
+            if before_tip != after_tip:
+                tip_ok = False
+                failures.append(f"Body '{name}' Tip changed from {before_tip!r} to {after_tip!r}")
+    checks.append(
+        {
+            "name": "body_tip_preserved",
+            "passed": tip_ok,
+            "detail": "Body.Tip identities unchanged after reopen",
+        }
+    )
+
+    # 6. Parametric properties preserved (Length/Width/Height/Radius).
+    props_ok = True
+    for prop in ("length", "width", "height", "radius"):
+        for name in sorted(common_names):
+            before_val = before[name].get(prop)
+            after_val = after[name].get(prop)
+            if before_val is not None or after_val is not None:
+                if before_val != after_val:
+                    props_ok = False
+                    failures.append(
+                        f"object '{name}' {prop} changed from {before_val!r} to {after_val!r}"
+                    )
+    checks.append(
+        {
+            "name": "parametric_properties_preserved",
+            "passed": props_ok,
+            "detail": "parametric properties (Length/Width/Height/Radius) unchanged",
+        }
+    )
+
+    all_passed = objects_preserved and types_ok and deps_ok and geometry_ok and tip_ok and props_ok
+    return {
+        "checks": checks,
+        "all_passed": all_passed,
+        "failures": failures,
+        "object_count": len(after_names),
+        "before_object_count": len(before_names),
+        "after_object_count": len(after_names),
+    }
+
+
+def _op_validate_reopen(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate that a document survives save, close and reopen.
+
+    The operation opens the workspace document, snapshots its inspectable
+    state (object identities, types, dependency relationships, geometry
+    validity, Body.Tip and parametric properties), closes it, reopens it from
+    the persisted ``.fcstd`` path, snapshots the state again and compares the
+    two.  Any discrepancy is reported as a structured failure; the operation
+    never leaves the document open or modifies the on-disk artifact.
+
+    Returns ``ok: True`` with a report whose ``all_passed`` flag summarizes the
+    comparison, or ``ok: False`` with a structured error when the document
+    cannot be opened, closed or reopened.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "validate_reopen", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "validate_reopen", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "validate_reopen", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "validate_reopen", "error": message}
+
+    # Fail fast on a missing persisted file before touching FreeCAD.
+    fcstd_path = wks.document_path(normalized)
+    if not fcstd_path.is_file():
+        return _fail(
+            f"persisted document not found at {fcstd_path}; save the document first"
+        )
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+
+        doc = _open_existing_document(_FC, wks, normalized)
+        before_state = _capture_document_state(doc)
+
+        # Close the document so it must be reloaded from the persisted file.
+        try:
+            _FC.closeDocument(doc.Name)
+        except Exception as exc:
+            return _fail(f"could not close document '{normalized}': {exc}")
+
+        # Reopen from the workspace .fcstd path.
+        reopened = _FC.openDocument(str(fcstd_path))
+        after_state = _capture_document_state(reopened)
+
+        # Always close the reopened document to leave no stray document behind.
+        try:
+            _FC.closeDocument(reopened.Name)
+        except Exception:
+            pass
+
+        report = _compare_document_states(before_state, after_state)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "validate_reopen", "error": f"FreeCAD error: {exc}"}
+
     ws_mod.release_lock(lock_path, pid)
     return {
         "ok": True,
-        "op": "sketch_add_rectangle",
+        "op": "validate_reopen",
         "result": {
             "document_id": normalized,
-            "sketch_name": sketch_name,
-            "x": x_val,
-            "y": y_val,
-            "width": width_val,
-            "height": height_val,
-            "edges_added": 4,
-            "total_edges": len(getattr(sketch, "Geometry", [])),
+            "checks": report["checks"],
+            "all_passed": report["all_passed"],
+            "failures": report["failures"],
+            "object_count": report["object_count"],
+            "before_object_count": report["before_object_count"],
+            "after_object_count": report["after_object_count"],
             "meta_before": meta_before,
         },
     }
@@ -9062,6 +9359,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_GET_BODY_TIP: _op_get_body_tip,
     OP_SET_BODY_TIP: _op_set_body_tip,
     OP_REORDER_BODY_FEATURES: _op_reorder_body_features,
+    OP_VALIDATE_REOPEN: _op_validate_reopen,
     OP_CREATE_SKETCH: _op_create_sketch,
     OP_SKETCH_ADD_RECTANGLE: _op_sketch_add_rectangle,
     OP_SKETCH_ADD_CIRCLE: _op_sketch_add_circle,

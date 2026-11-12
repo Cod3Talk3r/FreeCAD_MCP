@@ -111,6 +111,7 @@ class _FakeFreeCad:
         self.ActiveDocument: object | None = None
         self.open_calls: list[str] = []
         self.new_calls: list[str] = []
+        self.close_calls: list[str] = []
         self.Vector = _FakeVector
         self.Placement = _FakePlacement
         self.Rotation = _FakeRotation
@@ -124,6 +125,9 @@ class _FakeFreeCad:
     def newDocument(self, name: str) -> object:
         self.new_calls.append(name)
         return self.doc
+
+    def closeDocument(self, name: str) -> None:
+        self.close_calls.append(name)
 
 
 class _FakeVector:

@@ -124,6 +124,23 @@ class ValidationResult(BaseModel):
     )
 
 
+class ValidateReopenResult(BaseModel):
+    """Result of validate_reopen."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    checks: list[dict[str, Any]] = Field(
+        description="Per-check results with name, passed flag and detail text."
+    )
+    all_passed: bool = Field(description="True if every persistence check passed.")
+    failures: list[str] = Field(description="Human-readable descriptions of failed checks.")
+    object_count: int = Field(description="Number of objects present after reopen.")
+    before_object_count: int = Field(description="Number of objects present before reopen.")
+    after_object_count: int = Field(description="Number of objects present after reopen.")
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before reopen."
+    )
+
+
 class StepExportResult(BaseModel):
     """Result of export_step."""
 
@@ -1267,6 +1284,15 @@ class ValidateDocParams(BaseModel):
     )
 
 
+class ValidateReopenParams(BaseModel):
+    """Parameters for validating that a document survives save, close and reopen."""
+
+    document_id: str = Field(description="Document to persist, close and reopen.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
 class SaveDocumentParams(BaseModel):
     """Parameters for explicitly saving a document."""
 
@@ -1898,6 +1924,43 @@ def _register_tools(server: Any, settings: Settings) -> None:
             step_path=result.get("saved_path", ""),
             exported_count=0,
             success=True,
+        )
+
+    # ------------------------------------------------------------------
+    # validate_reopen
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="validate_reopen",
+        title="Validate document reopen",
+        description=(
+            "Verify a document survives save, close and reopen.  The document "
+            "is opened, its inspectable state (object identities, types, "
+            "dependency relationships, geometry validity, Body.Tip and "
+            "parametric properties) is snapshotted, then it is closed and "
+            "reopened from the persisted ``.fcstd`` path and the state is "
+            "compared.  Returns a structured report listing checks passed and "
+            "any failures.  Does not modify the on-disk artifact."
+        ),
+        structured_output=True,
+    )
+    def validate_reopen_tool(params: ValidateReopenParams) -> ValidateReopenResult:
+        """Validate that a document survives save, close and reopen."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "validate_reopen", bridge_params)
+
+        return ValidateReopenResult(
+            document_id=params.document_id,
+            checks=result.get("checks", []),
+            all_passed=result.get("all_passed", False),
+            failures=result.get("failures", []),
+            object_count=result.get("object_count", 0),
+            before_object_count=result.get("before_object_count", 0),
+            after_object_count=result.get("after_object_count", 0),
+            meta_before=result.get("meta_before"),
         )
 
     # ------------------------------------------------------------------
