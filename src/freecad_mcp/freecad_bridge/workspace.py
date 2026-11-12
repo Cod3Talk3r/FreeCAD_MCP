@@ -534,6 +534,185 @@ def meta_status(meta_path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Revision snapshots
+# ---------------------------------------------------------------------------
+
+#: Name of the snapshots subdirectory inside each workspace root.
+SNAPSHOT_SUBDIR = "snapshots"
+
+#: Maximum number of snapshots retained per document.  When a new snapshot
+#: would exceed this limit, the oldest (lowest revision) is deleted.
+MAX_SNAPSHOTS_PER_DOCUMENT = 10
+
+
+def snapshots_dir(workspace: Workspace) -> Path:
+    """Return the snapshots subdirectory path for *workspace*.
+
+    Snapshots live inside the configured workspace so that they are backed up
+    and cleaned up together with the document artifacts.
+    """
+    return workspace.root / SNAPSHOT_SUBDIR
+
+
+def snapshot_path(workspace: Workspace, document_id: str, revision: int) -> Path:
+    """Return the snapshot .fcstd path for *document_id* at *revision*.
+
+    Naming convention: ``<document_id>.r<revision>.fcstd``
+    """
+    return snapshots_dir(workspace) / f"{document_id}.r{revision}.fcstd"
+
+
+def snapshot_meta_path(workspace: Workspace, document_id: str, revision: int) -> Path:
+    """Return the snapshot metadata sidecar path for *document_id* at *revision*.
+
+    Naming convention: ``<document_id>.r<revision>.meta.json``
+    """
+    return snapshots_dir(workspace) / f"{document_id}.r{revision}.meta.json"
+
+
+def list_snapshots(workspace: Workspace, document_id: str) -> list[dict[str, Any]]:
+    """List all snapshots for *document_id* with basic metadata.
+
+    Returns a list of dicts, each with:
+      - ``document_id``: the document identifier
+      - ``revision``: the snapshot revision number
+      - ``snapshot_path``: path to the snapshot .fcstd file
+      - ``meta_path``: path to the snapshot metadata sidecar
+      - ``created_at``: ISO-8601 timestamp or None
+      - ``revision_from_meta``: revision recorded in the snapshot meta sidecar
+
+    Sorted by revision ascending (oldest first).
+    """
+    snaps_dir = snapshots_dir(workspace)
+    if not snaps_dir.is_dir():
+        return []
+
+    snapshots: list[dict[str, Any]] = []
+    prefix = f"{document_id}.r"
+    suffix = ".fcstd"
+    for fcstd_path in snaps_dir.glob(f"{prefix}*{suffix}"):
+        stem = fcstd_path.stem  # e.g. "mydoc.r3"
+        # Parse revision from "mydoc.r3" -> "3"
+        if not stem.startswith(prefix):
+            continue
+        rev_part = stem[len(prefix):]
+        try:
+            revision = int(rev_part)
+        except ValueError:
+            continue
+
+        meta_path = snapshot_meta_path(workspace, document_id, revision)
+        meta = read_meta(meta_path) if meta_path.is_file() else {}
+
+        snapshots.append(
+            {
+                "document_id": document_id,
+                "revision": revision,
+                "snapshot_path": str(fcstd_path),
+                "meta_path": str(meta_path),
+                "created_at": meta.get("created_at"),
+                "revision_from_meta": meta.get("revision"),
+            }
+        )
+
+    snapshots.sort(key=lambda s: s["revision"])
+    return snapshots
+
+
+def create_snapshot(
+    workspace: Workspace,
+    document_id: str,
+    revision: int,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """Create a snapshot of *document_id* at *revision*.
+
+    Copies the current ``.fcstd`` artifact and its metadata sidecar to the
+    snapshots directory.  The snapshot is created atomically so that a
+    failure never leaves a partial snapshot behind and never compromises
+    the current document artifact.
+
+    Enforces the retention policy: keeps at most
+    :data:`MAX_SNAPSHOTS_PER_DOCUMENT` snapshots per document, deleting the
+    oldest (lowest revision) when the limit is exceeded.
+
+    Returns a dict with snapshot info (``ok: True``) or an error dict
+    (``ok: False``).
+    """
+    pid = pid or os.getpid()
+    snaps_dir = snapshots_dir(workspace)
+    snaps_dir.mkdir(parents=True, exist_ok=True)
+
+    fcstd_src = workspace.document_path(document_id)
+    if not fcstd_src.is_file():
+        return {
+            "ok": False,
+            "error": (
+                f"document '{document_id}' not found at {fcstd_src}; "
+                f"save the document first"
+            ),
+        }
+
+    # Read current meta for the snapshot sidecar
+    meta_src = workspace.meta_path(document_id)
+    meta = read_meta(meta_src) if meta_src.is_file() else {}
+
+    dst_fcstd = snapshot_path(workspace, document_id, revision)
+    dst_meta = snapshot_meta_path(workspace, document_id, revision)
+
+    def _write_tmp(tmp_path: Path) -> None:
+        # Copy the current .fcstd content to the temp file atomically.
+        src_bytes = fcstd_src.read_bytes()
+        tmp_path.write_bytes(src_bytes)
+
+    try:
+        # Atomic save of the snapshot .fcstd (temp + os.replace).
+        atomic_save(dst_fcstd, _write_tmp)
+
+        # Write snapshot metadata sidecar.
+        snapshot_meta: dict[str, Any] = {
+            "revision": revision,
+            "document_id": document_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_revision": meta.get("revision"),
+            "source_last_saved_at": meta.get("last_saved_at"),
+        }
+        write_meta(dst_meta, snapshot_meta)
+    except BaseException:
+        # Clean up any partial snapshot files so a failure leaves no residue.
+        for p in (dst_fcstd, dst_meta):
+            try:
+                if p.is_file():
+                    p.unlink()
+            except OSError:
+                pass
+        raise
+
+    # Enforce retention policy: delete oldest snapshots if over the limit.
+    existing = list_snapshots(workspace, document_id)
+    if len(existing) > MAX_SNAPSHOTS_PER_DOCUMENT:
+        # ``existing`` is sorted ascending by revision; delete the oldest.
+        excess = len(existing) - MAX_SNAPSHOTS_PER_DOCUMENT
+        for snap in existing[:excess]:
+            old_fcstd = snapshot_path(workspace, document_id, snap["revision"])
+            old_meta = snapshot_meta_path(workspace, document_id, snap["revision"])
+            for p in (old_fcstd, old_meta):
+                try:
+                    if p.is_file():
+                        p.unlink()
+                except OSError:
+                    pass
+
+    return {
+        "ok": True,
+        "document_id": document_id,
+        "revision": revision,
+        "snapshot_path": str(dst_fcstd),
+        "meta_path": str(dst_meta),
+    }
+
+
+# ---------------------------------------------------------------------------
 # High-level convenience: create-document workflow
 # ---------------------------------------------------------------------------
 

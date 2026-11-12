@@ -84,6 +84,8 @@ OP_PARTDESIGN_LINEAR_PATTERN = "partdesign_linear_pattern"
 OP_PARTDESIGN_POLAR_PATTERN = "partdesign_polar_pattern"
 OP_PARTDESIGN_MIRRORED = "partdesign_mirrored"
 OP_PARTDESIGN_THICKNESS = "partdesign_thickness"
+OP_CREATE_SNAPSHOT = "create_snapshot"
+OP_LIST_SNAPSHOTS = "list_snapshots"
 
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
@@ -815,8 +817,20 @@ def _op_save_document(params: dict[str, Any]) -> dict[str, Any]:
         import FreeCAD as _FC
         doc = _open_existing_document(_FC, wks, normalized)
         meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+        current_revision = meta_before.get("revision", 0)
 
         fcstd_path = wks.document_path(normalized)
+
+        # Preserve the previous valid revision as a snapshot before it is
+        # overwritten by the new save.  A snapshot failure does not fail the
+        # save itself.
+        if fcstd_path.is_file() and current_revision > 0:
+            try:
+                ws_mod.create_snapshot(wks, normalized, current_revision, pid=pid)
+            except Exception:
+                # Snapshot creation is best-effort; never block a save.
+                pass
+
         def _write_tmp(tmp_path: str) -> None:
             doc.saveAs(str(tmp_path))
         ws_mod.atomic_save(fcstd_path, _write_tmp)
@@ -2827,6 +2841,134 @@ def _op_validate_reopen(params: dict[str, Any]) -> dict[str, Any]:
             "before_object_count": report["before_object_count"],
             "after_object_count": report["after_object_count"],
             "meta_before": meta_before,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# New operation handlers for Revision Snapshots
+# ---------------------------------------------------------------------------
+
+
+def _op_create_snapshot(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a snapshot of the current document at its current revision.
+
+    Copies the persisted ``.fcstd`` artifact and its metadata sidecar to the
+    snapshots directory inside the workspace.  The snapshot is created
+    atomically and never compromises the current document if it fails.
+
+    Returns ``ok: True`` with snapshot info (revision, paths) or ``ok: False``
+    with a structured error.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "create_snapshot", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "create_snapshot", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "create_snapshot", "error": lock_status.get("error", "lock failed")}
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "create_snapshot", "error": message}
+
+    # Fail fast if there's nothing to snapshot yet.
+    fcstd_path = wks.document_path(normalized)
+    if not fcstd_path.is_file():
+        ws_mod.release_lock(lock_path, pid)
+        return _fail(
+            f"persisted document not found at {fcstd_path}; save the document first"
+        )
+
+    # Read current revision from metadata sidecar.
+    meta = ws_mod.read_meta(wks.meta_path(normalized))
+    revision = meta.get("revision", 0)
+
+    try:
+        result = ws_mod.create_snapshot(wks, normalized, revision, pid=pid)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "create_snapshot", "error": f"snapshot error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    if not result.get("ok"):
+        return result
+    return {
+        "ok": True,
+        "op": "create_snapshot",
+        "result": {
+            "document_id": normalized,
+            "revision": result["revision"],
+            "snapshot_path": result["snapshot_path"],
+            "meta_path": result["meta_path"],
+        },
+    }
+
+
+def _op_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
+    """List all snapshots for a document with basic metadata.
+
+    Returns ``ok: True`` with a list of snapshots (revision, paths, timestamps)
+    or ``ok: False`` with a structured error.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "list_snapshots", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "list_snapshots", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "list_snapshots", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        snapshots = ws_mod.list_snapshots(wks, normalized)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "list_snapshots", "error": f"snapshot error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "list_snapshots",
+        "result": {
+            "document_id": normalized,
+            "snapshots": snapshots,
+            "count": len(snapshots),
         },
     }
 
@@ -9387,6 +9529,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PARTDESIGN_POLAR_PATTERN: _op_partdesign_polar_pattern,
     OP_PARTDESIGN_MIRRORED: _op_partdesign_mirrored,
     OP_PARTDESIGN_THICKNESS: _op_partdesign_thickness,
+    OP_CREATE_SNAPSHOT: _op_create_snapshot,
+    OP_LIST_SNAPSHOTS: _op_list_snapshots,
 }
 
 

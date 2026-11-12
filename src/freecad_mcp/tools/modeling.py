@@ -1302,6 +1302,43 @@ class SaveDocumentParams(BaseModel):
     )
 
 
+class CreateSnapshotParams(BaseModel):
+    """Parameters for creating a revision snapshot of a saved document."""
+
+    document_id: str = Field(description="Document to snapshot.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class CreateSnapshotResult(BaseModel):
+    """Result of creating a revision snapshot."""
+
+    document_id: str = Field(description="Document that was snapshotted.")
+    revision: int = Field(description="Revision number associated with the snapshot.")
+    snapshot_path: str = Field(description="Filesystem path to the snapshot .fcstd file.")
+    meta_path: str = Field(description="Filesystem path to the snapshot metadata sidecar.")
+
+
+class ListSnapshotsParams(BaseModel):
+    """Parameters for listing revision snapshots of a document."""
+
+    document_id: str = Field(description="Document whose snapshots to list.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class ListSnapshotsResult(BaseModel):
+    """Result of listing revision snapshots."""
+
+    document_id: str = Field(description="Document whose snapshots were listed.")
+    snapshots: list[dict[str, Any]] = Field(
+        description="List of snapshot metadata dicts, sorted by revision ascending."
+    )
+    count: int = Field(description="Number of snapshots listed.")
+
+
 class DeleteObjectParams(BaseModel):
     """Parameters for deleting an object from a document."""
 
@@ -3561,6 +3598,66 @@ def _register_tools(server: Any, settings: Settings) -> None:
         )
         return info
 
+    # ------------------------------------------------------------------
+    # create_snapshot
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="create_snapshot",
+        title="Create revision snapshot",
+        description=(
+            "Create a revision snapshot of the current saved document.  The "
+            "persisted ``.fcstd`` artifact and its metadata sidecar are copied "
+            "to the snapshots directory inside the workspace, associated with "
+            "the document's current revision number.  Snapshot creation is "
+            "atomic and never compromises the current document if it fails. "
+            "A retention policy keeps at most 10 snapshots per document, "
+            "deleting the oldest (lowest revision) when the limit is exceeded."
+        ),
+        structured_output=True,
+    )
+    def create_snapshot_tool(params: CreateSnapshotParams) -> CreateSnapshotResult:
+        """Create a revision snapshot and return snapshot info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "create_snapshot", bridge_params)
+
+        return CreateSnapshotResult(
+            document_id=params.document_id,
+            revision=result.get("revision", 0),
+            snapshot_path=result.get("snapshot_path", ""),
+            meta_path=result.get("meta_path", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # list_snapshots
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="list_snapshots",
+        title="List revision snapshots",
+        description=(
+            "List all revision snapshots for a document with basic metadata "
+            "(revision number, paths, timestamps).  Snapshots are returned "
+            "sorted by revision ascending (oldest first)."
+        ),
+        structured_output=True,
+    )
+    def list_snapshots_tool(params: ListSnapshotsParams) -> ListSnapshotsResult:
+        """List revision snapshots and return snapshot metadata."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "list_snapshots", bridge_params)
+
+        return ListSnapshotsResult(
+            document_id=params.document_id,
+            snapshots=result.get("snapshots", []),
+            count=result.get("count", 0),
+        )
 
 # ---------------------------------------------------------------------------
 # Public registration
