@@ -69,6 +69,8 @@ OP_SKETCH_ADD_ELLIPSE = "sketch_add_ellipse"
 OP_SKETCH_ADD_REGULAR_POLYGON = "sketch_add_regular_polygon"
 OP_SKETCH_ADD_POLYGON = "sketch_add_polygon"
 OP_INSPECT_SKETCH = "inspect_sketch"
+OP_SKETCH_INSPECT_PROFILES = "inspect_sketch_profiles"
+OP_SKETCH_SELECT_PROFILE = "select_sketch_profile"
 OP_SKETCH_DELETE_GEOMETRY = "sketch_delete_geometry"
 OP_SKETCH_EDIT_LINE = "sketch_edit_line"
 OP_SKETCH_EDIT_CIRCLE = "sketch_edit_circle"
@@ -4858,6 +4860,340 @@ def _op_inspect_sketch(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_inspect_sketch_profiles(params: dict[str, Any]) -> dict[str, Any]:
+    """Inspect closed/open profiles (wires and faces) in an existing sketch.
+
+    Read-only.  Uses the native FreeCAD ``Sketcher::SketchObject.Shape`` to
+    enumerate wires and faces, reporting each one's closed/valid status and the
+    geometry indices it references.  Does not save, recompute, or modify the
+    document.  Does not attempt to repair or close any geometry.
+
+    Supported subelement references (e.g. for Pad ``ProfileFace``) are reported
+    as ``FaceN`` / ``WireN`` strings where N is the 1-based index in
+    ``sketch.Shape.Faces`` / ``sketch.Shape.Wires``.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "inspect_sketch_profiles", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "inspect_sketch_profiles", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "inspect_sketch_profiles", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "inspect_sketch_profiles", "error": f"sketch '{sketch_name}' not found"}
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "inspect_sketch_profiles",
+                "error": (
+                    f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                    f"cannot inspect profiles."
+                ),
+            }
+
+        # Build geometry index map: stable geometry -> zero-based index.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        geometry_count = len(geometry_list)
+
+        profiles: list[dict[str, Any]] = []
+
+        # --- Faces (closed profiles that form planar regions) ---
+        try:
+            faces = list(getattr(sketch.Shape, "Faces", []) or [])
+        except Exception:
+            faces = []
+        for face_index, face in enumerate(faces):
+            subelement = f"Face{face_index + 1}"
+            valid = False
+            closed = False
+            try:
+                valid = bool(face.isValid())
+            except Exception:
+                valid = False
+            try:
+                # A Face is inherently closed (it bounds a region).
+                closed = True
+            except Exception:
+                closed = False
+            profiles.append(
+                {
+                    "index": len(profiles),
+                    "type": "face",
+                    "subelement": subelement,
+                    "closed": closed,
+                    "valid": valid,
+                    "geometry_indices": list(range(geometry_count)),
+                    "face_index": face_index,
+                }
+            )
+
+        # --- Wires (open or closed curves) ---
+        try:
+            wires = list(getattr(sketch.Shape, "Wires", []) or [])
+        except Exception:
+            wires = []
+        for wire_index, wire in enumerate(wires):
+            subelement = f"Wire{wire_index + 1}"
+            valid = False
+            closed = False
+            try:
+                valid = bool(wire.isValid())
+            except Exception:
+                valid = False
+            try:
+                closed = bool(wire.isClosed())
+            except Exception:
+                closed = False
+            profiles.append(
+                {
+                    "index": len(profiles),
+                    "type": "wire",
+                    "subelement": subelement,
+                    "closed": closed,
+                    "valid": valid,
+                    "geometry_indices": list(range(geometry_count)),
+                    "wire_index": wire_index,
+                }
+            )
+
+        usable_profiles = [p for p in profiles if p["valid"] and p["closed"]]
+
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "inspect_sketch_profiles", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "inspect_sketch_profiles",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "geometry_count": geometry_count,
+            "profile_count": len(profiles),
+            "usable_profile_count": len(usable_profiles),
+            "profiles": profiles,
+        },
+    }
+
+
+def _op_select_sketch_profile(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate and select a specific profile in an existing sketch.
+
+    Read-only validation.  Confirms that the requested profile index refers to a
+    valid, closed profile and returns its subelement reference (e.g. ``Face1``)
+    suitable for downstream operations such as Pad ``ProfileFace``.  Does not
+    modify the document or the sketch.
+
+    The selection is deterministic: profile indices are stable for the lifetime
+    of the sketch's Shape, and indices are assigned in face-then-wire order
+    (faces first, then wires), matching the order returned by
+    ``inspect_sketch_profiles``.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    profile_index_param = params.get("profile_index")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate profile_index: must be an integer, not a boolean, non-negative.
+    if isinstance(profile_index_param, bool) or not isinstance(profile_index_param, int):
+        return {
+            "ok": False,
+            "op": "select_sketch_profile",
+            "error": "profile_index must be an integer (boolean values are not accepted).",
+        }
+    profile_index = profile_index_param
+    if profile_index < 0:
+        return {
+            "ok": False,
+            "op": "select_sketch_profile",
+            "error": "profile_index must be non-negative.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "select_sketch_profile", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "select_sketch_profile", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "select_sketch_profile", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "select_sketch_profile", "error": f"sketch '{sketch_name}' not found"}
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "select_sketch_profile",
+                "error": (
+                    f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                    f"cannot select a profile."
+                ),
+            }
+
+        # Re-derive profiles in the same deterministic order as inspect.
+        try:
+            geometry_list = list(getattr(sketch, "Geometry", []))
+        except Exception:
+            geometry_list = []
+        geometry_count = len(geometry_list)
+
+        try:
+            faces = list(getattr(sketch.Shape, "Faces", []) or [])
+        except Exception:
+            faces = []
+        try:
+            wires = list(getattr(sketch.Shape, "Wires", []) or [])
+        except Exception:
+            wires = []
+
+        # Build ordered list of (profile_dict) in face-then-wire order.
+        ordered: list[dict[str, Any]] = []
+        for face_index, face in enumerate(faces):
+            valid = False
+            closed = False
+            try:
+                valid = bool(face.isValid())
+            except Exception:
+                valid = False
+            try:
+                closed = True  # A Face is inherently closed
+            except Exception:
+                closed = False
+            ordered.append(
+                {
+                    "index": len(ordered),
+                    "type": "face",
+                    "subelement": f"Face{face_index + 1}",
+                    "closed": closed,
+                    "valid": valid,
+                    "geometry_indices": list(range(geometry_count)),
+                    "face_index": face_index,
+                }
+            )
+        for wire_index, wire in enumerate(wires):
+            valid = False
+            closed = False
+            try:
+                valid = bool(wire.isValid())
+            except Exception:
+                valid = False
+            try:
+                closed = bool(wire.isClosed())
+            except Exception:
+                closed = False
+            ordered.append(
+                {
+                    "index": len(ordered),
+                    "type": "wire",
+                    "subelement": f"Wire{wire_index + 1}",
+                    "closed": closed,
+                    "valid": valid,
+                    "geometry_indices": list(range(geometry_count)),
+                    "wire_index": wire_index,
+                }
+            )
+
+        if profile_index >= len(ordered):
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "select_sketch_profile",
+                "error": (
+                    f"profile_index {profile_index} is out of range "
+                    f"(valid range: 0 to {len(ordered) - 1})."
+                ),
+            }
+
+        selected = ordered[profile_index]
+        if not selected["valid"] or not selected["closed"]:
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": False,
+                "op": "select_sketch_profile",
+                "error": (
+                    f"profile at index {profile_index} ({selected['subelement']}) is not "
+                    f"usable: closed={selected['closed']}, valid={selected['valid']}."
+                ),
+            }
+
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "select_sketch_profile", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "select_sketch_profile",
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "profile_index": selected["index"],
+            "subelement": selected["subelement"],
+            "type": selected["type"],
+            "closed": selected["closed"],
+            "valid": selected["valid"],
+            "geometry_indices": selected["geometry_indices"],
+            "usable": True,
+        },
+    }
+
+
 def _op_sketch_delete_geometry(params: dict[str, Any]) -> dict[str, Any]:
     """Delete one geometry element from an existing sketch (read-modify-write).
 
@@ -7049,6 +7385,7 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
     pad_name = params.get("pad_name") or "Pad"
     body_name = params.get("body_name") or "Body"
     workspace_str = params.get("workspace") or ""
+    profile_param = params.get("profile", None)
 
     # Validate sketch_name.
     if not sketch_name.strip():
@@ -7087,6 +7424,12 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
             "op": "sketch_pad",
             "error": "reversed must be a boolean (true/false).",
         }
+
+    # Optional profile: defaults to the whole sketch (None).  Resolved after the
+    # sketch is fetched inside the try block.
+    profile_param = params.get("profile", None)
+    profile_name = None
+    profile_value = None
 
     try:
         normalized = ws_mod.validate_document_id(document_id)
@@ -7129,6 +7472,36 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
                 f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
                 f"cannot create a Pad from it."
             )
+
+        # Resolve the optional profile selection.  When profile_param is set it
+        # names a closed wire subelement (e.g. "Wire1"); otherwise the whole
+        # sketch is used as the Pad profile.
+        if profile_param is not None:
+            if not isinstance(profile_param, str) or not profile_param.strip():
+                return _fail(
+                    "profile must be a non-empty string naming a closed wire (e.g. 'Wire1')."
+                )
+            profile_name = profile_param.strip()
+            try:
+                shape = getattr(sketch, "Shape", None)
+                wires = list(shape.Wires) if shape is not None else []
+            except Exception:
+                wires = []
+            wire_names = [f"Wire{i + 1}" for i in range(len(wires))]
+            if profile_name not in wire_names:
+                return _fail(
+                    f"profile '{profile_name}' not found in sketch '{sketch_name}'. "
+                    f"Available wire profiles: {wire_names}."
+                )
+            wire = wires[wire_names.index(profile_name)]
+            try:
+                if not bool(wire.isClosed()):
+                    return _fail(f"profile '{profile_name}' is not a closed wire.")
+            except Exception:
+                return _fail(
+                    f"profile '{profile_name}' could not be validated as a closed wire."
+                )
+            profile_value = (sketch, [profile_name])
 
         # Determine the Body: reuse an existing Body that contains the sketch,
         # or an explicitly named Body supplied by the caller (even when the
@@ -7202,9 +7575,10 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
                 f"workbench is available."
             )
 
-        # Set the Pad profile to the existing sketch.
+        # Set the Pad profile to the existing sketch, or to the selected wire
+        # subelement when a profile was requested.
         try:
-            pad.Profile = sketch
+            pad.Profile = profile_value if profile_value is not None else sketch
         except Exception as exc:
             return _fail(
                 f"FreeCAD could not set the Pad profile: {exc}.  The sketch may not contain "
@@ -7291,20 +7665,20 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "op": "sketch_pad",
-        "result": {
-            "document_id": normalized,
-            "sketch_name": sketch_name,
-            "body_name": body_name_used,
-            "pad_name": desired_pad_name,
-            "profile_name": sketch_name,
-            "length": length_val,
-            "reversed": reversed_param,
-            "volume": volume,
-            "bounding_box": bbox_info,
-            "solids_count": len(solids),
-            "meta_before": meta_before,
-        },
-    }
+            "result": {
+                "document_id": normalized,
+                "sketch_name": sketch_name,
+                "body_name": body_name_used,
+                "pad_name": desired_pad_name,
+                "profile_name": profile_name if profile_name else sketch_name,
+                "length": length_val,
+                "reversed": reversed_param,
+                "volume": volume,
+                "bounding_box": bbox_info,
+                "solids_count": len(solids),
+                "meta_before": meta_before,
+            },
+        }
 
 
 def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
@@ -7338,6 +7712,7 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
     pocket_name = params.get("pocket_name") or "Pocket"
     body_name = params.get("body_name") or "Body"
     workspace_str = params.get("workspace") or ""
+    profile_param = params.get("profile", None)
 
     # Validate sketch_name.
     if not sketch_name.strip():
@@ -7376,6 +7751,11 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
             "op": "sketch_pocket",
             "error": "reversed must be a boolean (true/false).",
         }
+
+    # Optional profile: defaults to the whole sketch (None).  Resolved after the
+    # sketch is fetched inside the try block.
+    profile_name = None
+    profile_value = None
 
     try:
         normalized = ws_mod.validate_document_id(document_id)
@@ -7418,6 +7798,36 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
                 f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
                 f"cannot create a Pocket from it."
             )
+
+        # Resolve the optional profile selection.  When profile_param is set it
+        # names a closed wire subelement (e.g. "Wire1"); otherwise the whole
+        # sketch is used as the Pocket profile.
+        if profile_param is not None:
+            if not isinstance(profile_param, str) or not profile_param.strip():
+                return _fail(
+                    "profile must be a non-empty string naming a closed wire (e.g. 'Wire1')."
+                )
+            profile_name = profile_param.strip()
+            try:
+                shape = getattr(sketch, "Shape", None)
+                wires = list(shape.Wires) if shape is not None else []
+            except Exception:
+                wires = []
+            wire_names = [f"Wire{i + 1}" for i in range(len(wires))]
+            if profile_name not in wire_names:
+                return _fail(
+                    f"profile '{profile_name}' not found in sketch '{sketch_name}'. "
+                    f"Available wire profiles: {wire_names}."
+                )
+            wire = wires[wire_names.index(profile_name)]
+            try:
+                if not bool(wire.isClosed()):
+                    return _fail(f"profile '{profile_name}' is not a closed wire.")
+            except Exception:
+                return _fail(
+                    f"profile '{profile_name}' could not be validated as a closed wire."
+                )
+            profile_value = (sketch, [profile_name])
 
         # Determine the Body: reuse an existing Body that contains the sketch,
         # or use the single unambiguous Body if the sketch is standalone.
@@ -7532,9 +7942,10 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
                 f"workbench is available."
             )
 
-        # Set the Pocket profile to the existing sketch.
+        # Set the Pocket profile to the existing sketch, or to the selected wire
+        # subelement when a profile was requested.
         try:
-            pocket.Profile = sketch
+            pocket.Profile = profile_value if profile_value is not None else sketch
         except Exception as exc:
             return _fail(
                 f"FreeCAD could not set the Pocket profile: {exc}.  The sketch may not contain "
@@ -7621,20 +8032,20 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "op": "sketch_pocket",
-        "result": {
-            "document_id": normalized,
-            "sketch_name": sketch_name,
-            "body_name": body_name_used,
-            "pocket_name": desired_pocket_name,
-            "profile_name": sketch_name,
-            "length": length_val,
-            "reversed": reversed_param,
-            "volume": volume,
-            "bounding_box": bbox_info,
-            "solids_count": len(solids),
-            "meta_before": meta_before,
-        },
-    }
+            "result": {
+                "document_id": normalized,
+                "sketch_name": sketch_name,
+                "body_name": body_name_used,
+                "pocket_name": desired_pocket_name,
+                "profile_name": profile_name if profile_name else sketch_name,
+                "length": length_val,
+                "reversed": reversed_param,
+                "volume": volume,
+                "bounding_box": bbox_info,
+                "solids_count": len(solids),
+                "meta_before": meta_before,
+            },
+        }
 
 
 def _find_revolution_axis_edge(sketch: Any, axis: str) -> str | None:
@@ -11200,6 +11611,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_ADD_REGULAR_POLYGON: _op_sketch_add_regular_polygon,
     OP_SKETCH_ADD_POLYGON: _op_sketch_add_polygon,
     OP_INSPECT_SKETCH: _op_inspect_sketch,
+    OP_SKETCH_INSPECT_PROFILES: _op_inspect_sketch_profiles,
+    OP_SKETCH_SELECT_PROFILE: _op_select_sketch_profile,
     OP_SKETCH_DELETE_GEOMETRY: _op_sketch_delete_geometry,
     OP_SKETCH_EDIT_LINE: _op_sketch_edit_line,
     OP_SKETCH_EDIT_CIRCLE: _op_sketch_edit_circle,

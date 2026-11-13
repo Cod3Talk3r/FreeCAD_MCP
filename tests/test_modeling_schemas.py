@@ -9,11 +9,17 @@ from freecad_mcp.tools.modeling import (
     CreateBodyResult,
     CreateSketchParams,
     InspectSketchParams,
+    InspectSketchProfilesParams,
+    InspectSketchProfilesResult,
+    SelectSketchProfileParams,
+    SelectSketchProfileResult,
     SketchAddCircleParams,
     SketchAddConstraintParams,
     SketchAddConstraintResult,
     SketchAddEllipseParams,
     SketchAddPolygonParams,
+    SketchPadParams,
+    SketchPocketParams,
     SketchAddRectangleParams,
     SketchAddRegularPolygonParams,
     SketchAddTriangleParams,
@@ -481,3 +487,149 @@ def test_sketch_edit_line_params_defaults():
     assert p.start_y == 0.0
     assert p.end_x == 1.0
     assert p.end_y == 0.0
+
+
+def test_inspect_sketch_profiles_params_valid():
+    """Valid InspectSketchProfilesParams should be accepted."""
+    p = InspectSketchProfilesParams(document_id="mydoc", sketch_name="MySketch")
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.workspace is None
+
+
+def test_inspect_sketch_profiles_params_with_workspace():
+    """InspectSketchProfilesParams accepts optional workspace."""
+    p = InspectSketchProfilesParams(document_id="mydoc", sketch_name="MySketch", workspace="/tmp/ws")
+    assert p.workspace == "/tmp/ws"
+
+
+def test_inspect_sketch_profiles_result_fields():
+    """InspectSketchProfilesResult should carry profile info."""
+    r = InspectSketchProfilesResult(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        geometry_count=4,
+        profile_count=2,
+        usable_profile_count=1,
+        profiles=[
+            {
+                "index": 0,
+                "type": "face",
+                "subelement": "Face1",
+                "closed": True,
+                "valid": True,
+                "geometry_indices": [0, 1, 2, 3],
+            },
+            {
+                "index": 1,
+                "type": "wire",
+                "subelement": "Wire1",
+                "closed": False,
+                "valid": True,
+                "geometry_indices": [0, 1],
+            },
+        ],
+    )
+    assert r.document_id == "mydoc"
+    assert r.sketch_name == "MySketch"
+    assert r.geometry_count == 4
+    assert r.profile_count == 2
+    assert r.usable_profile_count == 1
+    assert len(r.profiles) == 2
+    assert r.profiles[0]["type"] == "face"
+    assert r.profiles[0]["subelement"] == "Face1"
+    assert r.profiles[0]["closed"] is True
+    assert r.profiles[0]["valid"] is True
+    assert r.profiles[1]["type"] == "wire"
+    assert r.profiles[1]["subelement"] == "Wire1"
+    assert r.profiles[1]["closed"] is False
+
+
+def test_select_sketch_profile_params_valid():
+    """Valid SelectSketchProfileParams should be accepted."""
+    p = SelectSketchProfileParams(document_id="mydoc", sketch_name="MySketch", profile_index=0)
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.profile_index == 0
+    assert p.workspace is None
+
+
+def test_select_sketch_profile_params_with_workspace():
+    """SelectSketchProfileParams accepts optional workspace."""
+    p = SelectSketchProfileParams(
+        document_id="mydoc", sketch_name="MySketch", profile_index=2, workspace="/tmp/ws"
+    )
+    assert p.profile_index == 2
+    assert p.workspace == "/tmp/ws"
+
+
+def test_select_sketch_profile_result_fields():
+    """SelectSketchProfileResult should carry selected profile info."""
+    r = SelectSketchProfileResult(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        profile_index=1,
+        subelement="Face2",
+        type="face",
+        closed=True,
+        valid=True,
+        geometry_indices=[0, 1, 2, 3],
+        usable=True,
+    )
+    assert r.document_id == "mydoc"
+    assert r.sketch_name == "MySketch"
+    assert r.profile_index == 1
+    assert r.subelement == "Face2"
+    assert r.type == "face"
+    assert r.closed is True
+    assert r.valid is True
+    assert r.geometry_indices == [0, 1, 2, 3]
+    assert r.usable is True
+
+
+def test_sketch_pad_params_valid():
+    """Valid SketchPadParams should be accepted."""
+    p = SketchPadParams(document_id="mydoc", sketch_name="MySketch", length=10.0)
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.length == 10.0
+    assert p.reversed is False
+    assert p.pad_name == "Pad"
+    assert p.body_name == "Body"
+    assert p.profile is None
+    assert p.workspace is None
+
+
+def test_sketch_pad_params_with_profile():
+    """SketchPadParams accepts optional profile wire name."""
+    p = SketchPadParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        length=10.0,
+        profile="Wire1",
+    )
+    assert p.profile == "Wire1"
+
+
+def test_sketch_pocket_params_valid():
+    """Valid SketchPocketParams should be accepted."""
+    p = SketchPocketParams(document_id="mydoc", sketch_name="MySketch", length=10.0)
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.length == 10.0
+    assert p.reversed is False
+    assert p.pocket_name == "Pocket"
+    assert p.body_name == "Body"
+    assert p.profile is None
+    assert p.workspace is None
+
+
+def test_sketch_pocket_params_with_profile():
+    """SketchPocketParams accepts optional profile wire name."""
+    p = SketchPocketParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        length=10.0,
+        profile="Wire2",
+    )
+    assert p.profile == "Wire2"

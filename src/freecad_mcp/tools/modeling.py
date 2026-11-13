@@ -341,6 +341,56 @@ class InspectSketchResult(BaseModel):
     )
 
 
+class InspectSketchProfilesParams(BaseModel):
+    """Parameters for inspecting profiles in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch to inspect profiles in.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class InspectSketchProfilesResult(BaseModel):
+    """Result of inspect_sketch_profiles."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the inspected sketch.")
+    geometry_count: int = Field(description="Number of geometry objects in the sketch.")
+    profile_count: int = Field(description="Total number of profiles (faces + wires) found.")
+    usable_profile_count: int = Field(description="Number of profiles that are both closed and valid.")
+    profiles: list[dict[str, Any]] = Field(
+        description="Per-profile inspection details (index, type, subelement, closed, valid, geometry_indices)."
+    )
+
+
+class SelectSketchProfileParams(BaseModel):
+    """Parameters for selecting a specific profile in an existing sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the sketch containing the profile.")
+    profile_index: int = Field(
+        description="Zero-based index of the profile to select (from inspect_sketch_profiles)."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SelectSketchProfileResult(BaseModel):
+    """Result of select_sketch_profile."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch containing the profile.")
+    profile_index: int = Field(description="Zero-based index of the selected profile.")
+    subelement: str = Field(description="FreeCAD subelement reference (e.g. 'Face1', 'Wire1').")
+    type: str = Field(description="Profile type: 'face' or 'wire'.")
+    closed: bool = Field(description="Whether the profile is closed.")
+    valid: bool = Field(description="Whether the profile is valid.")
+    geometry_indices: list[int] = Field(description="Zero-based geometry indices referenced by the profile.")
+    usable: bool = Field(description="Whether the profile is usable (closed and valid).")
+
+
 class SketchDeleteGeometryResult(BaseModel):
     """Result of sketch_delete_geometry."""
 
@@ -507,7 +557,7 @@ class SketchPadResult(BaseModel):
     sketch_name: str = Field(description="Name of the sketch used as the Pad profile.")
     body_name: str = Field(description="Name of the PartDesign::Body containing the Pad.")
     pad_name: str = Field(description="Name of the created PartDesign::Pad.")
-    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    profile_name: str = Field(description="Name of the sketch or wire subelement used as the profile.")
     length: float = Field(description="Extrusion length in millimetres.")
     reversed: bool = Field(description="Whether the extrusion direction is reversed.")
     volume: Optional[float] = Field(
@@ -529,7 +579,7 @@ class SketchPocketResult(BaseModel):
     sketch_name: str = Field(description="Name of the sketch used as the Pocket profile.")
     body_name: str = Field(description="Name of the PartDesign::Body containing the Pocket.")
     pocket_name: str = Field(description="Name of the created PartDesign::Pocket.")
-    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    profile_name: str = Field(description="Name of the sketch or wire subelement used as the profile.")
     length: float = Field(description="Cut depth in millimetres.")
     reversed: bool = Field(description="Whether the cut direction is reversed.")
     volume: Optional[float] = Field(
@@ -1397,6 +1447,11 @@ class SketchPadParams(BaseModel):
     )
     pad_name: str = Field(default="Pad", description="Name for the new PartDesign::Pad object.")
     body_name: str = Field(default="Body", description="Name for the PartDesign::Body (created if needed).")
+    profile: Optional[str] = Field(
+        default=None,
+        description="Optional closed wire subelement name (e.g. 'Wire1') to use as the Pad profile. "
+        "When omitted, the entire sketch is used as the profile.",
+    )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -1419,6 +1474,11 @@ class SketchPocketParams(BaseModel):
     )
     pocket_name: str = Field(default="Pocket", description="Name for the new PartDesign::Pocket object.")
     body_name: str = Field(default="Body", description="Name of the PartDesign::Body containing the sketch.")
+    profile: Optional[str] = Field(
+        default=None,
+        description="Optional closed wire subelement name (e.g. 'Wire1') to use as the Pocket profile. "
+        "When omitted, the entire sketch is used as the profile.",
+    )
     workspace: Optional[str] = Field(
         default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
     )
@@ -2949,6 +3009,83 @@ def _register_tools(server: Any, settings: Settings) -> None:
         )
 
     # ------------------------------------------------------------------
+    # inspect_sketch_profiles
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="inspect_sketch_profiles",
+        title="Inspect sketch profiles",
+        description=(
+            "Inspect closed/open profiles (wires and faces) in an existing "
+            "Sketcher::SketchObject using the native FreeCAD Sketch.Shape. "
+            "Returns per-profile details (index, type, subelement, closed, "
+            "valid, geometry_indices) and a count of usable profiles. "
+            "Read-only; does not modify the document."
+        ),
+        structured_output=True,
+    )
+    def inspect_sketch_profiles_tool(params: InspectSketchProfilesParams) -> InspectSketchProfilesResult:
+        """Inspect profiles in a sketch and return structured profile info."""
+        validate_direct_request("inspect_sketch_profiles", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "inspect_sketch_profiles", bridge_params)
+
+        return InspectSketchProfilesResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            geometry_count=result.get("geometry_count", 0),
+            profile_count=result.get("profile_count", 0),
+            usable_profile_count=result.get("usable_profile_count", 0),
+            profiles=result.get("profiles", []),
+        )
+
+    # ------------------------------------------------------------------
+    # select_sketch_profile
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="select_sketch_profile",
+        title="Select sketch profile",
+        description=(
+            "Validate and select a specific profile in an existing "
+            "Sketcher::SketchObject.  Confirms the requested profile index "
+            "refers to a valid, closed profile and returns its subelement "
+            "reference (e.g. 'Face1', 'Wire1') suitable for downstream "
+            "operations such as Pad ProfileFace.  Read-only; does not modify "
+            "the document."
+        ),
+        structured_output=True,
+    )
+    def select_sketch_profile_tool(params: SelectSketchProfileParams) -> SelectSketchProfileResult:
+        """Select a profile in a sketch and return its validated reference."""
+        validate_direct_request("select_sketch_profile", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "profile_index": params.profile_index,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "select_sketch_profile", bridge_params)
+
+        return SelectSketchProfileResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            profile_index=result.get("profile_index", params.profile_index),
+            subelement=result.get("subelement", ""),
+            type=result.get("type", ""),
+            closed=result.get("closed", False),
+            valid=result.get("valid", False),
+            geometry_indices=result.get("geometry_indices", []),
+            usable=result.get("usable", False),
+        )
+
+    # ------------------------------------------------------------------
     # sketch_add_constraint
     # ------------------------------------------------------------------
     @server.tool(
@@ -3532,7 +3669,9 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "existing Body is reused.  The sketch is added to the Body via "
             "body.addObject(sketch), preserving its identity, geometry, and "
             "parametric editability.  The Pad profile is set to the sketch, "
-            "and *length* and *reversed* are applied.  The document is "
+            "and *length* and *reversed* are applied.  An optional *profile* "
+            "names a closed wire subelement (e.g. 'Wire1') to use as the "
+            "profile instead of the entire sketch.  The document is "
             "recomputed, saved atomically, and its revision is bumped."
         ),
         structured_output=True,
@@ -3551,6 +3690,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "reversed": params.reversed,
             "pad_name": params.pad_name,
             "body_name": params.body_name,
+            "profile": params.profile,
             "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "sketch_pad", bridge_params)
@@ -3582,8 +3722,10 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "contain exactly one (unambiguous) Body.  A new Body is never "
             "silently created for a Pocket -- a Pocket requires an existing "
             "solid feature to cut from.  The Pocket profile is set to the "
-            "sketch, and *length* and *reversed* are applied.  The document "
-            "is recomputed, saved atomically, and its revision is bumped."
+            "sketch, and *length* and *reversed* are applied.  An optional "
+            "*profile* names a closed wire subelement (e.g. 'Wire1') to use "
+            "as the profile instead of the entire sketch.  The document is "
+            "recomputed, saved atomically, and its revision is bumped."
         ),
         structured_output=True,
     )
@@ -3601,6 +3743,7 @@ def _register_tools(server: Any, settings: Settings) -> None:
             "reversed": params.reversed,
             "pocket_name": params.pocket_name,
             "body_name": params.body_name,
+            "profile": params.profile,
             "workspace": params.workspace or "",
         }
         result = _run_bridge_op(bridge, "sketch_pocket", bridge_params)

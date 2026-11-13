@@ -376,6 +376,10 @@ def validate_direct_request(op: str, params: Any) -> None:
         reversed_param = params.get("reversed", False)
         if not isinstance(reversed_param, bool):
             raise ValueError("reversed must be a boolean.")
+        profile = params.get("profile", None)
+        if profile is not None:
+            if not isinstance(profile, str) or not profile.strip():
+                raise ValueError("profile must be a non-empty string naming a closed wire.")
     elif op == "sketch_pocket":
         if not params.get("sketch_name", "").strip():
             raise ValueError("sketch_name must not be empty.")
@@ -390,6 +394,10 @@ def validate_direct_request(op: str, params: Any) -> None:
         reversed_param = params.get("reversed", False)
         if not isinstance(reversed_param, bool):
             raise ValueError("reversed must be a boolean.")
+        profile = params.get("profile", None)
+        if profile is not None:
+            if not isinstance(profile, str) or not profile.strip():
+                raise ValueError("profile must be a non-empty string naming a closed wire.")
     elif op == "sketch_revolution":
         if not params.get("sketch_name", "").strip():
             raise ValueError("sketch_name must not be empty.")

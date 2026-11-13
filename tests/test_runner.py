@@ -271,6 +271,7 @@ class _FakeSketch:
         self.Placement = None
         self.Geometry: list = []
         self.Constraints: list = []
+        self.Shape: object = None
 
     def addGeometry(self, geometry: object, check: bool = False) -> None:
         self.Geometry.append(geometry)
@@ -331,6 +332,22 @@ class _FakeEdge:
         return _FakeVector(0.0, 0.0, 1.0)
 
 
+class _FakeWire:
+    """Minimal stand-in for a FreeCAD wire with closed/valid support."""
+
+    def __init__(self, index: int, closed: bool = True, valid: bool = True) -> None:
+        self.index = index
+        self.Name = f"Wire{index}"
+        self._closed = closed
+        self._valid = valid
+
+    def isValid(self) -> bool:
+        return self._valid
+
+    def isClosed(self) -> bool:
+        return self._closed
+
+
 class _FakeFace:
     """Minimal stand-in for a FreeCAD face with normal support.
 
@@ -341,6 +358,9 @@ class _FakeFace:
 
     def __init__(self, index: int) -> None:
         self.index = index
+
+    def isValid(self) -> bool:
+        return True
 
     def normalAt(self, u: float, v: float) -> _FakeVector:
         if self.index in (1,):
@@ -367,6 +387,7 @@ class _FakeShape:
         self.Solids = [SimpleNamespace(Volume=volume)]
         self.Edges = [_FakeEdge(i) for i in range(1, 13)]
         self.Faces = [_FakeFace(i) for i in range(1, 7)]
+        self.Wires = [_FakeWire(i, closed=True, valid=True) for i in range(1, 7)]
         self.BoundBox = _FakeBoundBox()
 
     def isValid(self) -> bool:
@@ -3005,6 +3026,53 @@ def test_inspect_sketch_with_constraints(
     assert d["value"] == 10.0
 
 
+def test_inspect_sketch_fully_constrained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch reports fully_constrained=True and DoF=0 for a fully-constrained sketch."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "inspfc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+
+    class _FakeConstraint:
+        def __init__(self, **kw):
+            self.Type = kw.get("Type", "Horizontal")
+            self.Name = kw.get("Name", "")
+            self.First = kw.get("First", 0)
+            self.Second = kw.get("Second", -2000)
+            self.Third = kw.get("Third", -2000)
+            self.Value = kw.get("Value", 0.0)
+            self.IsActive = kw.get("IsActive", True)
+            self.Driving = kw.get("Driving", True)
+
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 0, 0), _FakePoint(10, 10, 0))
+    )
+
+    c1 = _FakeConstraint(Type="Horizontal", Name="H1", First=0, Value=0.0, IsActive=True, Driving=True)
+    c2 = _FakeConstraint(Type="Vertical", Name="V1", First=1, Value=0.0, IsActive=True, Driving=True)
+    c3 = _FakeConstraint(Type="Distance", Name="D1", First=0, Second=1, Value=10.0, IsActive=True, Driving=True)
+    sketch.Constraints.extend([c1, c2, c3])
+    sketch.FullyConstrained = True
+    sketch.DoF = 0
+
+    result = runner._op_inspect_sketch(
+        {"document_id": "inspfc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "inspect_sketch"
+    assert result["result"]["constraint_count"] == 3
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 0
+
+
 def test_inspect_sketch_constraints_missing_optional_properties(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3086,6 +3154,342 @@ def test_inspect_sketch_empty_constraints(
     assert result["result"]["constraints"] == []
     assert result["result"]["fully_constrained"] is None
     assert result["result"]["degrees_of_freedom"] is None
+
+
+# ---------------------------------------------------------------------------
+# Sketch profile inspection and selection (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+def _make_sketch_with_shape(
+    doc: _FakeDoc,
+    sketch_name: str = "Sketch1",
+    face_count: int = 1,
+    wire_count: int = 0,
+    open_wires: int = 0,
+    invalid_faces: int = 0,
+) -> None:
+    """Give a sketch a Shape with the specified profiles for profile tests."""
+    sketch = doc.objects[sketch_name]
+    # Add some geometry so the sketch is not empty.
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 0, 0), _FakePoint(10, 10, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(10, 10, 0), _FakePoint(0, 10, 0))
+    )
+    sketch.Geometry.append(
+        LineSegment(_FakePoint(0, 10, 0), _FakePoint(0, 0, 0))
+    )
+    # Build a Shape with Faces and Wires.
+    faces = []
+    for i in range(face_count):
+        face = _FakeFace(i + 1)
+        if i < invalid_faces:
+            # Override isValid to return False for invalid faces.
+            face.isValid = lambda: False  # type: ignore[method-assign]
+        faces.append(face)
+    wires = []
+    wire_index = 1
+    for i in range(wire_count):
+        wires.append(_FakeWire(wire_index, closed=True, valid=True))
+        wire_index += 1
+    for i in range(open_wires):
+        wires.append(_FakeWire(wire_index, closed=False, valid=True))
+        wire_index += 1
+    sketch.Shape = SimpleNamespace(Faces=faces, Wires=wires)
+
+
+def test_inspect_sketch_profiles_single_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch_profiles finds one closed, valid face profile."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "prof1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=1)
+
+    result = runner._op_inspect_sketch_profiles(
+        {"document_id": "prof1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "inspect_sketch_profiles"
+    assert result["result"]["geometry_count"] == 4
+    assert result["result"]["profile_count"] == 1
+    assert result["result"]["usable_profile_count"] == 1
+    profiles = result["result"]["profiles"]
+    assert len(profiles) == 1
+    p = profiles[0]
+    assert p["index"] == 0
+    assert p["type"] == "face"
+    assert p["subelement"] == "Face1"
+    assert p["closed"] is True
+    assert p["valid"] is True
+    assert p["geometry_indices"] == [0, 1, 2, 3]
+
+
+def test_inspect_sketch_profiles_multiple_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch_profiles finds multiple closed, valid profiles."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "prof2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=2, wire_count=1)
+
+    result = runner._op_inspect_sketch_profiles(
+        {"document_id": "prof2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["profile_count"] == 3
+    assert result["result"]["usable_profile_count"] == 3
+    profiles = result["result"]["profiles"]
+    assert profiles[0]["type"] == "face"
+    assert profiles[0]["subelement"] == "Face1"
+    assert profiles[1]["type"] == "face"
+    assert profiles[1]["subelement"] == "Face2"
+    assert profiles[2]["type"] == "wire"
+    assert profiles[2]["subelement"] == "Wire1"
+
+
+def test_inspect_sketch_profiles_open_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch_profiles reports open wires as not closed."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "prof3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=0, wire_count=0, open_wires=1)
+
+    result = runner._op_inspect_sketch_profiles(
+        {"document_id": "prof3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["profile_count"] == 1
+    assert result["result"]["usable_profile_count"] == 0
+    profiles = result["result"]["profiles"]
+    p = profiles[0]
+    assert p["type"] == "wire"
+    assert p["subelement"] == "Wire1"
+    assert p["closed"] is False
+    assert p["valid"] is True
+
+
+def test_inspect_sketch_profiles_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch_profiles reports invalid faces as not valid."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "prof4", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=1, invalid_faces=1)
+
+    result = runner._op_inspect_sketch_profiles(
+        {"document_id": "prof4", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["profile_count"] == 1
+    assert result["result"]["usable_profile_count"] == 0
+    profiles = result["result"]["profiles"]
+    p = profiles[0]
+    assert p["valid"] is False
+
+
+def test_inspect_sketch_profiles_no_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_sketch_profiles handles a sketch with no Shape gracefully."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "prof5", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    # sketch.Shape is None (default).
+
+    result = runner._op_inspect_sketch_profiles(
+        {"document_id": "prof5", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["profile_count"] == 0
+    assert result["result"]["usable_profile_count"] == 0
+    assert result["result"]["profiles"] == []
+
+
+def test_select_sketch_profile_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile validates and returns a usable profile."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=2)
+
+    result = runner._op_select_sketch_profile(
+        {"document_id": "sel1", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": 1}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "select_sketch_profile"
+    assert result["result"]["profile_index"] == 1
+    assert result["result"]["subelement"] == "Face2"
+    assert result["result"]["type"] == "face"
+    assert result["result"]["closed"] is True
+    assert result["result"]["valid"] is True
+    assert result["result"]["usable"] is True
+
+
+def test_select_sketch_profile_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile rejects an out-of-range profile index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=1)
+
+    result = runner._op_select_sketch_profile(
+        {"document_id": "sel2", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": 5}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "select_sketch_profile"
+    assert "out of range" in result["error"]
+
+
+def test_select_sketch_profile_not_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile rejects a non-closed or invalid profile."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=0, open_wires=1)
+
+    result = runner._op_select_sketch_profile(
+        {"document_id": "sel3", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": 0}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "select_sketch_profile"
+    assert "not usable" in result["error"]
+
+
+def test_select_sketch_profile_boolean_index_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile rejects a boolean profile_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel4", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=1)
+
+    result = runner._op_select_sketch_profile(
+        {
+            "document_id": "sel4",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "profile_index": True,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "select_sketch_profile"
+    assert "boolean" in result["error"]
+
+
+def test_select_sketch_profile_negative_index_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile rejects a negative profile_index."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel5", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=1)
+
+    result = runner._op_select_sketch_profile(
+        {"document_id": "sel5", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": -1}
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "select_sketch_profile"
+    assert "non-negative" in result["error"]
+
+
+def test_select_sketch_profile_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile reports a missing sketch."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel6", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_select_sketch_profile(
+        {
+            "document_id": "sel6",
+            "workspace": str(tmp_path),
+            "sketch_name": "Nonexistent",
+            "profile_index": 0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "select_sketch_profile"
+    assert "not found" in result["error"]
+
+
+def test_select_sketch_profile_deterministic_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """select_sketch_profile returns deterministic face-then-wire ordering."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "sel7", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    _make_sketch_with_shape(doc, "Sketch1", face_count=1, wire_count=2)
+
+    # Index 0 = Face1, index 1 = Wire1, index 2 = Wire2.
+    r0 = runner._op_select_sketch_profile(
+        {"document_id": "sel7", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": 0}
+    )
+    r1 = runner._op_select_sketch_profile(
+        {"document_id": "sel7", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": 1}
+    )
+    r2 = runner._op_select_sketch_profile(
+        {"document_id": "sel7", "workspace": str(tmp_path), "sketch_name": "Sketch1", "profile_index": 2}
+    )
+
+    assert r0["ok"] is True and r0["result"]["subelement"] == "Face1"
+    assert r1["ok"] is True and r1["result"]["subelement"] == "Wire1"
+    assert r2["ok"] is True and r2["result"]["subelement"] == "Wire2"
 
 
 # ---------------------------------------------------------------------------
@@ -8600,6 +9004,286 @@ def test_sketch_pocket_successful_from_circle(
     pocket = doc.objects["Pocket"]
     assert pocket.Length == 3.0
     assert pocket.Reversed is True
+    assert pocket.Profile is sketch
+
+
+def _make_sketch_with_wires(
+    sketch: object,
+    wire_specs: list[tuple[bool, bool]],
+) -> None:
+    """Give a sketch a Shape with the specified wires (closed, valid) per entry."""
+    sketch.Shape = SimpleNamespace(
+        Wires=[
+            _FakeWire(i + 1, closed=closed, valid=valid)
+            for i, (closed, valid) in enumerate(wire_specs)
+        ]
+    )
+
+
+def test_sketch_pad_profile_wire1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pad with profile='Wire1' selects the first closed wire."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "profpad1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True), (True, True)])
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "profpad1",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": False,
+            "profile": "Wire1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pad"
+    assert result["result"]["profile_name"] == "Wire1"
+    pad = doc.objects["Pad"]
+    assert pad.Profile == (sketch, ["Wire1"])
+    assert pad.Length == 10.0
+
+
+def test_sketch_pad_profile_wire2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pad with profile='Wire2' selects the second closed wire."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "profpad2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True), (True, True)])
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "profpad2",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "reversed": False,
+            "profile": "Wire2",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pad"
+    assert result["result"]["profile_name"] == "Wire2"
+    pad = doc.objects["Pad"]
+    assert pad.Profile == (sketch, ["Wire2"])
+
+
+def test_sketch_pad_profile_invalid_wire_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pad with a non-existent wire profile is rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "profpad3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True)])
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "profpad3",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "profile": "Wire99",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "Wire99" in result["error"]
+    assert "available" in result["error"].lower()
+
+
+def test_sketch_pad_profile_open_wire_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pad with an open wire profile is rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "profpad4", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True), (False, True)])
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "profpad4",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+            "profile": "Wire2",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pad"
+    assert "not a closed wire" in result["error"]
+
+
+def test_sketch_pocket_profile_wire1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pocket with profile='Wire1' selects the first closed wire."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "profpock1", "workspace": str(tmp_path)})
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "profpock1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True), (True, True)])
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.addObject(sketch)
+    body.Tip = box
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "profpock1",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+            "reversed": False,
+            "profile": "Wire1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_pocket"
+    assert result["result"]["profile_name"] == "Wire1"
+    pocket = doc.objects["Pocket"]
+    assert pocket.Profile == (sketch, ["Wire1"])
+    assert pocket.Length == 5.0
+
+
+def test_sketch_pocket_profile_invalid_wire_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pocket with a non-existent wire profile is rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "profpock2", "workspace": str(tmp_path)})
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "profpock2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True)])
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.addObject(sketch)
+    body.Tip = box
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "profpock2",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+            "profile": "Wire5",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_pocket"
+    assert "Wire5" in result["error"]
+    assert "available" in result["error"].lower()
+
+
+def test_sketch_pad_default_profile_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pad without profile still uses the entire sketch (backward compatible)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "profpad5", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True), (True, True)])
+
+    result = runner._op_sketch_pad(
+        {
+            "document_id": "profpad5",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 10.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["profile_name"] == "Sketch1"
+    pad = doc.objects["Pad"]
+    assert pad.Profile is sketch
+
+
+def test_sketch_pocket_default_profile_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pocket without profile still uses the entire sketch (backward compatible)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "profpock3", "workspace": str(tmp_path)})
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    runner._op_create_sketch(
+        {"document_id": "profpock3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+    _make_sketch_with_wires(sketch, [(True, True), (True, True)])
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(box)
+    body.addObject(sketch)
+    body.Tip = box
+
+    result = runner._op_sketch_pocket(
+        {
+            "document_id": "profpock3",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "length": 5.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["profile_name"] == "Sketch1"
+    pocket = doc.objects["Pocket"]
     assert pocket.Profile is sketch
 
 
