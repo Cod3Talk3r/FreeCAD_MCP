@@ -732,6 +732,28 @@ class PartDesignChamferResult(BaseModel):
     )
 
 
+class PartDesignFilletResult(BaseModel):
+    """Result of partdesign_fillet."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the solid feature that was filleted.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Fillet.")
+    fillet_name: str = Field(description="Name of the created PartDesign::Fillet.")
+    base_feature: str = Field(description="Name of the feature used as the Fillet base.")
+    edge_indices: list[int] = Field(description="1-based edge indices that were filleted.")
+    radius: float = Field(description="Fillet radius in millimetres.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
 class PartDesignLinearPatternResult(BaseModel):
     """Result of partdesign_linear_pattern."""
 

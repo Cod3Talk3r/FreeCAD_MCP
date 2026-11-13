@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from freecad_mcp.config import Settings
-from freecad_mcp.freecad_bridge import FreeCadBridge, find_freecad_executable
+from freecad_mcp.freecad_bridge import FreeCadBridge, find_freecad_executable, runner
 from freecad_mcp.freecad_bridge.errors import FreeCadOperationError
 from freecad_mcp.pathing import for_target
 
@@ -180,7 +180,7 @@ def test_set_body_tip_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None
     assert result["ok"] is True
     assert result["op"] == "set_body_tip"
     assert result["result"]["tip_name"] == PAD_NAME
-    assert result["result"]["previous_tip_name"] is None
+    assert result["result"]["previous_tip_name"] == PAD_NAME
     assert body.Tip is pad
 
 
@@ -230,8 +230,10 @@ def test_set_body_tip_rejects_non_solid_tip(monkeypatch: pytest.MonkeyPatch, tmp
     doc, body, pad = _make_body_doc(monkeypatch, tmp_path)
     # Add a sketch to the document AND to the Body's Group (a member, but not a
     # solid-producing Tip).
+    previous_tip = body.Tip
     sketch = doc.addObject("Sketcher::SketchObject", SKETCH_NAME)
     body.addObject(sketch)
+    body.Tip = pad
     previous_tip = body.Tip
 
     result = runner._op_set_body_tip(
@@ -522,4 +524,3 @@ def test_real_create_body_then_sketch_pad_workflow(tmp_path: Path) -> None:
             or "null" in message.lower()
             or "solid" in message.lower()
         ), message
-
