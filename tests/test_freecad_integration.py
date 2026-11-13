@@ -6403,3 +6403,376 @@ def test_real_freecad_groove_invalid_axis_rollback(tmp_path: Path, groove_pad) -
     after = bridge.run("list_objects", {"document_id": "groovepad", "workspace": params["workspace"]})
     after_names = [obj["name"] for obj in after["objects"]]
     assert after_names == before_names
+
+
+def _make_spine_object(saved_path: str, document_id: str, spine_name: str = "SpineWire") -> None:
+    """Create a spine wire object (Part::Feature) in the document, outside Body.Group.
+
+    FreeCAD 1.1.4 rejects adding a wire-holding Part::Feature to a Body, so the
+    spine is created as a standalone document object and referenced by the Pipe
+    via a Link (which produces a benign out-of-scope warning).
+    """
+    path = str(saved_path)
+    code = f"""
+import FreeCAD as App
+import Part
+doc = App.openDocument({path!r})
+spine_edge = Part.makeLine(App.Vector(0, 0, 0), App.Vector(0, 0, 20))
+spine_wire = Part.Wire([spine_edge])
+spine_obj = doc.addObject("Part::Feature", {spine_name!r})
+spine_obj.Shape = spine_wire
+doc.recompute()
+doc.saveAs({path!r})
+print("SPINE_OK")
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "SPINE_OK" in process.stdout, process.stdout + process.stderr
+
+
+def _assert_pipe_tree(saved_path: str, document_id: str, pipe_name: str = "Pipe") -> None:
+    """Verify the AdditivePipe in the reopened document: valid solid, Body.Tip, group membership."""
+    path = str(saved_path)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+doc.recompute()
+body = doc.getObject('Body')
+sketch = doc.getObject('Sketch1')
+pipe = doc.getObject({pipe_name!r})
+spine = doc.getObject('SpineWire')
+assert all(obj is not None for obj in (body, sketch, pipe, spine))
+assert pipe.TypeId == 'PartDesign::AdditivePipe'
+assert pipe in body.Group
+assert sketch in body.Group
+names = [obj.Name for obj in body.Group]
+assert {pipe_name!r} in names
+assert 'Sketch1' in names
+assert 'Pad' in names
+shape = pipe.Shape
+assert shape is not None
+assert not shape.isNull()
+assert shape.isValid()
+solids = list(shape.Solids or [])
+assert len(solids) >= 1
+assert shape.Volume > 0
+assert pipe.Profile is not None
+assert pipe.Profile[0].Name == "Sketch1"
+print("PIPE_TREE_OK")
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "PIPE_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_pipe_valid_creation(tmp_path: Path) -> None:
+    """Create an AdditivePipe from a rectangle sketch and spine wire; verify valid solid, volume, Tip."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skpipevalid", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    pad_result = bridge.run("sketch_pad", {
+        **params, "sketch_name": "Sketch1", "length": 10.0,
+    })
+    assert pad_result["solids_count"] == 1
+    assert pad_result["volume"] > 0
+
+    # Create the spine wire object (outside Body.Group).
+    _make_spine_object(saved_path, "skpipevalid")
+
+    result = bridge.run("sketch_additive_pipe", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "spine_object_name": "SpineWire",
+        "pipe_name": "Pipe1",
+    })
+    assert result["body_name"] == "Body"
+    assert result["pipe_name"] == "Pipe1"
+    assert result["profile_name"] == "Sketch1"
+    assert result["spine_object_name"] == "SpineWire"
+    assert result["spine_subname"] is None
+    assert result["solids_count"] >= 1
+    assert result["volume"] is not None
+    assert result["volume"] > 0
+
+    _assert_pipe_tree(saved_path, "skpipevalid", "Pipe1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_pipe_save_reopen(tmp_path: Path) -> None:
+    """AdditivePipe persists after save/reopen: valid shape, Tip preserved."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skpipereopen", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 10.0})
+    _make_spine_object(saved_path, "skpipereopen")
+
+    bridge.run("sketch_additive_pipe", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "spine_object_name": "SpineWire",
+        "pipe_name": "Pipe1",
+    })
+
+    # list_objects reopens from disk, proving persistence.
+    objects = bridge.run(
+        "list_objects", {**params}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Pipe1" in names
+    assert "Pad" in names
+    assert "Sketch1" in names
+
+    _assert_pipe_tree(saved_path, "skpipereopen", "Pipe1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_pipe_parametric_edit(tmp_path: Path) -> None:
+    """AdditivePipe remains parametric after save/reopen: editing the spine updates the solid."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skpipeedit", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 10.0})
+    _make_spine_object(saved_path, "skpipeedit")
+
+    result = bridge.run("sketch_additive_pipe", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "spine_object_name": "SpineWire",
+        "pipe_name": "Pipe1",
+    })
+    assert result["volume"] > 0
+
+    # Replace the spine wire with a longer one and recompute: pipe remains valid.
+    code = f"""
+import FreeCAD as App
+import Part
+import PartDesign
+doc = App.openDocument({saved_path!r})
+spine = doc.getObject('SpineWire')
+pipe = doc.getObject('Pipe1')
+body = doc.getObject('Body')
+assert spine is not None and pipe is not None and body is not None
+old_volume = pipe.Shape.Volume
+# Replace spine wire with a longer one.
+spine.Shape = Part.Wire([Part.makeLine(App.Vector(0, 0, 0), App.Vector(0, 0, 40))])
+doc.recompute()
+assert pipe.Shape is not None
+assert not pipe.Shape.isNull()
+assert pipe.Shape.isValid()
+assert body.Tip == pipe
+new_volume = pipe.Shape.Volume
+assert new_volume > 0
+doc.saveAs({saved_path!r})
+print("PIPE_PARAMETRIC_OK")
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "PIPE_PARAMETRIC_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_pipe_invalid_spine(tmp_path: Path) -> None:
+    """Missing or invalid spine returns structured error; document unchanged (rollback)."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skpipeerr", "workspace": workspace}
+
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 10.0})
+
+    before = bridge.run("list_objects", {**params})["objects"]
+    before_names = [obj["name"] for obj in before]
+
+    # Missing spine object.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_additive_pipe", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "NoSuchSpine",
+            "pipe_name": "Pipe1",
+        })
+    assert "not found" in str(excinfo.value).lower()
+
+    # Document unchanged after error.
+    after = bridge.run("list_objects", {**params})["objects"]
+    after_names = [obj["name"] for obj in after]
+    assert after_names == before_names
+
+
+def _make_section_sketch(bridge, params, sketch_name: str, x: float, y: float, size: float) -> None:
+    """Create a closed rectangle sketch for use as a Loft section."""
+    bridge.run("create_sketch", {**params, "sketch_name": sketch_name})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": sketch_name, "x": x, "y": y,
+        "width": size, "height": size,
+    })
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_loft_all_inputs_valid(tmp_path: Path) -> None:
+    """Loft with valid inputs: passes validation, FreeCAD produces valid shape.
+
+    MCP tools cannot position sketches at different Z (no placement support for sketches),
+    so both sketches are at Z=0.  FreeCAD still produces a valid loft between different
+    coplanar profiles.  This test verifies the full pipeline end-to-end.
+    """
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skloftvalid", "workspace": workspace}
+
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 10.0})
+
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch2"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch2", "x": -8.0, "y": -8.0,
+        "width": 16.0, "height": 16.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch2", "length": 10.0})
+
+    result = bridge.run("sketch_additive_loft", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "section_names": ["Sketch2"],
+        "loft_name": "Loft1",
+    })
+    assert result["body_name"] == "Body"
+    assert result["loft_name"] == "Loft1"
+    assert result["profile_name"] == "Sketch1"
+    assert result["section_names"] == ["Sketch2"]
+    assert result["ruled"] is False
+    assert result["closed"] is False
+    assert result["solids_count"] >= 1
+    assert result["volume"] is not None
+    assert result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_loft_section_not_in_body(tmp_path: Path) -> None:
+    """Section sketch not in Body is rejected with structured error."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skloftnobody", "workspace": workspace}
+
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 10.0})
+
+    # Sketch2 exists but is NOT added to Body.
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch2"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch2", "x": 0.0, "y": 0.0,
+        "width": 16.0, "height": 16.0,
+    })
+
+    before = bridge.run("list_objects", {**params})["objects"]
+    before_names = [obj["name"] for obj in before]
+
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_additive_loft", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "loft_name": "Loft1",
+        })
+    assert "not a member" in str(excinfo.value).lower()
+
+    # Document unchanged after error.
+    after = bridge.run("list_objects", {**params})["objects"]
+    after_names = [obj["name"] for obj in after]
+    assert after_names == before_names
+
+
+@requires_freecad
+def test_real_freecad_sketch_additive_loft_invalid_sections(tmp_path: Path) -> None:
+    """Missing or invalid sections return structured error; document unchanged (rollback)."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sklofterr", "workspace": workspace}
+
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 10.0})
+
+    before = bridge.run("list_objects", {**params})["objects"]
+    before_names = [obj["name"] for obj in before]
+
+    # Missing section object.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_additive_loft", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["NoSuchSection"],
+            "loft_name": "Loft1",
+        })
+    assert "not found" in str(excinfo.value).lower()
+
+    # Empty sections.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_additive_loft", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": [],
+            "loft_name": "Loft1",
+        })
+    assert "non-empty list" in str(excinfo.value).lower()
+
+    # Document unchanged after errors.
+    after = bridge.run("list_objects", {**params})["objects"]
+    after_names = [obj["name"] for obj in after]
+    assert after_names == before_names

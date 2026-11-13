@@ -321,6 +321,7 @@ class _FakeEdge:
 
     def __init__(self, index: int) -> None:
         self.index = index
+        self.Name = f"Edge{index}"
 
     def tangentAt(self, parameter: float) -> _FakeVector:
         if self.index in (1, 3, 9, 11):
@@ -382,9 +383,11 @@ class _FakeBody:
         self.Group: list = []
         self.outList: list = []
         self.Origin: object = _FakeOrigin()
+        self.Tip: object = None
 
     def addObject(self, obj: object) -> None:
         self.Group.append(obj)
+        self.Tip = obj  # Mirror real FreeCAD: adding a feature advances Body.Tip
 
 
 class _FakeOrigin:
@@ -449,6 +452,32 @@ class _FakeGroove:
         self.Angle: float = 0.0
         self.Axis: object = None
         self.BaseFeature: object = None
+        self.Shape: object = _FakeShape()
+
+
+class _FakeAdditivePipe:
+    """Minimal stand-in for a PartDesign::AdditivePipe."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::AdditivePipe"
+        self.Profile: object = None
+        self.Spine: object = None
+        self.Shape: object = _FakeShape()
+
+
+class _FakeAdditiveLoft:
+    """Minimal stand-in for a PartDesign::AdditiveLoft."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::AdditiveLoft"
+        self.Profile: object = None
+        self.Sections: list = []
+        self.Ruled: bool = False
+        self.Closed: bool = False
         self.Shape: object = _FakeShape()
 
 
@@ -570,6 +599,10 @@ class _FakeDoc:
             obj: object = _FakeRevolution(name)
         elif type_id == "PartDesign::Groove":
             obj: object = _FakeGroove(name)
+        elif type_id == "PartDesign::AdditivePipe":
+            obj: object = _FakeAdditivePipe(name)
+        elif type_id == "PartDesign::AdditiveLoft":
+            obj: object = _FakeAdditiveLoft(name)
         elif type_id == "PartDesign::Fillet":
             obj: object = _FakeFillet(name)
         elif type_id == "PartDesign::Chamfer":
@@ -9758,6 +9791,1118 @@ def test_handle_request_dispatches_sketch_groove(
     groove = doc.objects["Groove"]
     assert groove.Angle == 270.0
     assert groove.Profile is sketch
+
+
+def _make_spine_feature(doc: _FakeDoc, name: str = "SpineWire") -> object:
+    """Create a Part::Feature holding a wire Shape with edges (spine stand-in)."""
+    spine = doc.addObject("Part::Feature", name)
+    spine.Shape = _FakeShape(volume=0.0)
+    return spine
+
+
+def test_sketch_additive_pipe_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "pipe_name": "Pipe1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_additive_pipe"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["pipe_name"] == "Pipe1"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["spine_object_name"] == "SpineWire"
+    assert result["result"]["spine_subname"] is None
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    pipe = doc.objects["Pipe1"]
+    assert pipe.Profile is sketch
+    assert pipe.Spine is spine
+    assert body.Tip is pipe
+
+
+def test_sketch_additive_pipe_with_spine_subname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "spine_subname": "Edge1",
+            "pipe_name": "Pipe1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["spine_subname"] == "Edge1"
+    pipe = doc.objects["Pipe1"]
+    assert pipe.Spine == (spine, ["Edge1"])
+
+
+def test_sketch_additive_pipe_missing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NoSuchBody",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_wrong_body_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "NotABody")
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NotABody",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "not 'PartDesign::Body'" in result["error"]
+
+
+def test_sketch_additive_pipe_body_without_valid_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = None  # No base solid
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "no tip" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NoSuchSketch",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_wrong_sketch_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "NotASketch")
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NotASketch",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_additive_pipe_sketch_not_member_of_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch1 is NOT added to body.Group -> ownership mismatch.
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "not a member" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_missing_spine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "NoSuchSpine",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_spine_without_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Spine object with no Shape attribute.
+    spine = doc.addObject("Part::Feature", "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "no shape" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_spine_without_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+    # Remove edges -> spine has no wire/edge.
+    spine.Shape.Edges = []
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "no edges" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_invalid_spine_subname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "spine_subname": "Edge999",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+    assert "does not match any edge" in result["error"].lower()
+
+
+def test_sketch_additive_pipe_name_clash_auto_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+    # Pre-create a Pipe1 to force auto-suffixing.
+    doc.addObject("PartDesign::AdditivePipe", "Pipe1")
+
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "pipe_name": "Pipe1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["pipe_name"] == "Pipe1_1"
+    assert doc.getObject("Pipe1_1") is not None
+
+
+def test_sketch_additive_pipe_invalid_document_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    result = runner._op_sketch_additive_pipe(
+        {
+            "document_id": "../evil",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_pipe"
+
+
+def test_sketch_additive_pipe_empty_required_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    for missing in ("body_name", "sketch_name", "spine_object_name", "pipe_name"):
+        params = {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "pipe_name": "Pipe1",
+        }
+        params[missing] = ""
+        result = runner._op_sketch_additive_pipe(params)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_additive_pipe"
+        assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_additive_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_additive_pipe",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "body_name": "Body",
+                "sketch_name": "Sketch1",
+                "spine_object_name": "SpineWire",
+                "pipe_name": "Pipe1",
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_additive_pipe"
+    assert response["result"]["pipe_name"] == "Pipe1"
+    assert response["result"]["solids_count"] == 1
+    assert response["result"]["volume"] == 100.0
+
+
+def test_sketch_additive_loft_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    _make_rectangle_sketch(s2, x=0.0, y=0.0, width=2.0, height=2.0)
+
+    s3 = doc.addObject("Sketcher::SketchObject", "Sketch3")
+    body.addObject(s3)
+    _make_rectangle_sketch(s3, x=0.0, y=0.0, width=1.0, height=1.0)
+    body.Tip = saved_tip
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2", "Sketch3"],
+            "loft_name": "Loft1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_additive_loft"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["loft_name"] == "Loft1"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["section_names"] == ["Sketch2", "Sketch3"]
+    assert result["result"]["ruled"] is False
+    assert result["result"]["closed"] is False
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    loft = doc.objects["Loft1"]
+    assert loft.Profile is sketch
+    assert loft.Sections == [doc.objects["Sketch2"], doc.objects["Sketch3"]]
+    assert body.Tip is loft
+
+
+def test_sketch_additive_loft_with_ruled_and_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    _make_rectangle_sketch(s2)
+    body.Tip = saved_tip
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "loft_name": "Loft1",
+            "ruled": True,
+            "closed": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["ruled"] is True
+    assert result["result"]["closed"] is True
+
+    loft = doc.objects["Loft1"]
+    assert loft.Ruled is True
+    assert loft.Closed is True
+
+
+def test_sketch_additive_loft_missing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NoSuchBody",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_additive_loft_wrong_body_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "NotABody")
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NotABody",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not 'PartDesign::Body'" in result["error"]
+
+
+def test_sketch_additive_loft_body_without_valid_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = None
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "no tip" in result["error"].lower()
+
+
+def test_sketch_additive_loft_missing_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NoSuchSketch",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_additive_loft_wrong_profile_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "NotASketch")
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NotASketch",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_additive_loft_profile_not_member_of_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch1 is NOT added to body.Group -> ownership mismatch.
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not a member" in result["error"].lower()
+
+
+def test_sketch_additive_loft_empty_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": [],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "non-empty list" in result["error"].lower()
+
+
+def test_sketch_additive_loft_missing_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["NoSuchSection"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_additive_loft_wrong_section_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    doc.addObject("Part::Box", "NotASection")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["NotASection"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_additive_loft_section_not_member_of_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch2 is NOT added to body.Group -> ownership mismatch.
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "not a member" in result["error"].lower()
+
+
+def test_sketch_additive_loft_duplicate_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    body.Tip = saved_tip
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2", "Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "more than once" in result["error"].lower()
+
+
+def test_sketch_additive_loft_profile_reused_as_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch1"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "duplicates the profile sketch" in result["error"].lower()
+
+
+def test_sketch_additive_loft_invalid_ruled_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "ruled": "yes",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "ruled must be a boolean" in result["error"].lower()
+
+
+def test_sketch_additive_loft_invalid_closed_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "closed": 1,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+    assert "closed must be a boolean" in result["error"].lower()
+
+
+def test_sketch_additive_loft_name_clash_auto_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    body.Tip = saved_tip
+    # Pre-create a Loft1 to force auto-suffixing.
+    doc.addObject("PartDesign::AdditiveLoft", "Loft1")
+
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "loft_name": "Loft1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["loft_name"] == "Loft1_1"
+    assert doc.getObject("Loft1_1") is not None
+
+
+def test_sketch_additive_loft_invalid_document_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    result = runner._op_sketch_additive_loft(
+        {
+            "document_id": "../evil",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_additive_loft"
+
+
+def test_sketch_additive_loft_empty_required_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    base_params = {
+        "document_id": "edit",
+        "workspace": str(tmp_path),
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "section_names": ["Sketch2"],
+        "loft_name": "Loft1",
+    }
+    for missing in ("body_name", "sketch_name", "loft_name"):
+        params = dict(base_params)
+        params[missing] = ""
+        result = runner._op_sketch_additive_loft(params)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_additive_loft"
+        assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_additive_loft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    body.Tip = saved_tip
+    _make_rectangle_sketch(s2)
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_additive_loft",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "body_name": "Body",
+                "sketch_name": "Sketch1",
+                "section_names": ["Sketch2"],
+                "loft_name": "Loft1",
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_additive_loft"
+    assert response["result"]["loft_name"] == "Loft1"
+    assert response["result"]["solids_count"] == 1
+    assert response["result"]["volume"] == 100.0
 
 
 def _make_box_solid(doc: _FakeDoc, name: str = "Box1", volume: float = 64.0) -> object:

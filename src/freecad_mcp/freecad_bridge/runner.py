@@ -81,6 +81,8 @@ OP_SKETCH_PAD = "sketch_pad"
 OP_SKETCH_POCKET = "sketch_pocket"
 OP_SKETCH_REVOLUTION = "sketch_revolution"
 OP_SKETCH_GROOVE = "sketch_groove"
+OP_SKETCH_ADDITIVE_PIPE = "sketch_additive_pipe"
+OP_SKETCH_ADDITIVE_LOFT = "sketch_additive_loft"
 OP_DELETE_OBJECT = "delete_object"
 OP_PARTDESIGN_FILLET = "partdesign_fillet"
 OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
@@ -8355,6 +8357,633 @@ def _op_sketch_groove(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_additive_pipe(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::AdditivePipe from an existing sketch and spine.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::AdditivePipe``.  The
+    target Body must already exist and its Tip must be a valid solid
+    (e.g. a Pad).  The sketch profile and the spine wire object must already
+    exist; the sketch must already be a member of the specified Body and the
+    spine object must remain outside ``Body.Group`` (FreeCAD 1.1.4 rejects
+    adding a wire-holding ``Part::Feature`` to a Body).
+
+    The Pipe profile is set to the existing sketch, and the spine is set to
+    the existing spine object (optionally scoped to a single edge via
+    ``spine_subname``).  After recompute, the resulting Pipe shape is
+    validated (non-null solid with at least one solid).  The document is
+    locked, recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the
+    on-disk document is left unmodified (rollback via the established
+    save-on-success pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name_raw = params.get("body_name", "Body")
+    sketch_name_raw = params.get("sketch_name", "")
+    spine_object_name_raw = params.get("spine_object_name", "")
+    spine_subname = params.get("spine_subname")
+    pipe_name_raw = params.get("pipe_name", "AdditivePipe")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate document_id.
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_additive_pipe", "error": str(exc)}
+
+    # Validate required names: reject empty strings, apply defaults only when
+    # the key is absent (not when it is explicitly empty).
+    if not str(body_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_pipe",
+            "error": "body_name must not be empty.",
+        }
+    body_name = str(body_name_raw)
+
+    if not str(sketch_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_pipe",
+            "error": "sketch_name must not be empty.",
+        }
+    sketch_name = str(sketch_name_raw)
+
+    if not str(spine_object_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_pipe",
+            "error": "spine_object_name must not be empty.",
+        }
+    spine_object_name = str(spine_object_name_raw)
+
+    if not str(pipe_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_pipe",
+            "error": "pipe_name must not be empty.",
+        }
+    pipe_name = str(pipe_name_raw)
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_additive_pipe", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_additive_pipe", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_additive_pipe", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Require an existing PartDesign::Body with a valid, non-null solid Tip.
+        body = doc.getObject(body_name)
+        if body is None:
+            return _fail(f"body '{body_name}' not found")
+        if getattr(body, "TypeId", "") != "PartDesign::Body":
+            return _fail(
+                f"object '{body_name}' is type '{getattr(body, 'TypeId', '?')}', not 'PartDesign::Body'; "
+                f"cannot create an AdditivePipe."
+            )
+        body_name_used = getattr(body, "Name", body_name)
+
+        tip = getattr(body, "Tip", None)
+        if tip is None:
+            return _fail(
+                f"Body '{body_name_used}' has no Tip.  An AdditivePipe requires a valid base solid.  "
+                f"Create a Pad or other base solid before adding a Pipe."
+            )
+        tip_shape = getattr(tip, "Shape", None)
+        if tip_shape is None or getattr(tip_shape, "isNull", lambda: False)() or not bool(tip_shape.isValid()):
+            return _fail(
+                f"Body '{body_name_used}' Tip '{getattr(tip, 'Name', '?')}' has no valid base solid.  "
+                f"Create a Pad or other base solid before adding a Pipe."
+            )
+
+        # Require an existing Sketcher::SketchObject that is already a member
+        # of the specified Body.  Do not silently change ownership.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+        if getattr(sketch, "TypeId", "") != "Sketcher::SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{getattr(sketch, 'TypeId', '?')}', not 'Sketcher::SketchObject'; "
+                f"cannot create an AdditivePipe from it."
+            )
+        body_members = list(getattr(body, "Group", []) or [])
+        if sketch not in body_members and sketch not in list(getattr(body, "outList", []) or []):
+            return _fail(
+                f"sketch '{sketch_name}' is not a member of Body '{body_name_used}'.  "
+                f"Add the sketch to the Body first (e.g. via sketch_pad) or choose "
+                f"the Body that already contains it."
+            )
+
+        # Require an existing spine object with a non-null valid Shape holding
+        # at least one wire/edge.  The spine stays outside Body.Group; do not
+        # attempt to add it to the Body.
+        spine_obj = doc.getObject(spine_object_name)
+        if spine_obj is None:
+            return _fail(f"spine object '{spine_object_name}' not found")
+        spine_shape = getattr(spine_obj, "Shape", None)
+        if spine_shape is None or getattr(spine_shape, "isNull", lambda: False)():
+            return _fail(
+                f"spine object '{spine_object_name}' has no Shape.  Provide a wire-holding "
+                f"object (e.g. a Part::Feature whose Shape is a Wire) as the spine."
+            )
+        try:
+            spine_edges = list(getattr(spine_shape, "Edges", []) or [])
+        except Exception:
+            spine_edges = []
+        if not spine_edges:
+            return _fail(
+                f"spine object '{spine_object_name}' Shape has no edges.  A spine must define "
+                f"a wire with at least one edge."
+            )
+
+        # If a spine subname is supplied, verify it references an existing edge.
+        spine_ref: Any = spine_obj
+        if spine_subname is not None and str(spine_subname).strip():
+            spine_subname = str(spine_subname).strip()
+            edge_names = [getattr(e, "Name", None) for e in spine_edges]
+            if spine_subname not in edge_names:
+                return _fail(
+                    f"spine_subname '{spine_subname}' does not match any edge of "
+                    f"spine object '{spine_object_name}' (edges: {edge_names})."
+                )
+            spine_ref = (spine_obj, [spine_subname])
+
+        # Create the AdditivePipe.  Avoid name clashes.
+        counter = 0
+        desired_pipe_name = pipe_name
+        while doc.getObject(desired_pipe_name) is not None:
+            counter += 1
+            desired_pipe_name = f"{pipe_name}_{counter}"
+        try:
+            pipe = doc.addObject("PartDesign::AdditivePipe", desired_pipe_name)
+            body.addObject(pipe)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::AdditivePipe: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Pipe profile to the existing sketch.
+        try:
+            pipe.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pipe profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Set the Pipe spine to the existing spine object (optionally edge-scoped).
+        # FreeCAD 1.1.4 emits a benign "out of allowed scope" warning when the
+        # spine object is outside Body.Group; this is expected and non-fatal.
+        try:
+            pipe.Spine = spine_ref
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Pipe spine: {exc}."
+            )
+
+        # Recompute the document so FreeCAD evaluates the Pipe feature tree.
+        doc.recompute()
+
+        # Validate the resulting Pipe: it must have a valid, non-null solid shape.
+        shape = getattr(pipe, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"AdditivePipe '{desired_pipe_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate, or the spine may be invalid."
+            )
+        try:
+            if getattr(shape, "isNull", lambda: False)():
+                return _fail(
+                    f"AdditivePipe '{desired_pipe_name}' produced a NULL shape.  The spine "
+                    f"reference was accepted but did not resolve to a valid sweep path."
+                )
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"AdditivePipe '{desired_pipe_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"AdditivePipe '{desired_pipe_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"AdditivePipe '{desired_pipe_name}' produced no solid.  The sketch profile or "
+                f"spine configuration may not produce a valid solid."
+            )
+
+        # Verify Body.Tip advanced to the new Pipe.
+        new_tip = getattr(body, "Tip", None)
+        if new_tip is None or getattr(new_tip, "Name", None) != desired_pipe_name:
+            return _fail(
+                f"Body '{body_name_used}' Tip did not advance to the new AdditivePipe "
+                f"'{desired_pipe_name}' after recompute."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_additive_pipe",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name_used,
+            "pipe_name": desired_pipe_name,
+            "profile_name": sketch_name,
+            "spine_object_name": spine_object_name,
+            "spine_subname": spine_subname if spine_subname else None,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_additive_loft(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::AdditiveLoft from an existing sketch profile and sections.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::AdditiveLoft``.  The
+    target Body must already exist and its Tip must be a valid solid
+    (e.g. a Pad).  The profile sketch and all section sketches must already
+    exist and already be members of the specified Body.  Ownership is never
+    silently changed.
+
+    The Loft profile is set to the existing sketch, and the sections are set
+    to the existing list of sketches.  ``Ruled`` and ``Closed`` are applied
+    as requested.  After recompute, the resulting Loft shape is validated
+    (non-null solid with at least one solid).  The document is locked,
+    recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the
+    on-disk document is left unmodified (rollback via the established
+    save-on-success pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name_raw = params.get("body_name", "Body")
+    sketch_name_raw = params.get("sketch_name", "")
+    section_names_raw = params.get("section_names") or []
+    loft_name_raw = params.get("loft_name", "Loft")
+    ruled = params.get("ruled", False)
+    closed = params.get("closed", False)
+    workspace_str = params.get("workspace") or ""
+
+    # Validate document_id.
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_additive_loft", "error": str(exc)}
+
+    # Validate required names: reject empty strings, apply defaults only when
+    # the key is absent (not when it is explicitly empty).
+    if not str(body_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "body_name must not be empty.",
+        }
+    body_name = str(body_name_raw)
+
+    if not str(sketch_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "sketch_name must not be empty.",
+        }
+    sketch_name = str(sketch_name_raw)
+
+    if not isinstance(section_names_raw, list) or not section_names_raw:
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "section_names must be a non-empty list of existing sketch names.",
+        }
+    section_names = [str(s).strip() for s in section_names_raw]
+    if not section_names:
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "section_names must be a non-empty list of existing sketch names.",
+        }
+
+    if not str(loft_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "loft_name must not be empty.",
+        }
+    loft_name = str(loft_name_raw)
+
+    # Validate boolean parameters strictly.
+    if not isinstance(ruled, bool):
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "ruled must be a boolean.",
+        }
+    if not isinstance(closed, bool):
+        return {
+            "ok": False,
+            "op": "sketch_additive_loft",
+            "error": "closed must be a boolean.",
+        }
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_additive_loft", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_additive_loft", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_additive_loft", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Require an existing PartDesign::Body with a valid, non-null solid Tip.
+        body = doc.getObject(body_name)
+        if body is None:
+            return _fail(f"body '{body_name}' not found")
+        if getattr(body, "TypeId", "") != "PartDesign::Body":
+            return _fail(
+                f"object '{body_name}' is type '{getattr(body, 'TypeId', '?')}', not 'PartDesign::Body'; "
+                f"cannot create an AdditiveLoft."
+            )
+        body_name_used = getattr(body, "Name", body_name)
+
+        tip = getattr(body, "Tip", None)
+        if tip is None:
+            return _fail(
+                f"Body '{body_name_used}' has no Tip.  An AdditiveLoft requires a valid base solid.  "
+                f"Create a Pad or other base solid before adding a Loft."
+            )
+        tip_shape = getattr(tip, "Shape", None)
+        if tip_shape is None or getattr(tip_shape, "isNull", lambda: False)() or not bool(tip_shape.isValid()):
+            return _fail(
+                f"Body '{body_name_used}' Tip '{getattr(tip, 'Name', '?')}' has no valid base solid.  "
+                f"Create a Pad or other base solid before adding a Loft."
+            )
+
+        # Require an existing Sketcher::SketchObject Profile that is already
+        # a member of the specified Body.  Do not silently change ownership.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+        if getattr(sketch, "TypeId", "") != "Sketcher::SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{getattr(sketch, 'TypeId', '?')}', not 'Sketcher::SketchObject'; "
+                f"cannot create an AdditiveLoft from it."
+            )
+        body_members = list(getattr(body, "Group", []) or [])
+        if sketch not in body_members and sketch not in list(getattr(body, "outList", []) or []):
+            return _fail(
+                f"sketch '{sketch_name}' is not a member of Body '{body_name_used}'.  "
+                f"Add the sketch to the Body first (e.g. via sketch_pad) or choose "
+                f"the Body that already contains it."
+            )
+
+        # Require a non-empty list of Sections.  Every section must exist,
+        # be a Sketcher::SketchObject, belong to the same Body, be unique,
+        # and not duplicate the Profile.
+        section_objs: list[Any] = []
+        seen_section_names: set[str] = set()
+        for section_name in section_names:
+            section_obj = doc.getObject(section_name)
+            if section_obj is None:
+                return _fail(f"section '{section_name}' not found")
+            if getattr(section_obj, "TypeId", "") != "Sketcher::SketchObject":
+                return _fail(
+                    f"section '{section_name}' is type '{getattr(section_obj, 'TypeId', '?')}', "
+                    f"not 'Sketcher::SketchObject'; cannot use it as an AdditiveLoft section."
+                )
+            if section_name in seen_section_names:
+                return _fail(
+                    f"section '{section_name}' appears more than once in section_names."
+                )
+            seen_section_names.add(section_name)
+            if section_name == sketch_name:
+                return _fail(
+                    f"section '{section_name}' duplicates the Profile sketch; "
+                    f"a section cannot be reused as the profile."
+                )
+            if section_obj not in body_members and section_obj not in list(getattr(body, "outList", []) or []):
+                return _fail(
+                    f"section '{section_name}' is not a member of Body '{body_name_used}'.  "
+                    f"Add the section to the Body first or choose "
+                    f"the Body that already contains it."
+                )
+            section_objs.append(section_obj)
+
+        # Create the AdditiveLoft.  Avoid name clashes.
+        counter = 0
+        desired_loft_name = loft_name
+        while doc.getObject(desired_loft_name) is not None:
+            counter += 1
+            desired_loft_name = f"{loft_name}_{counter}"
+        try:
+            loft = doc.addObject("PartDesign::AdditiveLoft", desired_loft_name)
+            body.addObject(loft)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::AdditiveLoft: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Loft profile to the existing sketch.
+        try:
+            loft.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Loft profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Set the Loft sections to the existing sketches.
+        try:
+            loft.Sections = section_objs
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Loft sections: {exc}."
+            )
+
+        # Set Ruled and Closed.
+        try:
+            loft.Ruled = ruled
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Ruled on the Loft: {exc}."
+            )
+        try:
+            loft.Closed = closed
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Closed on the Loft: {exc}."
+            )
+
+        # Recompute the document so FreeCAD evaluates the Loft feature tree.
+        doc.recompute()
+
+        # Validate the resulting Loft: it must have a valid, non-null solid shape.
+        shape = getattr(loft, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"AdditiveLoft '{desired_loft_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate, or the sections may be invalid."
+            )
+        try:
+            if getattr(shape, "isNull", lambda: False)():
+                return _fail(
+                    f"AdditiveLoft '{desired_loft_name}' produced a NULL shape.  The sections "
+                    f"reference was accepted but did not resolve to a valid loft path."
+                )
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"AdditiveLoft '{desired_loft_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"AdditiveLoft '{desired_loft_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"AdditiveLoft '{desired_loft_name}' produced no solid.  The sketch profile or "
+                f"sections configuration may not produce a valid solid."
+            )
+
+        # Verify Body.Tip advanced to the new Loft.
+        new_tip = getattr(body, "Tip", None)
+        if new_tip is None or getattr(new_tip, "Name", None) != desired_loft_name:
+            return _fail(
+                f"Body '{body_name_used}' Tip did not advance to the new AdditiveLoft "
+                f"'{desired_loft_name}' after recompute."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_additive_loft",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name_used,
+            "loft_name": desired_loft_name,
+            "profile_name": sketch_name,
+            "section_names": section_names,
+            "ruled": ruled,
+            "closed": closed,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 def _op_partdesign_fillet(params: dict[str, Any]) -> dict[str, Any]:
     """Create a native PartDesign::Fillet on edges of an existing solid feature.
 
@@ -10583,6 +11212,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_POCKET: _op_sketch_pocket,
     OP_SKETCH_REVOLUTION: _op_sketch_revolution,
     OP_SKETCH_GROOVE: _op_sketch_groove,
+    OP_SKETCH_ADDITIVE_PIPE: _op_sketch_additive_pipe,
+    OP_SKETCH_ADDITIVE_LOFT: _op_sketch_additive_loft,
     OP_DELETE_OBJECT: _op_delete_object,
     OP_PARTDESIGN_FILLET: _op_partdesign_fillet,
     OP_PARTDESIGN_CHAMFER: _op_partdesign_chamfer,

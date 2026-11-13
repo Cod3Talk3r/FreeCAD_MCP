@@ -606,7 +606,89 @@ class SketchGrooveResult(BaseModel):
     )
 
 
-class PartDesignFilletResult(BaseModel):
+class SketchAdditivePipeParams(BaseModel):
+    """Parameters for creating a PartDesign::AdditivePipe from an existing sketch and spine."""
+
+    document_id: str = Field(description="Existing document containing the Body, sketch, and spine.")
+    body_name: str = Field(
+        default="Body", description="Name of the PartDesign::Body that owns the sketch and will own the Pipe."
+    )
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to use as the Pipe profile.")
+    spine_object_name: str = Field(
+        description="Name of the existing object holding the spine wire (e.g. a Part::Feature whose Shape is a Wire)."
+    )
+    spine_subname: Optional[str] = Field(
+        default=None,
+        description="Optional edge subname (e.g. 'Edge1') scoping the spine reference to a single edge."
+    )
+    pipe_name: str = Field(default="AdditivePipe", description="Name for the new PartDesign::AdditivePipe object.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAdditivePipeResult(BaseModel):
+    """Result of sketch_additive_pipe."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Pipe.")
+    pipe_name: str = Field(description="Name of the created PartDesign::AdditivePipe.")
+    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    spine_object_name: str = Field(description="Name of the object used as the spine.")
+    spine_subname: Optional[str] = Field(
+        default=None, description="Edge subname used to scope the spine reference, if any."
+    )
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
+
+
+class SketchAdditiveLoftParams(BaseModel):
+    """Parameters for creating a PartDesign::AdditiveLoft from an existing sketch profile and sections."""
+
+    document_id: str = Field(description="Existing document containing the Body, sketch, and sections.")
+    body_name: str = Field(
+        default="Body", description="Name of the PartDesign::Body that owns the sketch and will own the Loft."
+    )
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to use as the Loft profile.")
+    section_names: list[str] = Field(
+        description="Names of existing Sketcher::SketchObjects to use as the Loft sections."
+    )
+    loft_name: str = Field(default="Loft", description="Name for the new PartDesign::AdditiveLoft object.")
+    ruled: bool = Field(default=False, description="Whether the Loft uses ruled surfaces between sections.")
+    closed: bool = Field(default=False, description="Whether the Loft closes into a closed solid.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAdditiveLoftResult(BaseModel):
+    """Result of sketch_additive_loft."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Loft.")
+    loft_name: str = Field(description="Name of the created PartDesign::AdditiveLoft.")
+    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    section_names: list[str] = Field(description="Names of the sketches used as the sections.")
+    ruled: bool = Field(description="Whether ruled surfaces were used between sections.")
+    closed: bool = Field(description="Whether the Loft closes into a closed solid.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
     """Result of partdesign_fillet."""
 
     document_id: str = Field(description="Validated document identifier.")
@@ -3616,6 +3698,103 @@ def _register_tools(server: Any, settings: Settings) -> None:
             profile_name=result.get("profile_name", params.sketch_name),
             axis=result.get("axis", params.axis),
             angle=result.get("angle", params.angle),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_additive_pipe
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_additive_pipe",
+        title="Create a PartDesign AdditivePipe from a sketch and spine",
+        description=(
+            "Create a native PartDesign::AdditivePipe that sweeps an existing "
+            "Sketcher::SketchObject profile along an existing spine wire.  The "
+            "target PartDesign::Body must already exist and its Tip must be a "
+            "valid solid (e.g. a Pad).  The sketch must already be a member of "
+            "the specified Body; ownership is not silently changed.  The spine "
+            "object must already exist, hold a non-null Shape with at least one "
+            "wire/edge, and remains outside Body.Group.  *spine_subname* may "
+            "scope the spine to a single edge.  The document is recomputed, "
+            "saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_additive_pipe_tool(params: SketchAdditivePipeParams) -> SketchAdditivePipeResult:
+        """Create a PartDesign AdditivePipe from a sketch and spine and return its info."""
+        validate_direct_request("sketch_additive_pipe", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "sketch_name": params.sketch_name,
+            "spine_object_name": params.spine_object_name,
+            "spine_subname": params.spine_subname,
+            "pipe_name": params.pipe_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_additive_pipe", bridge_params)
+
+        return SketchAdditivePipeResult(
+            document_id=params.document_id,
+            body_name=result.get("body_name", params.body_name),
+            pipe_name=result.get("pipe_name", params.pipe_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            spine_object_name=result.get("spine_object_name", params.spine_object_name),
+            spine_subname=result.get("spine_subname", params.spine_subname),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_additive_loft
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_additive_loft",
+        title="Create a PartDesign AdditiveLoft from a sketch profile and sections",
+        description=(
+            "Create a native PartDesign::AdditiveLoft that lofts an existing "
+            "Sketcher::SketchObject profile through existing section sketches.  "
+            "The target PartDesign::Body must already exist and its Tip must be "
+            "a valid solid (e.g. a Pad).  The profile sketch and all section "
+            "sketches must already be members of the specified Body; ownership "
+            "is not silently changed.  *ruled* and *closed* control the loft "
+            "surface type and closure.  The document is recomputed, saved "
+            "atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_additive_loft_tool(params: SketchAdditiveLoftParams) -> SketchAdditiveLoftResult:
+        """Create a PartDesign AdditiveLoft from a sketch profile and sections and return its info."""
+        validate_direct_request("sketch_additive_loft", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "sketch_name": params.sketch_name,
+            "section_names": params.section_names,
+            "loft_name": params.loft_name,
+            "ruled": params.ruled,
+            "closed": params.closed,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_additive_loft", bridge_params)
+
+        return SketchAdditiveLoftResult(
+            document_id=params.document_id,
+            body_name=result.get("body_name", params.body_name),
+            loft_name=result.get("loft_name", params.loft_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            section_names=result.get("section_names", params.section_names),
+            ruled=result.get("ruled", params.ruled),
+            closed=result.get("closed", params.closed),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),

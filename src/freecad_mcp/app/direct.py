@@ -422,6 +422,42 @@ def validate_direct_request(op: str, params: Any) -> None:
             raise ValueError("angle must be positive.")
         if angle_val > 360:
             raise ValueError("angle must not exceed 360 degrees.")
+    elif op == "sketch_additive_pipe":
+        if not params.get("body_name", "").strip():
+            raise ValueError("body_name must not be empty.")
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        if not params.get("spine_object_name", "").strip():
+            raise ValueError("spine_object_name must not be empty.")
+        if not params.get("pipe_name", "").strip():
+            raise ValueError("pipe_name must not be empty.")
+        spine_subname = params.get("spine_subname")
+        if spine_subname is not None and not isinstance(spine_subname, str):
+            raise ValueError("spine_subname must be a string when provided.")
+    elif op == "sketch_additive_loft":
+        if not params.get("body_name", "").strip():
+            raise ValueError("body_name must not be empty.")
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        section_names = params.get("section_names")
+        if not isinstance(section_names, list) or len(section_names) == 0:
+            raise ValueError("section_names must be a non-empty list of section sketch names.")
+        seen_sections = set()
+        for i, sname in enumerate(section_names):
+            if isinstance(sname, bool) or not isinstance(sname, str) or not sname.strip():
+                raise ValueError(f"section_names[{i}] must be a non-empty string.")
+            if sname.strip() in seen_sections:
+                raise ValueError(f"section_names[{i}] '{sname}' appears more than once.")
+            seen_sections.add(sname.strip())
+        loft_name = params.get("loft_name", "")
+        if not str(loft_name).strip():
+            raise ValueError("loft_name must not be empty.")
+        ruled = params.get("ruled", False)
+        if not isinstance(ruled, bool):
+            raise ValueError("ruled must be a boolean.")
+        closed = params.get("closed", False)
+        if not isinstance(closed, bool):
+            raise ValueError("closed must be a boolean.")
     elif op == "partdesign_fillet":
         if not params.get("object_name", "").strip():
             raise ValueError("object_name must not be empty.")

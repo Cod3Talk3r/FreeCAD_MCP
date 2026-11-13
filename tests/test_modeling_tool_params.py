@@ -120,6 +120,14 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
         {"document_id": "doc", "sketch_name": "Sketch"},
     ),
     (
+        modeling.SketchAdditivePipeParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "spine_object_name": "Spine"},
+    ),
+    (
+        modeling.SketchAdditiveLoftParams,
+        {"document_id": "doc", "sketch_name": "Sketch", "section_names": ["Section1"]},
+    ),
+    (
         modeling.PartDesignFilletParams,
         {"document_id": "doc", "object_name": "Box", "edge_indices": [1], "radius": 1.0},
     ),
