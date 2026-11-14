@@ -23,6 +23,10 @@ from freecad_mcp.tools.modeling import (
     SketchAddRectangleParams,
     SketchAddRegularPolygonParams,
     SketchAddTriangleParams,
+    SketchAttachSupportParams,
+    SketchAttachSupportResult,
+    SketchAddExternalGeometryParams,
+    SketchAddExternalGeometryResult,
     SketchDeleteConstraintParams,
     SketchDeleteConstraintResult,
     SketchEditConstraintParams,
@@ -633,3 +637,60 @@ def test_sketch_pocket_params_with_profile():
         profile="Wire2",
     )
     assert p.profile == "Wire2"
+
+
+def test_sketch_attach_support_params_valid():
+    """SketchAttachSupportParams should be accepted with verified MapMode."""
+    p = SketchAttachSupportParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        support_object_name="Box1",
+        support_subname="Face1",
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.support_object_name == "Box1"
+    assert p.support_subname == "Face1"
+    assert p.map_mode == "FlatFace"
+    assert p.workspace is None
+
+
+def test_sketch_attach_support_params_with_map_mode():
+    p = SketchAttachSupportParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        support_object_name="Box1",
+        support_subname="Face1",
+        map_mode="FlatFace",
+    )
+    assert p.map_mode == "FlatFace"
+
+
+def test_sketch_add_external_geometry_params_valid():
+    """SketchAddExternalGeometryParams should be accepted."""
+    p = SketchAddExternalGeometryParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        source_object_name="Box2",
+        source_subname="Edge1",
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.source_object_name == "Box2"
+    assert p.source_subname == "Edge1"
+    assert p.defining is False
+    assert p.intersection is False
+    assert p.workspace is None
+
+
+def test_sketch_add_external_geometry_params_with_flags():
+    p = SketchAddExternalGeometryParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        source_object_name="Box2",
+        source_subname="Edge1",
+        defining=True,
+        intersection=True,
+    )
+    assert p.defining is True
+    assert p.intersection is True

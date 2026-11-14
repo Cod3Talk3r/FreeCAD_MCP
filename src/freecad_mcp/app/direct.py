@@ -398,6 +398,31 @@ def validate_direct_request(op: str, params: Any) -> None:
         if profile is not None:
             if not isinstance(profile, str) or not profile.strip():
                 raise ValueError("profile must be a non-empty string naming a closed wire.")
+    elif op == "sketch_attach_support":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        if not params.get("support_object_name", "").strip():
+            raise ValueError("support_object_name must not be empty.")
+        if not params.get("support_subname", "").strip():
+            raise ValueError("support_subname must not be empty.")
+        map_mode = params.get("map_mode", "FlatFace")
+        if map_mode not in ("FlatFace",):
+            raise ValueError(
+                f"map_mode '{map_mode}' is not supported. Supported values: FlatFace."
+            )
+    elif op == "sketch_add_external_geometry":
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        if not params.get("source_object_name", "").strip():
+            raise ValueError("source_object_name must not be empty.")
+        if not params.get("source_subname", "").strip():
+            raise ValueError("source_subname must not be empty.")
+        defining = params.get("defining", False)
+        intersection = params.get("intersection", False)
+        if not isinstance(defining, bool):
+            raise ValueError("defining must be a boolean.")
+        if not isinstance(intersection, bool):
+            raise ValueError("intersection must be a boolean.")
     elif op == "sketch_revolution":
         if not params.get("sketch_name", "").strip():
             raise ValueError("sketch_name must not be empty.")

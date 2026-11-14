@@ -85,6 +85,8 @@ OP_SKETCH_REVOLUTION = "sketch_revolution"
 OP_SKETCH_GROOVE = "sketch_groove"
 OP_SKETCH_ADDITIVE_PIPE = "sketch_additive_pipe"
 OP_SKETCH_ADDITIVE_LOFT = "sketch_additive_loft"
+OP_SKETCH_ATTACH_SUPPORT = "sketch_attach_support"
+OP_SKETCH_ADD_EXTERNAL_GEOMETRY = "sketch_add_external_geometry"
 OP_DELETE_OBJECT = "delete_object"
 OP_PARTDESIGN_FILLET = "partdesign_fillet"
 OP_PARTDESIGN_CHAMFER = "partdesign_chamfer"
@@ -8137,6 +8139,366 @@ def _find_revolution_axis_edge(sketch: Any, axis: str) -> str | None:
     return None
 
 
+def _find_body_containing(doc: Any, obj: Any) -> Any:
+    """Return the PartDesign::Body whose Group/outList contains obj, or None."""
+    try:
+        for body in getattr(doc, "Objects", []) or []:
+            if getattr(body, "TypeId", "") != "PartDesign::Body":
+                continue
+            group = getattr(body, "Group", [])
+            out_list = getattr(body, "outList", [])
+            if obj in group or obj in out_list:
+                return body
+    except Exception:
+        return None
+    return None
+
+
+def _subname_matches(sub_objects: Any, subname: str) -> bool:
+    """Best-effort check that subname names an existing subelement."""
+    try:
+        for sub in list(sub_objects) or []:
+            if getattr(sub, "Name", None) == subname:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _op_sketch_attach_support(params: dict[str, Any]) -> dict[str, Any]:
+    """Attach a Sketch to a support object's subelement via AttachmentSupport.
+
+    Uses the FreeCAD 1.1.4 verified contract:
+      sketch.AttachmentSupport = [(support_object, [support_subname])]
+      sketch.MapMode = "FlatFace"
+
+    Only MapMode "FlatFace" is verified; other values are rejected. The support
+    subelement must be a planar face of the support object. The document is
+    locked, recomputed, saved atomically, and its revision is bumped.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    support_object_name = params.get("support_object_name") or ""
+    support_subname = params.get("support_subname") or ""
+    map_mode = params.get("map_mode")
+    workspace_str = params.get("workspace") or ""
+
+    SUPPORTED_MAP_MODES = ("FlatFace",)
+    if map_mode not in SUPPORTED_MAP_MODES:
+        return {
+            "ok": False,
+            "op": OP_SKETCH_ATTACH_SUPPORT,
+            "error": (
+                f"map_mode '{map_mode}' is not supported. "
+                f"Supported values: {', '.join(SUPPORTED_MAP_MODES)}."
+            ),
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": OP_SKETCH_ATTACH_SUPPORT, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": OP_SKETCH_ATTACH_SUPPORT, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": OP_SKETCH_ATTACH_SUPPORT, "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": OP_SKETCH_ATTACH_SUPPORT, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part module needed before Sketcher loads
+        import Sketcher  # noqa: F401,PLC0415 - register Sketcher types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot set attachment support."
+            )
+
+        support = doc.getObject(support_object_name)
+        if support is None:
+            return _fail(f"support object '{support_object_name}' not found")
+
+        shape = getattr(support, "Shape", None)
+        faces = getattr(shape, "Faces", None) if shape is not None else None
+        if faces is None or not _subname_matches(faces, support_subname):
+            return _fail(
+                f"support subelement '{support_subname}' is not a face of "
+                f"object '{support_object_name}'."
+            )
+
+        # Attach the sketch to the support face and fix the map mode.
+        sketch.AttachmentSupport = [(support, [support_subname])]
+        sketch.MapMode = map_mode
+        doc.recompute()
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": OP_SKETCH_ATTACH_SUPPORT, "error": f"FreeCAD error: {exc}"}
+
+    attachment_support_readback: list[Any] = []
+    try:
+        raw_support = list(getattr(sketch, "AttachmentSupport", []))
+        for entry in raw_support:
+            if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                obj, subs = entry[0], entry[1]
+                if isinstance(subs, str):
+                    subs = [subs]
+                attachment_support_readback.append(
+                    {"object": support_object_name, "subelements": list(subs)}
+                )
+    except Exception:
+        attachment_support_readback = []
+    map_mode_readback: Any = None
+    try:
+        map_mode_readback = getattr(sketch, "MapMode", None)
+    except Exception:
+        map_mode_readback = None
+    placement: Any = None
+    try:
+        placement = getattr(sketch, "Placement", None)
+    except Exception:
+        placement = None
+    fully_constrained: Any = None
+    try:
+        fc_val = getattr(sketch, "FullyConstrained", None)
+        fully_constrained = bool(fc_val) if fc_val is not None else None
+    except Exception:
+        fully_constrained = None
+    degrees_of_freedom: Any = None
+    try:
+        degrees_of_freedom = getattr(sketch, "DoF", None)
+    except Exception:
+        degrees_of_freedom = None
+
+    fcstd_path = wks.document_path(normalized)
+
+    def _write_tmp(tmp_path: str) -> None:
+        doc.saveAs(str(tmp_path))
+
+    ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+    meta = ws_mod.read_meta(wks.meta_path(normalized))
+    meta["revision"] = meta.get("revision", 0) + 1
+    meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+    ws_mod.write_meta(wks.meta_path(normalized), meta)
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": OP_SKETCH_ATTACH_SUPPORT,
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "support_object_name": support_object_name,
+            "support_subname": support_subname,
+            "map_mode": map_mode,
+            "attachment_support": attachment_support_readback,
+            "map_mode_readback": map_mode_readback,
+            "placement": placement,
+            "fully_constrained": fully_constrained,
+            "degrees_of_freedom": degrees_of_freedom,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_add_external_geometry(params: dict[str, Any]) -> dict[str, Any]:
+    """Add external geometry to a Sketch via addExternal(source_name, subname).
+
+    Uses the FreeCAD 1.1.4 verified constructor signature:
+      sketch.addExternal(object_name, subelement_name, defining=False, intersection=False)
+
+    Conservative source eligibility, based only on verified cases:
+      * A standalone sketch (not in a Body) accepts an external source that is
+        not itself in any Body.
+      * A sketch inside a PartDesign::Body accepts a source in the SAME Body.
+      * A sketch inside a Body rejects a source outside that Body.
+
+    Combinations outside those verified cases are rejected with a clear error.
+    The document is locked, recomputed, saved atomically, and its revision bumped.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    sketch_name = params.get("sketch_name") or ""
+    source_object_name = params.get("source_object_name") or ""
+    source_subname = params.get("source_subname") or ""
+    defining = params.get("defining", False)
+    intersection = params.get("intersection", False)
+    workspace_str = params.get("workspace") or ""
+
+    if not isinstance(defining, bool):
+        return {
+            "ok": False,
+            "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY,
+            "error": "defining must be a boolean.",
+        }
+    if not isinstance(intersection, bool):
+        return {
+            "ok": False,
+            "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY,
+            "error": "intersection must be a boolean.",
+        }
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY, "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import Part  # noqa: F401,PLC0415 - Part module needed before Sketcher loads
+        import Sketcher  # noqa: F401,PLC0415 - register Sketcher types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+
+        type_id = sketch.TypeId
+        type_name = type_id.split("::")[-1]
+        if type_name != "SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{type_id}', not 'Sketcher::SketchObject'; "
+                f"cannot add external geometry."
+            )
+
+        source = doc.getObject(source_object_name)
+        if source is None:
+            return _fail(f"source object '{source_object_name}' not found")
+
+        shape = getattr(source, "Shape", None)
+        edges = getattr(shape, "Edges", None) if shape is not None else None
+        if edges is None or not _subname_matches(edges, source_subname):
+            return _fail(
+                f"source subelement '{source_subname}' is not an edge of "
+                f"object '{source_object_name}'."
+            )
+
+        # Conservative eligibility: a sketch inside a Body may only reference a
+        # source in the same Body; a standalone sketch may only reference a
+        # source outside any Body.
+        sketch_body = _find_body_containing(doc, sketch)
+        source_body = _find_body_containing(doc, source)
+        if sketch_body is not None and source_body is not sketch_body:
+            return _fail(
+                f"sketch '{sketch_name}' is inside Body '{getattr(sketch_body, 'Name', '?')}' "
+                f"but source '{source_object_name}' is not in that same Body. "
+                f"Body sketches may only use same-Body external geometry."
+            )
+        if sketch_body is None and source_body is not None:
+            return _fail(
+                f"standalone sketch '{sketch_name}' references source '{source_object_name}' "
+                f"inside Body '{getattr(source_body, 'Name', '?')}'. "
+                f"Standalone sketches may only reference sources outside any Body."
+            )
+
+        sketch.addExternal(source_object_name, source_subname, defining=defining, intersection=intersection)
+        doc.recompute()
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY, "error": f"FreeCAD error: {exc}"}
+
+    # Read back the resulting external geometry.
+    external_geometry: list[Any] = []
+    try:
+        external_geometry = list(getattr(sketch, "ExternalGeometry", []))
+    except Exception:
+        external_geometry = []
+    external_geo: Any = None
+    try:
+        external_geo = getattr(sketch, "ExternalGeo", None)
+    except Exception:
+        external_geo = None
+    external_types: Any = None
+    try:
+        external_types = getattr(sketch, "ExternalTypes", None)
+    except Exception:
+        external_types = None
+    placement: Any = None
+    try:
+        placement = getattr(sketch, "Placement", None)
+    except Exception:
+        placement = None
+
+    fcstd_path = wks.document_path(normalized)
+
+    def _write_tmp(tmp_path: str) -> None:
+        doc.saveAs(str(tmp_path))
+
+    ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+    meta = ws_mod.read_meta(wks.meta_path(normalized))
+    meta["revision"] = meta.get("revision", 0) + 1
+    meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+    ws_mod.write_meta(wks.meta_path(normalized), meta)
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": OP_SKETCH_ADD_EXTERNAL_GEOMETRY,
+        "result": {
+            "document_id": normalized,
+            "sketch_name": sketch_name,
+            "source_object_name": source_object_name,
+            "source_subname": source_subname,
+            "defining": defining,
+            "intersection": intersection,
+            "external_geometry": external_geometry,
+            "external_geo": external_geo,
+            "external_types": external_types,
+            "placement": placement,
+            "meta_before": meta_before,
+        },
+    }
+
+
 def _op_sketch_revolution(params: dict[str, Any]) -> dict[str, Any]:
     """Create a native PartDesign::Revolution that revolves an existing sketch around an axis.
 
@@ -11627,6 +11989,8 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_GROOVE: _op_sketch_groove,
     OP_SKETCH_ADDITIVE_PIPE: _op_sketch_additive_pipe,
     OP_SKETCH_ADDITIVE_LOFT: _op_sketch_additive_loft,
+    OP_SKETCH_ATTACH_SUPPORT: _op_sketch_attach_support,
+    OP_SKETCH_ADD_EXTERNAL_GEOMETRY: _op_sketch_add_external_geometry,
     OP_DELETE_OBJECT: _op_delete_object,
     OP_PARTDESIGN_FILLET: _op_partdesign_fillet,
     OP_PARTDESIGN_CHAMFER: _op_partdesign_chamfer,

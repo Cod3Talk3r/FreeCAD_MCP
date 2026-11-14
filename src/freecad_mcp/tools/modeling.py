@@ -1484,6 +1484,102 @@ class SketchPocketParams(BaseModel):
     )
 
 
+class SketchAttachSupportParams(BaseModel):
+    """Parameters for attaching a sketch to a support object's subelement."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to attach.")
+    support_object_name: str = Field(
+        description="Name of the object providing the support face (e.g. a Part::Box or PartDesign feature)."
+    )
+    support_subname: str = Field(
+        description="Name of the support subelement, e.g. 'Face1'. Only planar faces are supported."
+    )
+    map_mode: str = Field(
+        default="FlatFace",
+        description="Attachment map mode. Only 'FlatFace' is verified for FreeCAD 1.1.4.",
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAttachSupportResult(BaseModel):
+    """Result of sketch_attach_support."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the attached sketch.")
+    support_object_name: str = Field(description="Name of the support object.")
+    support_subname: str = Field(description="Name of the support subelement (e.g. 'Face1').")
+    map_mode: str = Field(description="Attachment map mode that was set.")
+    attachment_support: list[Any] = Field(
+        description="Normalized AttachmentSupport readback: [{object, subelements}]."
+    )
+    map_mode_readback: Any = Field(
+        default=None, description="MapMode value read back from the sketch after attachment."
+    )
+    placement: Any = Field(
+        default=None, description="Sketch Placement read back after attachment and recompute."
+    )
+    fully_constrained: Optional[bool] = Field(
+        default=None, description="Whether the sketch is fully constrained by the solver."
+    )
+    degrees_of_freedom: Optional[int] = Field(
+        default=None, description="Solver degrees of freedom (DoF) remaining in the sketch."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the attachment."
+    )
+
+
+class SketchAddExternalGeometryParams(BaseModel):
+    """Parameters for adding external geometry to a sketch."""
+
+    document_id: str = Field(description="Existing document containing the sketch.")
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to edit.")
+    source_object_name: str = Field(
+        description="Name of the source object providing the external edge (e.g. a Part::Box or same-Body feature)."
+    )
+    source_subname: str = Field(
+        description="Name of the source subelement, e.g. 'Edge1'. Only edges are supported."
+    )
+    defining: bool = Field(
+        default=False, description="Whether the external geometry is defining for the sketch."
+    )
+    intersection: bool = Field(
+        default=False, description="Whether the external geometry is an intersection."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchAddExternalGeometryResult(BaseModel):
+    """Result of sketch_add_external_geometry."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    sketch_name: str = Field(description="Name of the sketch edited.")
+    source_object_name: str = Field(description="Name of the external source object.")
+    source_subname: str = Field(description="Name of the source subelement (e.g. 'Edge1').")
+    defining: bool = Field(description="Whether the external geometry is defining.")
+    intersection: bool = Field(description="Whether the external geometry is an intersection.")
+    external_geometry: list[Any] = Field(
+        description="Normalized ExternalGeometry readback: [(object_name, [subelements])]."
+    )
+    external_geo: Any = Field(
+        default=None, description="ExternalGeo value read back from the sketch after adding external geometry."
+    )
+    external_types: Any = Field(
+        default=None, description="ExternalTypes value read back from the sketch after adding external geometry."
+    )
+    placement: Any = Field(
+        default=None, description="Sketch Placement read back after adding external geometry and recompute."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the operation."
+    )
+
+
 class SketchRevolutionParams(BaseModel):
     """Parameters for creating a PartDesign::Revolution from an existing sketch."""
 
@@ -3759,6 +3855,101 @@ def _register_tools(server: Any, settings: Settings) -> None:
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_attach_support
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_attach_support",
+        title="Attach a sketch to a support face",
+        description=(
+            "Attach an existing Sketcher::SketchObject to a support object's "
+            "planar face using FreeCAD's native AttachmentSupport / MapMode "
+            "mechanism.  Only MapMode 'FlatFace' is verified for FreeCAD 1.1.4. "
+            "The support subelement must be a face of the support object.  The "
+            "document is locked exclusively during the operation, recomputed, "
+            "saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_attach_support_tool(params: SketchAttachSupportParams) -> SketchAttachSupportResult:
+        """Attach a sketch to a support face and return its info."""
+        validate_direct_request("sketch_attach_support", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "support_object_name": params.support_object_name,
+            "support_subname": params.support_subname,
+            "map_mode": params.map_mode,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_attach_support", bridge_params)
+
+        return SketchAttachSupportResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            support_object_name=result.get("support_object_name", params.support_object_name),
+            support_subname=result.get("support_subname", params.support_subname),
+            map_mode=result.get("map_mode", params.map_mode),
+            attachment_support=result.get("attachment_support", []),
+            map_mode_readback=result.get("map_mode_readback"),
+            placement=result.get("placement"),
+            fully_constrained=result.get("fully_constrained"),
+            degrees_of_freedom=result.get("degrees_of_freedom"),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_add_external_geometry
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_add_external_geometry",
+        title="Add external geometry to a sketch",
+        description=(
+            "Add external geometry to an existing Sketcher::SketchObject using "
+            "FreeCAD's native addExternal(object_name, subelement_name) API.  "
+            "Conservative eligibility: a standalone sketch may reference a "
+            "source outside any Body; a sketch inside a PartDesign::Body may "
+            "only reference a source in the same Body.  External sources from "
+            "outside the sketch's Body are rejected.  The document is locked "
+            "exclusively during the operation, recomputed, saved atomically, "
+            "and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_add_external_geometry_tool(
+        params: SketchAddExternalGeometryParams,
+    ) -> SketchAddExternalGeometryResult:
+        """Add external geometry to a sketch and return its info."""
+        validate_direct_request("sketch_add_external_geometry", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "sketch_name": params.sketch_name,
+            "source_object_name": params.source_object_name,
+            "source_subname": params.source_subname,
+            "defining": params.defining,
+            "intersection": params.intersection,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_add_external_geometry", bridge_params)
+
+        return SketchAddExternalGeometryResult(
+            document_id=params.document_id,
+            sketch_name=result.get("sketch_name", params.sketch_name),
+            source_object_name=result.get("source_object_name", params.source_object_name),
+            source_subname=result.get("source_subname", params.source_subname),
+            defining=result.get("defining", params.defining),
+            intersection=result.get("intersection", params.intersection),
+            external_geometry=result.get("external_geometry", []),
+            external_geo=result.get("external_geo"),
+            external_types=result.get("external_types"),
+            placement=result.get("placement"),
             meta_before=result.get("meta_before", {}),
         )
 

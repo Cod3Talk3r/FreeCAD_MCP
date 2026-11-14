@@ -272,6 +272,11 @@ class _FakeSketch:
         self.Geometry: list = []
         self.Constraints: list = []
         self.Shape: object = None
+        self.AttachmentSupport: list = []
+        self.MapMode: str | None = None
+        self.ExternalGeometry: list = []
+        self.ExternalGeo: list = []
+        self.ExternalTypes: list = []
 
     def addGeometry(self, geometry: object, check: bool = False) -> None:
         self.Geometry.append(geometry)
@@ -285,6 +290,12 @@ class _FakeSketch:
 
     def delConstraint(self, index: int) -> None:
         del self.Constraints[index]
+
+    def addExternal(self, object_name: str, sub_name: str, defining: bool = False, intersection: bool = False) -> None:
+        """Stand-in for Sketcher::SketchObject.addExternal(objName, subName, ...)."""
+        self.ExternalGeometry.append((object_name, [sub_name]))
+        self.ExternalGeo.append(object_name)
+        self.ExternalTypes.append(sub_name)
 
 
 class _FakeBoundBox:
@@ -358,6 +369,7 @@ class _FakeFace:
 
     def __init__(self, index: int) -> None:
         self.index = index
+        self.Name = f"Face{index}"
 
     def isValid(self) -> bool:
         return True
@@ -9285,6 +9297,277 @@ def test_sketch_pocket_default_profile_unchanged(
     assert result["result"]["profile_name"] == "Sketch1"
     pocket = doc.objects["Pocket"]
     assert pocket.Profile is sketch
+
+
+def test_sketch_attach_support_standalone_flat_face(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attach a standalone sketch to a Box Face1 with MapMode FlatFace."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "attach1", "workspace": str(tmp_path)})
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "attach1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "attach1",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "Box1",
+            "support_subname": "Face1",
+            "map_mode": "FlatFace",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_attach_support"
+    assert result["result"]["support_object_name"] == "Box1"
+    assert result["result"]["support_subname"] == "Face1"
+    assert result["result"]["map_mode"] == "FlatFace"
+    assert result["result"]["attachment_support"] == [
+        {"object": "Box1", "subelements": ["Face1"]}
+    ]
+    assert result["result"]["map_mode_readback"] == "FlatFace"
+    sketch = doc.objects["Sketch1"]
+    assert sketch.AttachmentSupport == [(box, ["Face1"])]
+    assert sketch.MapMode == "FlatFace"
+
+
+def test_sketch_attach_support_rejects_unsupported_map_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only FlatFace is a verified MapMode; other values are rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "attach2", "workspace": str(tmp_path)})
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "attach2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "attach2",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "Box1",
+            "support_subname": "Face1",
+            "map_mode": "Reversed",
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_attach_support"
+    assert "map_mode" in result["error"].lower()
+    assert "FlatFace" in result["error"]
+
+
+def test_sketch_attach_support_rejects_missing_support_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "attach3", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "attach3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "attach3",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "NoSuchBox",
+            "support_subname": "Face1",
+            "map_mode": "FlatFace",
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_attach_support"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_attach_support_rejects_non_face_subname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Edge1 is not a face; attachment to a non-face subelement is rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "attach4", "workspace": str(tmp_path)})
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "attach4", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "attach4",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "Box1",
+            "support_subname": "Edge1",
+            "map_mode": "FlatFace",
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_attach_support"
+    assert "not a face" in result["error"].lower()
+
+
+def test_sketch_add_external_geometry_standalone_external_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone sketch accepts external geometry from an external Part::Box."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ext1", "workspace": str(tmp_path)})
+    source = doc.addObject("Part::Box", "Box2")
+    source.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "ext1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_add_external_geometry(
+        {
+            "document_id": "ext1",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "source_object_name": "Box2",
+            "source_subname": "Edge1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_add_external_geometry"
+    assert result["result"]["source_object_name"] == "Box2"
+    assert result["result"]["source_subname"] == "Edge1"
+    assert result["result"]["defining"] is False
+    assert result["result"]["intersection"] is False
+    assert result["result"]["external_geometry"] == [("Box2", ["Edge1"])]
+    assert result["result"]["external_geo"] == ["Box2"]
+    assert result["result"]["external_types"] == ["Edge1"]
+    sketch = doc.objects["Sketch1"]
+    assert sketch.ExternalGeometry == [("Box2", ["Edge1"])]
+    assert sketch.ExternalGeo == ["Box2"]
+    assert sketch.ExternalTypes == ["Edge1"]
+
+
+def test_sketch_add_external_geometry_body_same_body_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Body sketch accepts external geometry from a source in the same Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ext2", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    source = doc.addObject("Part::Box", "Box3")
+    source.Shape = _FakeShape(volume=64.0)
+    body.addObject(source)
+    runner._op_create_sketch(
+        {"document_id": "ext2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body.addObject(doc.objects["Sketch1"])
+
+    result = runner._op_sketch_add_external_geometry(
+        {
+            "document_id": "ext2",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "source_object_name": "Box3",
+            "source_subname": "Edge1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["external_geometry"] == [("Box3", ["Edge1"])]
+    sketch = doc.objects["Sketch1"]
+    assert sketch.ExternalGeometry == [("Box3", ["Edge1"])]
+
+
+def test_sketch_add_external_geometry_body_external_source_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Body sketch rejects a source outside its Body."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ext3", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    runner._op_create_sketch(
+        {"document_id": "ext3", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body.addObject(doc.objects["Sketch1"])
+    source = doc.addObject("Part::Box", "Box4")
+    source.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_add_external_geometry(
+        {
+            "document_id": "ext3",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "source_object_name": "Box4",
+            "source_subname": "Edge1",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_external_geometry"
+    assert "same Body" in result["error"]
+
+
+def test_sketch_add_external_geometry_rejects_missing_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ext4", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "ext4", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_add_external_geometry(
+        {
+            "document_id": "ext4",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "source_object_name": "NoSuchBox",
+            "source_subname": "Edge1",
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_external_geometry"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_add_external_geometry_rejects_non_edge_subname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Face1 is not an edge; external geometry from a non-edge subelement is rejected."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ext5", "workspace": str(tmp_path)})
+    source = doc.addObject("Part::Box", "Box5")
+    source.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "ext5", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_add_external_geometry(
+        {
+            "document_id": "ext5",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "source_object_name": "Box5",
+            "source_subname": "Face1",
+        }
+    )
+    assert result["ok"] is False
+    assert result["op"] == "sketch_add_external_geometry"
+    assert "not an edge" in result["error"].lower()
 
 
 def test_sketch_pocket_standalone_sketch_uses_unambiguous_body(
