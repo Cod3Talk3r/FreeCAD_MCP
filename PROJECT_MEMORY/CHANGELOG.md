@@ -18,6 +18,10 @@
 - Added shared agent skills (`.agents/skills/token-saver`,
   `.agents/skills/project-memory`) and persistent project memory
   (`PROJECT_MEMORY/`), plus root `AGENTS.md` routing agents to them.
+- Added native `PartDesign::Body` creation via MCP (`create_body` operation +
+  `create_body` tool) to close the Body -> Sketch -> Pad workflow gap; `_op_sketch_pad`
+  now also reuses an explicitly named existing Body. Focused unit and real FreeCAD
+  1.1.4 integration tests pass. Changes are in the working tree, not committed.
 
 ## Milestones
 

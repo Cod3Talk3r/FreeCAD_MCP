@@ -328,8 +328,22 @@ documentation. Features already implemented are not repeated as new work.
   and rollback.
 - **FreeCAD APIs:** `Sketcher::SketchObject.addConstraint`, `delConstraint`,
   `Constraints`, `Geometry`, `FullyConstrained`, `solve`, and verified DoF/solver
-  status APIs; `AttachmentSupport`/`Support` and external geometry APIs require
-  per-feature probes.
+  status APIs; `AttachmentSupport`/`MapMode="FlatFace"` and external geometry
+  `addExternal(object_name, subelement_name)` are implemented and verified on
+  FreeCAD 1.1.4 for the supported cases below.
+- **Implemented (M14.1):** `sketch_attach_support` — attach a sketch to a support
+  object's planar face via `AttachmentSupport` + `MapMode="FlatFace"`;
+  `sketch_add_external_geometry` — add external edge geometry via
+  `addExternal`. Both are exposed as MCP tools and Workbench operations through
+  the shared `freecad_bridge.runner` operation layer.
+- **Verified cases:** standalone sketch attachment to a support Face; Body sketch
+  attachment to a same-Body Face; standalone sketch external geometry from an
+  external Part feature edge; Body sketch external geometry from a same-Body
+  feature edge. All survive recompute and save/reopen.
+- **Rejected/unsupported:** a Body sketch referencing a source outside its Body
+  (raises `ValueError`); `map_mode` values other than `FlatFace`; non-face
+  support subelements; non-edge external subelements. Other external source
+  combinations remain unverified and are deliberately not claimed.
 - **Shared/MCP:** structured constraints by type, geometry index/subelement,
   value/unit and solver result; reject unsafe edits with explicit constraint
   dependency information.

@@ -215,6 +215,69 @@
 - Shared agent skills and persistent project memory were added under
   `.agents/skills/` and `PROJECT_MEMORY/`; root `AGENTS.md` routes agents to them.
 - `gen_traceback.py` is an unrelated untracked file; do not modify or stage it.
+- 2026-11-12: added native `PartDesign::Body` creation via MCP (`create_body`
+  operation + `create_body` tool) to close the Body -> Sketch -> Pad workflow gap.
+  `runner.py`: new `OP_CREATE_BODY` + `_op_create_body` handler (creates
+  `PartDesign::Body`, atomic save, revision bump, name-clash rejection); `_op_sketch_pad`
+  now also reuses an explicitly named existing Body even when the sketch is not yet
+  a member. `modeling.py`: `CreateBodyParams`/`CreateBodyResult` schemas and the
+  `create_body` MCP tool. Verified: mock tests (test_runner.py) + schema tests
+  (test_modeling_schemas.py) pass; real FreeCAD 1.1.4 via MCP stdio confirms
+  `create_body` returns `PartDesign::Body` with `features: 0` and rejects name
+  clashes, and `sketch_pad(body_name="Body")` reuses the explicitly created Body
+  (fails only on empty profile, not on lock/body-missing). Native probe confirms a
+  Body->Sketch->Pad Pad recomputes to a valid solid (Tip=Pad, volume=1000).
+- 2026-11-12: Fixed sequential MCP stdio lock leak in `_op_sketch_add_rectangle`
+  (runner.py). The success-path `release_lock` and success return were unreachable
+  code sitting inside the `except` block after `return _fail(...)`, so every
+  successful `sketch_add_rectangle` left a stale lock file with the child's PID,
+  causing the next bridge call to fail with "document locked by alive process".
+  Dedented `release_lock` and the success return to sit after the `try/except`
+  block (matching all other sketch handlers). Added regression test
+  `test_sequential_operations_after_sketch_add_rectangle` (test_runner.py) that
+  calls `sketch_add_rectangle` then `create_box` and verifies no stale lock.
+  Real FreeCAD 1.1.4 via MCP stdio: complete Body→Sketch→Pad workflow
+  (create_document→create_body→create_sketch→sketch_add_rectangle→sketch_pad→
+  get_body_tip→inspect_object) passes with no leftover lock files.
+- 2026-11-12: Implemented M14.2 — `sketch_add_constraint` operation + MCP tool for adding
+  native Sketcher constraints to existing sketches. Supported types: Horizontal, Vertical,
+  Distance, Radius, Diameter, Angle (Coincident excluded — crashes FreeCAD 1.1.4 headless).
+  Changes: runner.py (new OP_SKETCH_ADD_CONSTRAINT + `_op_sketch_add_constraint` handler,
+  registered in OPERATIONS), modeling.py (`SketchAddConstraintParams`/`SketchAddConstraintResult`
+  schemas + `sketch_add_constraint` tool), direct.py (input validation). Constructor
+  signatures verified against FreeCAD 1.1.4: `Constraint(type, idx)`, `Constraint(type, idx, value)`,
+  `Constraint(type, idx1, idx2, value)`. CRITICAL BUG FOUND: `Sketcher.Constraint(type)` without
+  a geometry index crashes FreeCAD 1.1.4 headless — removed that call. Validation rejects
+  unsupported types, bad indices, missing/non-finite values, and geometry-type mismatches.
+  Tests: 15 mock tests + 3 schema tests + 4 real FreeCAD integration tests all pass.
+- 2026-11-12: Implemented M14.3 — `sketch_delete_constraint` operation + MCP tool for deleting
+  native Sketcher constraints from existing sketches. Changes: runner.py (new OP_SKETCH_DELETE_CONSTRAINT
+  + `_op_sketch_delete_constraint` handler, registered in OPERATIONS), modeling.py
+  (`SketchDeleteConstraintParams`/`SketchDeleteConstraintResult` schemas + `sketch_delete_constraint`
+  tool), direct.py (input validation for constraint_index). Captures deleted constraint details before
+  removal, reports constraint_count_before/after and solver state (fully_constrained, degrees_of_freedom).
+  Validation rejects non-integer/boolean indices, out-of-range indices, and missing sketches. Invalid
+  requests leave the document unchanged. Tests: 6 mock tests + 3 schema tests + 3 real FreeCAD integration
+tests all pass.
+- 2026-11-12: Implemented M14.4 — `sketch_edit_constraint` operation + MCP tool for editing
+  native Sketcher constraints in existing sketches. Changes: runner.py (new OP_SKETCH_EDIT_CONSTRAINT
+  + `_op_sketch_edit_constraint` handler, registered in OPERATIONS), modeling.py
+  (`SketchEditConstraintParams`/`SketchEditConstraintResult` schemas + `sketch_edit_constraint`
+  tool), direct.py (input validation). Uses delete + recreate with atomic rollback: captures
+  original constraint details before deletion, validates replacement before mutation, restores
+  original on replacement failure, reports both failures if rollback fails. Supported types:
+  Horizontal, Vertical, Distance, Radius, Diameter, Angle. Returns constraint_before,
+  constraint_after, constraint_count_before/after, fully_constrained, degrees_of_freedom,
+  meta_before. Tests: 12 mock tests + 3 schema tests + 5 real FreeCAD integration tests all pass
+  (including a close/reopen persistence test verifying edited constraint type, geometry
+  references, and value survive document save/close/reopen).
+- 2026-11-12: Added M14 E2E test `test_real_freecad_sketch_constraints_end_to_end`
+  covering the complete constraint lifecycle through MCP stdio: create_document/save,
+  create_sketch, sketch_add_rectangle, inspect_sketch, sketch_add_constraint (Horizontal +
+  Distance), sketch_edit_constraint (value change), sketch_delete_constraint, and
+  save/close/reopen persistence. Verifies solver fields (fully_constrained bool,
+  degrees_of_freedom int) at every checkpoint and uses actual returned constraint indices.
+  Passes against real FreeCAD 1.1.4 via MCP stdio.
 
 ## Taiga-S1 integration (verified 2026-11-03)
 

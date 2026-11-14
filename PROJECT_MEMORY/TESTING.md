@@ -134,5 +134,13 @@
   model downloads must never happen implicitly.
 - Roadmap milestone acceptance criteria are in `docs/ROADMAP.md`; report
   unavailable runtime tests as skips/unknown, never as passing evidence.
+- 2026-11-12 (create_body): focused tests —
+  `uv run --offline pytest -q tests/test_runner.py -k 'create_body or sketch_pad'`
+  (15 passed), `tests/test_modeling_schemas.py -k 'create_body'` (3 passed), and
+  real FreeCAD 1.1.4 via MCP stdio
+  `tests/test_body_tip_management.py -k 'create_body_then_sketch_pad'`
+  (1 passed; requires `FREECAD_MCP_FREECAD_EXECUTABLE`). Sequential bridge calls
+  after `sketch_add_rectangle` are blocked on this WSL host by a pre-existing
+  freecadcmd lingering/PID-reuse lock limitation unrelated to this change.
 
 ---
