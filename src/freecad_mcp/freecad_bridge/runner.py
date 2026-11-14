@@ -22,7 +22,7 @@ import sys
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 # When this module is executed as ``__main__`` (e.g. via ``freecadcmd.exe runner.py``),
@@ -2664,6 +2664,39 @@ def _op_sketch_add_rectangle(params: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _derive_solver_status(
+    fully_constrained: Optional[bool],
+    degrees_of_freedom: Optional[int],
+    recompute_ok: Optional[bool],
+) -> Optional[str]:
+    """Derive solver status from verified FreeCAD 1.1.4 native behavior.
+
+    Evidence (probe_sketcher_solver_json_results.json, FreeCAD 1.1.4):
+      under_constrained: recompute=True, FullyConstrained=False, DoF>0
+      fully_constrained: recompute=True, FullyConstrained=True, DoF=0
+      redundant:         recompute=False, FullyConstrained=True, DoF=0
+      conflicting:       recompute=False, FullyConstrained=True, DoF<0
+
+    Returns None for any unknown, unavailable, or inconsistent combination.
+    Never guesses.
+    """
+    if fully_constrained is None or degrees_of_freedom is None or recompute_ok is None:
+        return None
+    if recompute_ok is True:
+        if fully_constrained is False and degrees_of_freedom > 0:
+            return "under_constrained"
+        if fully_constrained is True and degrees_of_freedom == 0:
+            return "fully_constrained"
+        return None
+    if recompute_ok is False:
+        if fully_constrained is True and degrees_of_freedom == 0:
+            return "redundant"
+        if fully_constrained is True and degrees_of_freedom < 0:
+            return "conflicting"
+        return None
+    return None
+
+
 def _op_sketch_add_constraint(params: dict[str, Any]) -> dict[str, Any]:
     """Add a verified Sketcher constraint to an existing sketch.
 
@@ -2864,7 +2897,7 @@ def _op_sketch_add_constraint(params: dict[str, Any]) -> dict[str, Any]:
             constraint.Name = name
 
         constraint_index = sketch.addConstraint(constraint)
-        doc.recompute()
+        recompute_ok = sketch.recompute()
     except Exception as exc:
         try:
             ws_mod.release_lock(lock_path, pid)
@@ -2903,6 +2936,8 @@ def _op_sketch_add_constraint(params: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         degrees_of_freedom = None
 
+    solver_status = _derive_solver_status(fully_constrained, degrees_of_freedom, recompute_ok)
+
     fcstd_path = wks.document_path(normalized)
 
     def _write_tmp(tmp_path: str) -> None:
@@ -2928,6 +2963,8 @@ def _op_sketch_add_constraint(params: dict[str, Any]) -> dict[str, Any]:
             "constraint_count": len(getattr(sketch, "Constraints", [])),
             "fully_constrained": fully_constrained,
             "degrees_of_freedom": degrees_of_freedom,
+            "recompute_ok": recompute_ok,
+            "solver_status": solver_status,
             "meta_before": meta_before,
         },
     }
@@ -3039,7 +3076,7 @@ def _op_sketch_delete_constraint(params: dict[str, Any]) -> dict[str, Any]:
 
         # Delete the constraint.
         sketch.delConstraint(constraint_index)
-        doc.recompute()
+        recompute_ok = sketch.recompute()
 
         # Record constraint count after deletion.
         constraint_count_after = None
@@ -3058,6 +3095,8 @@ def _op_sketch_delete_constraint(params: dict[str, Any]) -> dict[str, Any]:
             degrees_of_freedom = getattr(sketch, "DoF", None)
         except Exception:
             degrees_of_freedom = None
+
+        solver_status = _derive_solver_status(fully_constrained, degrees_of_freedom, recompute_ok)
 
         fcstd_path = wks.document_path(normalized)
 
@@ -3090,6 +3129,8 @@ def _op_sketch_delete_constraint(params: dict[str, Any]) -> dict[str, Any]:
             "constraint_count_after": constraint_count_after,
             "fully_constrained": fully_constrained,
             "degrees_of_freedom": degrees_of_freedom,
+            "recompute_ok": recompute_ok,
+            "solver_status": solver_status,
             "meta_before": meta_before,
         },
     }
@@ -3317,7 +3358,7 @@ def _op_sketch_edit_constraint(params: dict[str, Any]) -> dict[str, Any]:
 
         # Delete the original constraint.
         sketch.delConstraint(constraint_index)
-        doc.recompute()
+        sketch.recompute()
 
         # Build the replacement constraint using the verified constructor signatures.
         replacement = None
@@ -3346,7 +3387,7 @@ def _op_sketch_edit_constraint(params: dict[str, Any]) -> dict[str, Any]:
                 replacement.Name = name
 
             constraint_index = sketch.addConstraint(replacement)
-            doc.recompute()
+            recompute_ok = sketch.recompute()
         except Exception as exc:
             # Rollback: restore the original constraint at the same index.
             rollback_error = None
@@ -3394,6 +3435,8 @@ def _op_sketch_edit_constraint(params: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             degrees_of_freedom = None
 
+        solver_status = _derive_solver_status(fully_constrained, degrees_of_freedom, recompute_ok)
+
         fcstd_path = wks.document_path(normalized)
 
         def _write_tmp(tmp_path: str) -> None:
@@ -3426,6 +3469,8 @@ def _op_sketch_edit_constraint(params: dict[str, Any]) -> dict[str, Any]:
             "constraint_count_after": len(getattr(sketch, "Constraints", [])),
             "fully_constrained": fully_constrained,
             "degrees_of_freedom": degrees_of_freedom,
+            "recompute_ok": recompute_ok,
+            "solver_status": solver_status,
             "meta_before": meta_before,
         },
     }

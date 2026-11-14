@@ -1327,6 +1327,12 @@ class SketchAddConstraintResult(BaseModel):
     degrees_of_freedom: Optional[int] = Field(
         default=None, description="Solver degrees of freedom (DoF) remaining in the sketch."
     )
+    recompute_ok: Optional[bool] = Field(
+        default=None, description="Whether the document recompute succeeded after adding the constraint."
+    )
+    solver_status: Optional[str] = Field(
+        default=None, description="Derived solver status: under_constrained, fully_constrained, redundant, conflicting, or None."
+    )
     meta_before: Optional[dict[str, Any]] = Field(
         default=None, description="Document metadata side-car before the constraint was added."
     )
@@ -1363,6 +1369,12 @@ class SketchDeleteConstraintResult(BaseModel):
     )
     degrees_of_freedom: Optional[int] = Field(
         default=None, description="Solver degrees of freedom (DoF) remaining in the sketch after deletion."
+    )
+    recompute_ok: Optional[bool] = Field(
+        default=None, description="Whether the document recompute succeeded after deleting the constraint."
+    )
+    solver_status: Optional[str] = Field(
+        default=None, description="Derived solver status: under_constrained, fully_constrained, redundant, conflicting, or None."
     )
     meta_before: Optional[dict[str, Any]] = Field(
         default=None, description="Document metadata side-car before the constraint was deleted."
@@ -1434,6 +1446,12 @@ class SketchEditConstraintResult(BaseModel):
     )
     degrees_of_freedom: Optional[int] = Field(
         default=None, description="Solver degrees of freedom (DoF) remaining in the sketch after editing."
+    )
+    recompute_ok: Optional[bool] = Field(
+        default=None, description="Whether the document recompute succeeded after editing the constraint."
+    )
+    solver_status: Optional[str] = Field(
+        default=None, description="Derived solver status: under_constrained, fully_constrained, redundant, conflicting, or None."
     )
     meta_before: Optional[dict[str, Any]] = Field(
         default=None, description="Document metadata side-car before the constraint was edited."
@@ -3364,6 +3382,8 @@ def _register_tools(server: Any, settings: Settings) -> None:
             constraint_count=result.get("constraint_count", 0),
             fully_constrained=result.get("fully_constrained"),
             degrees_of_freedom=result.get("degrees_of_freedom"),
+            recompute_ok=result.get("recompute_ok"),
+            solver_status=result.get("solver_status"),
             meta_before=result.get("meta_before"),
         )
 
@@ -3406,6 +3426,8 @@ def _register_tools(server: Any, settings: Settings) -> None:
             constraint_count_after=result.get("constraint_count_after"),
             fully_constrained=result.get("fully_constrained"),
             degrees_of_freedom=result.get("degrees_of_freedom"),
+            recompute_ok=result.get("recompute_ok"),
+            solver_status=result.get("solver_status"),
             meta_before=result.get("meta_before"),
         )
 
@@ -3459,6 +3481,8 @@ def _register_tools(server: Any, settings: Settings) -> None:
             constraint_count_after=result.get("constraint_count_after"),
             fully_constrained=result.get("fully_constrained"),
             degrees_of_freedom=result.get("degrees_of_freedom"),
+            recompute_ok=result.get("recompute_ok"),
+            solver_status=result.get("solver_status"),
             meta_before=result.get("meta_before"),
         )
 

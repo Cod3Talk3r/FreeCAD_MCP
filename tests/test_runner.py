@@ -297,6 +297,10 @@ class _FakeSketch:
         self.ExternalGeo.append(object_name)
         self.ExternalTypes.append(sub_name)
 
+    def recompute(self) -> bool:
+        """Stand-in for Sketcher::SketchObject.recompute(). Returns True by default."""
+        return True
+
 
 class _FakeBoundBox:
     """Minimal stand-in for a FreeCAD BoundBox."""
@@ -4717,6 +4721,302 @@ def test_sketch_edit_constraint_missing_sketch(
     assert result["ok"] is False
     assert result["op"] == "sketch_edit_constraint"
     assert "not found" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Milestone 14.2: Solver status / recompute_ok derivation (FreeCAD mocked)
+# ---------------------------------------------------------------------------
+
+
+class _SolverStatusDoc(_FakeDoc):
+    """Fake document whose recompute() returns a configurable boolean."""
+
+    def __init__(self, recompute_return: bool | None = None) -> None:
+        super().__init__()
+        self._recompute_return = recompute_return
+
+    def recompute(self) -> bool | None:
+        return self._recompute_return
+
+
+def _setup_solver_status_sketch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    document_id: str,
+    sketch_name: str,
+    recompute_return: bool | None,
+    fully_constrained: bool | None,
+    dof: int | None,
+) -> object:
+    """Create a sketch with configurable solver attributes for solver status tests."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": document_id, "workspace": str(tmp_path), "sketch_name": sketch_name}
+    )
+    sketch = doc.objects[sketch_name]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0)))
+    sketch.recompute = lambda: recompute_return  # type: ignore[method-assign]
+    if fully_constrained is not None:
+        sketch.FullyConstrained = fully_constrained
+    if dof is not None:
+        sketch.DoF = dof
+    return doc
+
+
+def test_solver_status_under_constrained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute=True, FullyConstrained=False, DoF>0 -> under_constrained."""
+    doc = _setup_solver_status_sketch(
+        monkeypatch, tmp_path, "usc", "Sketch1", True, False, 4
+    )
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "usc",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is True
+    assert result["result"]["fully_constrained"] is False
+    assert result["result"]["degrees_of_freedom"] == 4
+    assert result["result"]["solver_status"] == "under_constrained"
+
+
+def test_solver_status_fully_constrained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute=True, FullyConstrained=True, DoF=0 -> fully_constrained."""
+    doc = _setup_solver_status_sketch(
+        monkeypatch, tmp_path, "fc", "Sketch1", True, True, 0
+    )
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "fc",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is True
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 0
+    assert result["result"]["solver_status"] == "fully_constrained"
+
+
+def test_solver_status_redundant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute=False, FullyConstrained=True, DoF=0 -> redundant."""
+    doc = _setup_solver_status_sketch(
+        monkeypatch, tmp_path, "red", "Sketch1", False, True, 0
+    )
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "red",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is False
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 0
+    assert result["result"]["solver_status"] == "redundant"
+
+
+def test_solver_status_conflicting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute=False, FullyConstrained=True, DoF<0 -> conflicting."""
+    doc = _setup_solver_status_sketch(
+        monkeypatch, tmp_path, "conf", "Sketch1", False, True, -1
+    )
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "conf",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is False
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == -1
+    assert result["result"]["solver_status"] == "conflicting"
+
+
+def test_solver_status_unknown_inconsistent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute=True, FullyConstrained=True, DoF>0 -> None (inconsistent)."""
+    doc = _setup_solver_status_sketch(
+        monkeypatch, tmp_path, "unk", "Sketch1", True, True, 5
+    )
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "unk",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is True
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 5
+    assert result["result"]["solver_status"] is None
+
+
+def test_solver_status_unavailable_recompute_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recompute_ok=None -> solver_status=None even with valid FC/DoF."""
+    doc = _setup_solver_status_sketch(
+        monkeypatch, tmp_path, "nav", "Sketch1", None, True, 0
+    )
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "nav",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is None
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 0
+    assert result["result"]["solver_status"] is None
+
+
+def test_solver_status_unavailable_missing_fc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FullyConstrained missing -> solver_status=None."""
+    doc = _SolverStatusDoc(recompute_return=True)
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "mfc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0)))
+    sketch.DoF = 0
+    # Deliberately do NOT set FullyConstrained
+
+    result = runner._op_sketch_add_constraint(
+        {
+            "document_id": "mfc",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is True
+    assert result["result"]["fully_constrained"] is None
+    assert result["result"]["degrees_of_freedom"] == 0
+    assert result["result"]["solver_status"] is None
+
+
+def test_delete_constraint_solver_status_redundant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_delete_constraint propagates solver_status with redundant."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "dred", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0)))
+    sketch.recompute = lambda: False  # type: ignore[method-assign]
+    sketch.FullyConstrained = True
+    sketch.DoF = 0
+
+    class _FakeConstraint:
+        def __init__(self, **kw):
+            self.Type = kw.get("Type", "Horizontal")
+            self.Name = kw.get("Name", "")
+            self.First = kw.get("First", 0)
+            self.Second = kw.get("Second", -2000)
+            self.Third = kw.get("Third", -2000)
+            self.Value = kw.get("Value", 0.0)
+            self.IsActive = kw.get("IsActive", True)
+            self.Driving = kw.get("Driving", True)
+
+    sketch.Constraints.extend([_FakeConstraint()])
+
+    result = runner._op_sketch_delete_constraint(
+        {
+            "document_id": "dred",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is False
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 0
+    assert result["result"]["solver_status"] == "redundant"
+
+
+def test_edit_constraint_solver_status_fully_constrained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sketch_edit_constraint propagates solver_status with fully_constrained."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_sketch(
+        {"document_id": "efc", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    sketch.Geometry.append(LineSegment(_FakePoint(0, 0, 0), _FakePoint(10, 0, 0)))
+
+    class _FakeConstraint:
+        def __init__(self, **kw):
+            self.Type = kw.get("Type", "Horizontal")
+            self.Name = kw.get("Name", "")
+            self.First = kw.get("First", 0)
+            self.Second = kw.get("Second", -2000)
+            self.Third = kw.get("Third", -2000)
+            self.Value = kw.get("Value", 0.0)
+            self.IsActive = kw.get("IsActive", True)
+            self.Driving = kw.get("Driving", True)
+
+    sketch.Constraints.extend([_FakeConstraint()])
+    sketch.FullyConstrained = True
+    sketch.DoF = 0
+
+    result = runner._op_sketch_edit_constraint(
+        {
+            "document_id": "efc",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+        }
+    )
+    assert result["ok"] is True
+    assert result["result"]["recompute_ok"] is True
+    assert result["result"]["fully_constrained"] is True
+    assert result["result"]["degrees_of_freedom"] == 0
+    assert result["result"]["solver_status"] == "fully_constrained"
 
 
 # ---------------------------------------------------------------------------

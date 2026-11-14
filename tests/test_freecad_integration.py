@@ -2415,6 +2415,157 @@ def test_real_freecad_sketch_delete_constraint_persistence(
 
 
 @requires_freecad
+@requires_freecad
+def test_real_freecad_sketch_add_constraint_solver_status_under_constrained(
+    tmp_path: Path) -> None:
+    """sketch_add_constraint on under-constrained sketch returns under_constrained."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "suc", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "suc", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "suc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+
+    result = bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "suc",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "H1",
+        },
+    )
+    assert result["recompute_ok"] is True
+    assert result["fully_constrained"] is False
+    assert result["degrees_of_freedom"] > 0
+    assert result["solver_status"] == "under_constrained"
+
+
+@requires_freecad
+def test_real_freecad_sketch_delete_constraint_solver_status_fields(
+    tmp_path: Path) -> None:
+    """sketch_delete_constraint returns recompute_ok and solver_status fields."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "dsf", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "dsf", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "dsf",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "dsf",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "H1",
+        },
+    )
+
+    result = bridge.run(
+        "sketch_delete_constraint",
+        {
+            "document_id": "dsf",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+        },
+    )
+    assert result["sketch_name"] == "Sketch1"
+    assert result["deleted_constraint_index"] == 0
+    assert isinstance(result["recompute_ok"], bool)
+    assert result["fully_constrained"] is None or isinstance(result["fully_constrained"], bool)
+    assert result["degrees_of_freedom"] is None or isinstance(result["degrees_of_freedom"], int)
+    assert result["solver_status"] is None or isinstance(result["solver_status"], str)
+
+
+@requires_freecad
+def test_real_freecad_sketch_edit_constraint_solver_status_fields(
+    tmp_path: Path) -> None:
+    """sketch_edit_constraint returns recompute_ok and solver_status fields."""
+    bridge = FreeCadBridge.from_settings(_settings())
+    workspace = str(tmp_path)
+
+    bridge.run("create_document", {"document_id": "esf", "workspace": workspace})
+    bridge.run(
+        "create_sketch",
+        {"document_id": "esf", "workspace": workspace, "sketch_name": "Sketch1"},
+    )
+    bridge.run(
+        "sketch_add_rectangle",
+        {
+            "document_id": "esf",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 10.0,
+            "height": 10.0,
+        },
+    )
+    bridge.run(
+        "sketch_add_constraint",
+        {
+            "document_id": "esf",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "Orig",
+        },
+    )
+
+    result = bridge.run(
+        "sketch_edit_constraint",
+        {
+            "document_id": "esf",
+            "workspace": workspace,
+            "sketch_name": "Sketch1",
+            "constraint_index": 0,
+            "constraint_type": "Horizontal",
+            "first_geometry_index": 0,
+            "name": "Edited",
+        },
+    )
+    assert result["edited_constraint_index"] == 0
+    assert isinstance(result["recompute_ok"], bool)
+    assert result["fully_constrained"] is None or isinstance(result["fully_constrained"], bool)
+    assert result["degrees_of_freedom"] is None or isinstance(result["degrees_of_freedom"], int)
+    assert result["solver_status"] is None or isinstance(result["solver_status"], str)
+
+
+@requires_freecad
 def test_real_freecad_sketch_edit_constraint_value(
     tmp_path: Path) -> None:
     """sketch_edit_constraint changes a dimensional constraint's value."""
