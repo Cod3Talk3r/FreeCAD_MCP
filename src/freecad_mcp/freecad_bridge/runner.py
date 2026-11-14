@@ -87,6 +87,7 @@ OP_SKETCH_ADDITIVE_PIPE = "sketch_additive_pipe"
 OP_SKETCH_SUBTRACTIVE_PIPE = "sketch_subtractive_pipe"
 OP_SKETCH_ADDITIVE_LOFT = "sketch_additive_loft"
 OP_SKETCH_SUBTRACTIVE_LOFT = "sketch_subtractive_loft"
+OP_SKETCH_HOLE = "sketch_hole"
 OP_SKETCH_ATTACH_SUPPORT = "sketch_attach_support"
 OP_SKETCH_ADD_EXTERNAL_GEOMETRY = "sketch_add_external_geometry"
 OP_DELETE_OBJECT = "delete_object"
@@ -7674,7 +7675,7 @@ def _op_sketch_pad(params: dict[str, Any]) -> dict[str, Any]:
                 "sketch_name": sketch_name,
                 "body_name": body_name_used,
                 "pad_name": desired_pad_name,
-                "profile_name": profile_name if profile_name else sketch_name,
+                "profile_name": f"{sketch_name}#{profile_name}" if profile_name else sketch_name,
                 "length": length_val,
                 "reversed": reversed_param,
                 "volume": volume,
@@ -8041,7 +8042,7 @@ def _op_sketch_pocket(params: dict[str, Any]) -> dict[str, Any]:
                 "sketch_name": sketch_name,
                 "body_name": body_name_used,
                 "pocket_name": desired_pocket_name,
-                "profile_name": profile_name if profile_name else sketch_name,
+                "profile_name": f"{sketch_name}#{profile_name}" if profile_name else sketch_name,
                 "length": length_val,
                 "reversed": reversed_param,
                 "volume": volume,
@@ -10421,6 +10422,380 @@ def _op_sketch_subtractive_loft(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_sketch_hole(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::Hole from an existing sketch profile.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::Hole``.  The target
+    Body must already exist and its Tip must be a valid solid
+    (e.g. a Pad).  The profile sketch must already exist and already be a
+    member of the specified Body; it defines the hole profile (a circle).
+    The base face to drill into is specified by ``base_object_name`` and
+    ``base_subname``.  Ownership is never silently changed.
+
+    The Hole uses the sketch as its ``Profile`` (assigned directly as
+    ``hole.Profile = sketch``, NOT as a LinkSub tuple carrying
+    ``base_subname``: FreeCAD 1.1.4 produces a NULL shape when Profile
+    contains a subelement list such as ``(sketch, ['Face1'])``).  The base
+    face to drill into is specified by ``base_object_name`` and
+    ``base_subname``; it lives on the sketch's ``AttachmentSupport`` (set via
+    ``sketch_attach_support`` before calling this operation), not on
+    ``Hole.Profile``.  ``Diameter`` and ``Depth`` are applied as requested.
+    The sketch must be attached to the target face via ``sketch_attach_support``
+    before creating the Hole and must be a member of the specified Body.
+    Ownership is never silently changed.
+
+    On any failure before the atomic save, the lock is released and the
+    on-disk document is left unmodified (rollback via the established
+    save-on-success pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name_raw = params.get("body_name", "Body")
+    sketch_name_raw = params.get("sketch_name", "")
+    base_object_name_raw = params.get("base_object_name", "")
+    base_subname_raw = params.get("base_subname", "")
+    hole_name_raw = params.get("hole_name", "Hole")
+    diameter_raw = params.get("diameter")
+    depth_raw = params.get("depth")
+    workspace_str = params.get("workspace") or ""
+
+    # Validate document_id.
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_hole", "error": str(exc)}
+
+    # Validate required names: reject empty strings, apply defaults only when
+    # the key is absent (not when it is explicitly empty).
+    if not str(body_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "body_name must not be empty.",
+        }
+    body_name = str(body_name_raw)
+
+    if not str(sketch_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "sketch_name must not be empty.",
+        }
+    sketch_name = str(sketch_name_raw)
+
+    if not str(base_object_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "base_object_name must not be empty.",
+        }
+    base_object_name = str(base_object_name_raw)
+
+    if not str(base_subname_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "base_subname must not be empty.",
+        }
+    base_subname = str(base_subname_raw)
+
+    if not str(hole_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "hole_name must not be empty.",
+        }
+    hole_name = str(hole_name_raw)
+
+    # Validate numeric parameters strictly.
+    try:
+        diameter = float(diameter_raw)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "diameter must be a finite number.",
+        }
+    if not math.isfinite(diameter):
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "diameter must be a finite number.",
+        }
+    if diameter <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "diameter must be positive.",
+        }
+
+    try:
+        depth = float(depth_raw)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "depth must be a finite number.",
+        }
+    if not math.isfinite(depth):
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "depth must be a finite number.",
+        }
+    if depth <= 0:
+        return {
+            "ok": False,
+            "op": "sketch_hole",
+            "error": "depth must be positive.",
+        }
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_hole", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_hole", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_hole", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Require an existing PartDesign::Body with a valid, non-null solid Tip.
+        body = doc.getObject(body_name)
+        if body is None:
+            return _fail(f"body '{body_name}' not found")
+        if getattr(body, "TypeId", "") != "PartDesign::Body":
+            return _fail(
+                f"object '{body_name}' is type '{getattr(body, 'TypeId', '?')}', not 'PartDesign::Body'; "
+                f"cannot create a Hole."
+            )
+        body_name_used = getattr(body, "Name", body_name)
+
+        tip = getattr(body, "Tip", None)
+        if tip is None:
+            return _fail(
+                f"Body '{body_name_used}' has no Tip.  A Hole requires a valid base solid.  "
+                f"Create a Pad or other base solid before adding a Hole."
+            )
+        tip_shape = getattr(tip, "Shape", None)
+        if tip_shape is None or getattr(tip_shape, "isNull", lambda: False)() or not bool(tip_shape.isValid()):
+            return _fail(
+                f"Body '{body_name_used}' Tip '{getattr(tip, 'Name', '?')}' has no valid base solid.  "
+                f"Create a Pad or other base solid before adding a Hole."
+            )
+
+        # Require an existing Sketcher::SketchObject Profile that defines the
+        # Hole profile (a circle).  Add it to the target Body if it is not
+        # already a member of any Body (mirroring sketch_pad behavior).
+        # Do not silently move objects between Bodies.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+        if getattr(sketch, "TypeId", "") != "Sketcher::SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{getattr(sketch, 'TypeId', '?')}', not 'Sketcher::SketchObject'; "
+                f"cannot create a Hole from it."
+            )
+
+        # Check if sketch is already a member of any Body.
+        sketch_in_any_body = False
+        sketch_in_other_body = False
+        try:
+            for obj in getattr(doc, "Objects", []) or []:
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    try:
+                        body_members = list(getattr(obj, "Group", []) or [])
+                        body_outlist = list(getattr(obj, "outList", []) or [])
+                        if sketch in body_members or sketch in body_outlist:
+                            sketch_in_any_body = True
+                            if obj is not body:
+                                sketch_in_other_body = True
+                                break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        if sketch_in_other_body:
+            return _fail(
+                f"sketch '{sketch_name}' is already a member of another Body.  "
+                f"Do not silently move objects between Bodies."
+            )
+
+        if not sketch_in_any_body:
+            # Add sketch to target Body's Group.
+            try:
+                body.addObject(sketch)
+            except Exception as exc:
+                return _fail(
+                    f"FreeCAD could not add sketch '{sketch_name}' to Body "
+                    f"'{body_name_used}': {exc}."
+                )
+
+        # Require an existing base object with a valid Shape whose named
+        # subelement (face) exists.  The base face receives the hole.
+        base_obj = doc.getObject(base_object_name)
+        if base_obj is None:
+            return _fail(f"base object '{base_object_name}' not found")
+        base_shape = getattr(base_obj, "Shape", None)
+        if base_shape is None or not _shape_has_subelement(base_shape, base_subname, "Face"):
+            return _fail(
+                f"base subelement '{base_subname}' is not a face of "
+                f"object '{base_object_name}'."
+            )
+
+        # Create the Hole.  Avoid name clashes.
+        counter = 0
+        desired_hole_name = hole_name
+        while doc.getObject(desired_hole_name) is not None:
+            counter += 1
+            desired_hole_name = f"{hole_name}_{counter}"
+        try:
+            hole = doc.addObject("PartDesign::Hole", desired_hole_name)
+            body.addObject(hole)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::Hole: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Hole diameter and depth.
+        # The sketch's attachment support (set via sketch_attach_support)
+        # defines the drilling base face.  Profile must be assigned directly
+        # as `hole.Profile = sketch` (NOT as a LinkSub tuple containing
+        # base_subname): FreeCAD 1.1.4 produces a NULL shape when Profile
+        # carries a subelement list such as (sketch, ['Face1']).  The base
+        # face lives on the sketch's AttachmentSupport, not on Hole.Profile.
+        try:
+            hole.Diameter = diameter
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Hole Diameter: {exc}."
+            )
+        try:
+            hole.Depth = depth
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Hole Depth: {exc}."
+            )
+        try:
+            hole.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Hole Profile: {exc}."
+            )
+
+        # Recompute the document so FreeCAD evaluates the Hole feature tree.
+        doc.recompute()
+
+        # Validate the resulting Hole: it must have a valid, non-null solid shape.
+        shape = getattr(hole, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"Hole '{desired_hole_name}' produced no shape.  The profile or "
+                f"Diameter/Depth may be invalid."
+            )
+        try:
+            if getattr(shape, "isNull", lambda: False)():
+                return _fail(
+                    f"Hole '{desired_hole_name}' produced a NULL shape.  The profile "
+                    f"did not resolve to a valid drilling path."
+                )
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"Hole '{desired_hole_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"Hole '{desired_hole_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"Hole '{desired_hole_name}' produced no solid.  The profile or "
+                f"Diameter/Depth configuration may not produce a valid solid."
+            )
+
+        # Verify Body.Tip advanced to the new Hole.
+        new_tip = getattr(body, "Tip", None)
+        if new_tip is None or getattr(new_tip, "Name", None) != desired_hole_name:
+            return _fail(
+                f"Body '{body_name_used}' Tip did not advance to the new Hole "
+                f"'{desired_hole_name}' after recompute."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_hole",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name_used,
+            "hole_name": desired_hole_name,
+            "profile_name": sketch_name,
+            "base_object_name": base_object_name,
+            "base_subname": base_subname,
+            "diameter": diameter,
+            "depth": depth,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
 def _op_partdesign_fillet(params: dict[str, Any]) -> dict[str, Any]:
     """Create a native PartDesign::Fillet on edges of an existing solid feature.
 
@@ -12655,6 +13030,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_SUBTRACTIVE_PIPE: _op_sketch_subtractive_pipe,
     OP_SKETCH_ADDITIVE_LOFT: _op_sketch_additive_loft,
     OP_SKETCH_SUBTRACTIVE_LOFT: _op_sketch_subtractive_loft,
+    OP_SKETCH_HOLE: _op_sketch_hole,
     OP_SKETCH_ATTACH_SUPPORT: _op_sketch_attach_support,
     OP_SKETCH_ADD_EXTERNAL_GEOMETRY: _op_sketch_add_external_geometry,
     OP_DELETE_OBJECT: _op_delete_object,

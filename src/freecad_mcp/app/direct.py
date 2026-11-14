@@ -527,6 +527,34 @@ def validate_direct_request(op: str, params: Any) -> None:
         closed = params.get("closed", False)
         if not isinstance(closed, bool):
             raise ValueError("closed must be a boolean.")
+    elif op == "sketch_hole":
+        if not params.get("body_name", "").strip():
+            raise ValueError("body_name must not be empty.")
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        if not params.get("base_object_name", "").strip():
+            raise ValueError("base_object_name must not be empty.")
+        if not params.get("base_subname", "").strip():
+            raise ValueError("base_subname must not be empty.")
+        try:
+            diameter_val = float(params.get("diameter"))
+        except (TypeError, ValueError):
+            raise ValueError("diameter must be a finite number.")
+        if not math.isfinite(diameter_val):
+            raise ValueError("diameter must be a finite number.")
+        if diameter_val <= 0:
+            raise ValueError("diameter must be positive.")
+        try:
+            depth_val = float(params.get("depth"))
+        except (TypeError, ValueError):
+            raise ValueError("depth must be a finite number.")
+        if not math.isfinite(depth_val):
+            raise ValueError("depth must be a finite number.")
+        if depth_val <= 0:
+            raise ValueError("depth must be positive.")
+        hole_name = params.get("hole_name", "")
+        if not str(hole_name).strip():
+            raise ValueError("hole_name must not be empty.")
     elif op == "partdesign_fillet":
         if not params.get("object_name", "").strip():
             raise ValueError("object_name must not be empty.")

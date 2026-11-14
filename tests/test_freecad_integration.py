@@ -7015,6 +7015,255 @@ def test_real_freecad_sketch_subtractive_loft_invalid_section(tmp_path: Path) ->
     assert after_names == before_names
 
 
+def _assert_subtractive_hole_tree(saved_path: str, document_id: str, hole_name: str = "Hole") -> None:
+    """Verify the Hole in the reopened document: valid solid, Body.Tip, group membership."""
+    path = str(saved_path)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+doc.recompute()
+body = doc.getObject('Body')
+sketch1 = doc.getObject('Sketch1')
+hole = doc.getObject({hole_name!r})
+assert all(obj is not None for obj in (body, sketch1, hole))
+assert hole.TypeId == 'PartDesign::Hole'
+assert hole in body.Group
+assert sketch1 in body.Group
+names = [obj.Name for obj in body.Group]
+assert {hole_name!r} in names
+assert 'Sketch1' in names
+assert 'Pad' in names
+shape = hole.Shape
+assert shape is not None
+assert not shape.isNull()
+assert shape.isValid()
+solids = list(shape.Solids or [])
+assert len(solids) >= 1
+assert shape.Volume > 0
+# Drilling base is defined by sketch attachment support; Hole has no
+# separate Base property in FreeCAD 1.1.4, and Profile is not set by
+# the operation (Diameter/Depth define hole dimensions).
+assert body.Tip == hole
+print("SUBTRACTIVE_HOLE_TREE_OK")
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "SUBTRACTIVE_HOLE_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_sketch_hole_valid_creation(tmp_path: Path) -> None:
+    """Create a Hole from a sketch and base face; verify valid solid, volume, Tip.
+
+    The profile sketch (Sketch1) is a circle attached to Face1 of the pad via
+    sketch_attach_support. The Hole is drilled into Face1 of the Pad with
+    Diameter 5.0 and Depth 10.0. The base sketch is padded so it is a Body member;
+    the profile sketch is NOT padded (it only defines the hole profile).
+    """
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skholevalid", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+
+    # Base sketch: 20x20 pad -> 20x20x30 solid
+    bridge.run("create_sketch", {**params, "sketch_name": "SketchBase"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "SketchBase", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    pad_result = bridge.run("sketch_pad", {
+        **params, "sketch_name": "SketchBase", "length": 30.0,
+    })
+    assert pad_result["solids_count"] == 1
+    assert pad_result["volume"] > 0
+
+    # Profile sketch: circle (center 10,10 radius 2.5) attached to Face1 of the pad
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_circle", {
+        **params, "sketch_name": "Sketch1", "center_x": 10.0, "center_y": 10.0,
+        "radius": 2.5,
+    })
+    bridge.run("sketch_attach_support", {
+        **params,
+        "sketch_name": "Sketch1",
+        "support_object_name": "Pad",
+        "support_subname": "Face1",
+        "map_mode": "FlatFace",
+    })
+    # Note: profile sketch is NOT padded - it only defines the hole profile
+
+    result = bridge.run("sketch_hole", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "base_object_name": "Pad",
+        "base_subname": "Face1",
+        "diameter": 5.0,
+        "depth": 10.0,
+        "hole_name": "Hole1",
+    })
+    assert result["body_name"] == "Body"
+    assert result["hole_name"] == "Hole1"
+    assert result["profile_name"] == "Sketch1"
+    assert result["base_object_name"] == "Pad"
+    assert result["base_subname"] == "Face1"
+    assert result["diameter"] == 5.0
+    assert result["depth"] == 10.0
+    assert result["solids_count"] >= 1
+    assert result["volume"] is not None
+    assert result["volume"] > 0
+
+    _assert_subtractive_hole_tree(saved_path, "skholevalid", "Hole1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_hole_save_reopen(tmp_path: Path) -> None:
+    """Hole persists after save/reopen: valid shape, Tip preserved.
+
+    Same setup as valid_creation: profile (Sketch1) circle attached to Face1 of the pad.
+    """
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skholereopen", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+
+    # Base sketch: 20x20 pad -> 20x20x30 solid
+    bridge.run("create_sketch", {**params, "sketch_name": "SketchBase"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "SketchBase", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {
+        **params, "sketch_name": "SketchBase", "length": 30.0,
+    })
+
+    # Profile sketch: circle (center 10,10 radius 2.5) attached to Face1 of pad
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_circle", {
+        **params, "sketch_name": "Sketch1", "center_x": 10.0, "center_y": 10.0,
+        "radius": 2.5,
+    })
+    bridge.run("sketch_attach_support", {
+        **params,
+        "sketch_name": "Sketch1",
+        "support_object_name": "Pad",
+        "support_subname": "Face1",
+        "map_mode": "FlatFace",
+    })
+    # Note: profile sketch is NOT padded - it only defines the hole profile
+
+    bridge.run("sketch_hole", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "base_object_name": "Pad",
+        "base_subname": "Face1",
+        "diameter": 5.0,
+        "depth": 10.0,
+        "hole_name": "Hole1",
+    })
+
+    # list_objects reopens from disk, proving persistence.
+    objects = bridge.run(
+        "list_objects", {**params}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Hole1" in names
+    assert "Pad" in names
+    assert "Sketch1" in names
+
+    _assert_subtractive_hole_tree(saved_path, "skholereopen", "Hole1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_hole_invalid_base(tmp_path: Path) -> None:
+    """Missing or invalid base object returns structured error; document unchanged."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "skholeerr", "workspace": workspace}
+
+    bridge.run("create_document", params)
+
+    # Base sketch: 20x20 pad -> 20x20x10 solid (for Body.Tip)
+    bridge.run("create_sketch", {**params, "sketch_name": "SketchBase"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "SketchBase", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "SketchBase", "length": 10.0})
+
+    # Profile sketch: circle attached to Face1 of pad
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_circle", {
+        **params, "sketch_name": "Sketch1", "center_x": 10.0, "center_y": 10.0,
+        "radius": 2.5,
+    })
+    bridge.run("sketch_attach_support", {
+        **params,
+        "sketch_name": "Sketch1",
+        "support_object_name": "Pad",
+        "support_subname": "Face1",
+        "map_mode": "FlatFace",
+    })
+    # Note: profile sketch is NOT padded - it only defines the hole profile
+
+    before = bridge.run("list_objects", {**params})["objects"]
+    before_names = [obj["name"] for obj in before]
+
+    # Missing base object.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_hole", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "NoSuchBox",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        })
+    assert "not found" in str(excinfo.value).lower()
+
+    # Invalid base subname (not a face).
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_hole", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Pad",
+            "base_subname": "Face99",
+            "diameter": 5.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        })
+    assert "not a face" in str(excinfo.value).lower()
+
+    # Invalid diameter.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_hole", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Pad",
+            "base_subname": "Face1",
+            "diameter": 0.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        })
+    assert "positive" in str(excinfo.value).lower()
+
+    # Document unchanged after errors.
+    after = bridge.run("list_objects", {**params})["objects"]
+    after_names = [obj["name"] for obj in after]
+    assert after_names == before_names
+
+
 def _assert_subtractive_pipe_tree(saved_path: str, document_id: str, pipe_name: str = "Pipe") -> None:
     """Verify the SubtractivePipe in the reopened document: valid solid, Body.Tip, group membership."""
     path = str(saved_path)

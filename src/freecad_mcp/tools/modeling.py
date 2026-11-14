@@ -826,6 +826,57 @@ class SketchSubtractiveLoftResult(BaseModel):
     meta_before: dict[str, Any] = Field(
         description="Document metadata snapshot before the operation."
     )
+
+
+class SketchHoleParams(BaseModel):
+    """Parameters for creating a PartDesign::Hole from an existing sketch profile and base face."""
+
+    document_id: str = Field(description="Existing document containing the Body, sketch, and base face.")
+    body_name: str = Field(
+        default="Body", description="Name of the PartDesign::Body that owns the sketch and will own the Hole."
+    )
+    sketch_name: str = Field(
+        description="Name of the Sketcher::SketchObject used as the Hole profile (must contain a circle). Must be attached to target face via sketch_attach_support."
+    )
+    base_object_name: str = Field(
+        description="Name of the object providing the base face (e.g. a PartDesign feature like Pad)."
+    )
+    base_subname: str = Field(
+        description="Name of the base face subelement, e.g. 'Face1'. The hole is drilled into this face."
+    )
+    diameter: float = Field(
+        description="Hole diameter in millimetres (must be positive)."
+    )
+    depth: float = Field(
+        description="Hole depth in millimetres (must be positive)."
+    )
+    hole_name: str = Field(default="Hole", description="Name for the new PartDesign::Hole object.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchHoleResult(BaseModel):
+    """Result of sketch_hole."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Hole.")
+    hole_name: str = Field(description="Name of the created PartDesign::Hole.")
+    profile_name: str = Field(description="Name of the sketch used as the Hole profile.")
+    base_object_name: str = Field(description="Name of the base object containing the drilled face.")
+    base_subname: str = Field(description="Name of the base face subelement (e.g. 'Face1').")
+    diameter: float = Field(description="Hole diameter in millimetres.")
+    depth: float = Field(description="Hole depth in millimetres.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
     """Result of partdesign_fillet."""
 
     document_id: str = Field(description="Validated document identifier.")
@@ -4337,6 +4388,58 @@ def _register_tools(server: Any, settings: Settings) -> None:
             section_names=result.get("section_names", params.section_names),
             ruled=result.get("ruled", params.ruled),
             closed=result.get("closed", params.closed),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_hole
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_hole",
+        title="Create a native PartDesign Hole from a sketch profile and base face",
+        description=(
+            "Create a native PartDesign::Hole that uses an existing "
+            "Sketcher::SketchObject as its Profile (LinkSub) and a base face "
+            "as its Base (LinkSub), with Diameter and Depth applied as requested.  "
+            "The target Body must already exist and its Tip must be a valid solid "
+            "(e.g. a Pad).  The sketch must already be a member of the specified "
+            "Body, must contain a circle, and must be attached to the target face "
+            "via sketch_attach_support before calling this operation.  Ownership "
+            "is never silently changed.  The document is recomputed, saved "
+            "atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_hole_tool(params: SketchHoleParams) -> SketchHoleResult:
+        """Create a PartDesign Hole from a sketch profile and base face and return its info."""
+        validate_direct_request("sketch_hole", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "sketch_name": params.sketch_name,
+            "base_object_name": params.base_object_name,
+            "base_subname": params.base_subname,
+            "diameter": params.diameter,
+            "depth": params.depth,
+            "hole_name": params.hole_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_hole", bridge_params)
+
+        return SketchHoleResult(
+            document_id=params.document_id,
+            body_name=result.get("body_name", params.body_name),
+            hole_name=result.get("hole_name", params.hole_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            base_object_name=result.get("base_object_name", params.base_object_name),
+            base_subname=result.get("base_subname", params.base_subname),
+            diameter=result.get("diameter", params.diameter),
+            depth=result.get("depth", params.depth),
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             solids_count=result.get("solids_count", 0),

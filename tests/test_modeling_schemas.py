@@ -27,6 +27,7 @@ from freecad_mcp.tools.modeling import (
     SketchAttachSupportResult,
     SketchSubtractivePipeParams,
     SketchSubtractiveLoftParams,
+    SketchHoleParams,
     SketchAddExternalGeometryParams,
     SketchAddExternalGeometryResult,
     SketchDeleteConstraintParams,
@@ -758,4 +759,42 @@ def test_sketch_subtractive_loft_params_with_all_fields():
     assert p.loft_name == "MyLoft"
     assert p.ruled is True
     assert p.closed is True
+    assert p.workspace == "/tmp/ws"
+
+
+def test_sketch_hole_params_valid():
+    """SketchHoleParams should be accepted."""
+    p = SketchHoleParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        base_object_name="Box1",
+        base_subname="Face1",
+        diameter=5.0,
+        depth=10.0,
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.base_object_name == "Box1"
+    assert p.base_subname == "Face1"
+    assert p.diameter == 5.0
+    assert p.depth == 10.0
+    assert p.body_name == "Body"
+    assert p.hole_name == "Hole"
+    assert p.workspace is None
+
+
+def test_sketch_hole_params_with_all_fields():
+    p = SketchHoleParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        base_object_name="Box1",
+        base_subname="Face2",
+        diameter=8.0,
+        depth=6.0,
+        hole_name="MyHole",
+        workspace="/tmp/ws",
+    )
+    assert p.hole_name == "MyHole"
+    assert p.diameter == 8.0
+    assert p.depth == 6.0
     assert p.workspace == "/tmp/ws"

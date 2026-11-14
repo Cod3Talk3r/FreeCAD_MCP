@@ -470,6 +470,19 @@ class _FakePocket:
         self.Shape: object = _FakeShape()
 
 
+class _FakeHole:
+    """Minimal stand-in for a PartDesign::Hole."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::Hole"
+        self.Profile: object = None
+        self.Diameter: float = 0.0
+        self.Depth: float = 0.0
+        self.Shape: object = _FakeShape()
+
+
 class _FakeRevolution:
     """Minimal stand-in for a PartDesign::Revolution."""
 
@@ -686,6 +699,8 @@ class _FakeDoc:
             obj: object = _FakeLinearPattern(name)
         elif type_id == "PartDesign::PolarPattern":
             obj: object = _FakePolarPattern(name)
+        elif type_id == "PartDesign::Hole":
+            obj: object = _FakeHole(name)
         elif type_id == "PartDesign::Mirrored":
             obj: object = _FakeMirrored(name)
         elif type_id == "PartDesign::Thickness":
@@ -9100,7 +9115,7 @@ def test_sketch_pad_profile_wire1(
 
     assert result["ok"] is True
     assert result["op"] == "sketch_pad"
-    assert result["result"]["profile_name"] == "Wire1"
+    assert result["result"]["profile_name"] == "Sketch1#Wire1"
     pad = doc.objects["Pad"]
     assert pad.Profile == (sketch, ["Wire1"])
     assert pad.Length == 10.0
@@ -9132,7 +9147,7 @@ def test_sketch_pad_profile_wire2(
 
     assert result["ok"] is True
     assert result["op"] == "sketch_pad"
-    assert result["result"]["profile_name"] == "Wire2"
+    assert result["result"]["profile_name"] == "Sketch1#Wire2"
     pad = doc.objects["Pad"]
     assert pad.Profile == (sketch, ["Wire2"])
 
@@ -9230,7 +9245,7 @@ def test_sketch_pocket_profile_wire1(
 
     assert result["ok"] is True
     assert result["op"] == "sketch_pocket"
-    assert result["result"]["profile_name"] == "Wire1"
+    assert result["result"]["profile_name"] == "Sketch1#Wire1"
     pocket = doc.objects["Pocket"]
     assert pocket.Profile == (sketch, ["Wire1"])
     assert pocket.Length == 5.0
@@ -13102,6 +13117,484 @@ def test_handle_request_dispatches_sketch_subtractive_loft(
     assert response["ok"] is True
     assert response["op"] == "sketch_subtractive_loft"
     assert response["result"]["loft_name"] == "Loft1"
+    assert response["result"]["solids_count"] == 1
+    assert response["result"]["volume"] == 100.0
+
+
+def test_sketch_hole_successful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_hole"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["hole_name"] == "Hole1"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["base_object_name"] == "Box1"
+    assert result["result"]["base_subname"] == "Face1"
+    assert result["result"]["diameter"] == 5.0
+    assert result["result"]["depth"] == 10.0
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    hole = doc.objects["Hole1"]
+    assert hole.Diameter == 5.0
+    assert hole.Depth == 10.0
+    assert body.Tip is hole
+
+
+def test_sketch_hole_with_diameter_and_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face2",
+            "diameter": 8.0,
+            "depth": 6.0,
+            "hole_name": "Hole1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["diameter"] == 8.0
+    assert result["result"]["depth"] == 6.0
+
+    hole = doc.objects["Hole1"]
+    assert hole.Diameter == 8.0
+    assert hole.Depth == 6.0
+
+
+def test_sketch_hole_missing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NoSuchBody",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_hole_wrong_body_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "NotABody")
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NotABody",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+    assert "not 'PartDesign::Body'" in result["error"]
+
+
+def test_sketch_hole_body_without_valid_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = None  # No base solid
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+    assert "no tip" in result["error"].lower()
+
+
+def test_sketch_hole_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NoSuchSketch",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_hole_wrong_sketch_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "NotASketch")
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NotASketch",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_hole_sketch_added_to_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sketch not in Body is added to Body.Group automatically (like sketch_pad)."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch1 is NOT added to body.Group initially.
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_hole"
+    assert result["result"]["hole_name"] == "Hole1"
+    # Verify sketch was added to Body.Group.
+    assert sketch in list(getattr(body, "Group", []) or [])
+
+
+def test_sketch_hole_invalid_diameter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    for bad_value in (0.0, -5.0, "not_a_number"):
+        params = {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": bad_value,
+            "depth": 10.0,
+        }
+        result = runner._op_sketch_hole(params)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_hole"
+
+
+def test_sketch_hole_invalid_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": -2.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+
+
+def test_sketch_hole_name_clash_auto_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    # Pre-create a Hole1 to force auto-suffixing.
+    doc.addObject("PartDesign::Hole", "Hole1")
+
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["hole_name"] == "Hole1_1"
+    assert doc.getObject("Hole1_1") is not None
+
+
+def test_sketch_hole_invalid_document_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    result = runner._op_sketch_hole(
+        {
+            "document_id": "../evil",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "base_object_name": "Box1",
+            "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_hole"
+
+
+def test_sketch_hole_empty_required_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    base_params = {
+        "document_id": "edit",
+        "workspace": str(tmp_path),
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "base_object_name": "Box1",
+        "base_subname": "Face1",
+            "diameter": 5.0,
+            "depth": 10.0,
+            "hole_name": "Hole1",
+        "hole_name": "Hole1",
+    }
+    for missing in ("body_name", "sketch_name", "base_object_name", "base_subname", "hole_name"):
+        params = dict(base_params)
+        params[missing] = ""
+        result = runner._op_sketch_hole(params)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_hole"
+        assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_hole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_hole",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "body_name": "Body",
+                "sketch_name": "Sketch1",
+                "base_object_name": "Box1",
+                "base_subname": "Face1",
+                "diameter": 5.0,
+                "depth": 10.0,
+                "hole_name": "Hole1",
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_hole"
+    assert response["result"]["hole_name"] == "Hole1"
     assert response["result"]["solids_count"] == 1
     assert response["result"]["volume"] == 100.0
 
