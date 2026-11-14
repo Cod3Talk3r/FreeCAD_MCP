@@ -500,6 +500,18 @@ class _FakeAdditivePipe:
         self.Shape: object = _FakeShape()
 
 
+class _FakeSubtractivePipe:
+    """Minimal stand-in for a PartDesign::SubtractivePipe."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::SubtractivePipe"
+        self.Profile: object = None
+        self.Spine: object = None
+        self.Shape: object = _FakeShape()
+
+
 class _FakeAdditiveLoft:
     """Minimal stand-in for a PartDesign::AdditiveLoft."""
 
@@ -634,6 +646,8 @@ class _FakeDoc:
             obj: object = _FakeGroove(name)
         elif type_id == "PartDesign::AdditivePipe":
             obj: object = _FakeAdditivePipe(name)
+        elif type_id == "PartDesign::SubtractivePipe":
+            obj: object = _FakeSubtractivePipe(name)
         elif type_id == "PartDesign::AdditiveLoft":
             obj: object = _FakeAdditiveLoft(name)
         elif type_id == "PartDesign::Fillet":
@@ -11241,6 +11255,485 @@ def test_handle_request_dispatches_sketch_additive_pipe(
 
     assert response["ok"] is True
     assert response["op"] == "sketch_additive_pipe"
+    assert response["result"]["pipe_name"] == "Pipe1"
+    assert response["result"]["solids_count"] == 1
+    assert response["result"]["volume"] == 100.0
+
+
+def test_sketch_subtractive_pipe_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "pipe_name": "Pipe1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["pipe_name"] == "Pipe1"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["spine_object_name"] == "SpineWire"
+    assert result["result"]["spine_subname"] is None
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    pipe = doc.objects["Pipe1"]
+    assert pipe.Profile is sketch
+    assert pipe.Spine is spine
+    assert body.Tip is pipe
+
+
+def test_sketch_subtractive_pipe_with_spine_subname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "spine_subname": "Edge1",
+            "pipe_name": "Pipe1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["spine_subname"] == "Edge1"
+    pipe = doc.objects["Pipe1"]
+    assert pipe.Spine == (spine, ["Edge1"])
+
+
+def test_sketch_subtractive_pipe_missing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NoSuchBody",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_wrong_body_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "NotABody")
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NotABody",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "not 'PartDesign::Body'" in result["error"]
+
+
+def test_sketch_subtractive_pipe_body_without_valid_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = None  # No base solid
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "no tip" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_missing_sketch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NoSuchSketch",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_wrong_sketch_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "NotASketch")
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NotASketch",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_subtractive_pipe_sketch_not_member_of_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch1 is NOT added to body.Group -> ownership mismatch.
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "not a member" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_missing_spine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "NoSuchSpine",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_spine_without_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Spine object with no Shape attribute.
+    spine = doc.addObject("Part::Feature", "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "no shape" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_spine_without_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+    # Remove edges -> spine has no wire/edge.
+    spine.Shape.Edges = []
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "no edges" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_invalid_spine_subname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "spine_subname": "Edge999",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+    assert "does not match any edge" in result["error"].lower()
+
+
+def test_sketch_subtractive_pipe_name_clash_auto_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+    # Pre-create a Pipe1 to force auto-suffixing.
+    doc.addObject("PartDesign::SubtractivePipe", "Pipe1")
+
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "pipe_name": "Pipe1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["pipe_name"] == "Pipe1_1"
+    assert doc.getObject("Pipe1_1") is not None
+
+
+def test_sketch_subtractive_pipe_invalid_document_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    result = runner._op_sketch_subtractive_pipe(
+        {
+            "document_id": "../evil",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_pipe"
+
+
+def test_sketch_subtractive_pipe_empty_required_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    for missing in ("body_name", "sketch_name", "spine_object_name", "pipe_name"):
+        params = {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "SpineWire",
+            "pipe_name": "Pipe1",
+        }
+        params[missing] = ""
+        result = runner._op_sketch_subtractive_pipe(params)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_subtractive_pipe"
+        assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_subtractive_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    spine = _make_spine_feature(doc, "SpineWire")
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_subtractive_pipe",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "body_name": "Body",
+                "sketch_name": "Sketch1",
+                "spine_object_name": "SpineWire",
+                "pipe_name": "Pipe1",
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_subtractive_pipe"
     assert response["result"]["pipe_name"] == "Pipe1"
     assert response["result"]["solids_count"] == 1
     assert response["result"]["volume"] == 100.0

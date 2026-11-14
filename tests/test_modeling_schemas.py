@@ -25,6 +25,7 @@ from freecad_mcp.tools.modeling import (
     SketchAddTriangleParams,
     SketchAttachSupportParams,
     SketchAttachSupportResult,
+    SketchSubtractivePipeParams,
     SketchAddExternalGeometryParams,
     SketchAddExternalGeometryResult,
     SketchDeleteConstraintParams,
@@ -694,3 +695,33 @@ def test_sketch_add_external_geometry_params_with_flags():
     )
     assert p.defining is True
     assert p.intersection is True
+
+
+def test_sketch_subtractive_pipe_params_valid():
+    """SketchSubtractivePipeParams should be accepted."""
+    p = SketchSubtractivePipeParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        spine_object_name="SpineWire",
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.spine_object_name == "SpineWire"
+    assert p.body_name == "Body"
+    assert p.pipe_name == "SubtractivePipe"
+    assert p.spine_subname is None
+    assert p.workspace is None
+
+
+def test_sketch_subtractive_pipe_params_with_all_fields():
+    p = SketchSubtractivePipeParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        spine_object_name="SpineWire",
+        spine_subname="Edge1",
+        pipe_name="MyPipe",
+        workspace="/tmp/ws",
+    )
+    assert p.pipe_name == "MyPipe"
+    assert p.spine_subname == "Edge1"
+    assert p.workspace == "/tmp/ws"

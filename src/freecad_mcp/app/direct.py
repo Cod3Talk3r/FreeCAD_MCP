@@ -467,6 +467,18 @@ def validate_direct_request(op: str, params: Any) -> None:
         spine_subname = params.get("spine_subname")
         if spine_subname is not None and not isinstance(spine_subname, str):
             raise ValueError("spine_subname must be a string when provided.")
+    elif op == "sketch_subtractive_pipe":
+        if not params.get("body_name", "").strip():
+            raise ValueError("body_name must not be empty.")
+        if not params.get("sketch_name", "").strip():
+            raise ValueError("sketch_name must not be empty.")
+        if not params.get("spine_object_name", "").strip():
+            raise ValueError("spine_object_name must not be empty.")
+        if not params.get("pipe_name", "").strip():
+            raise ValueError("pipe_name must not be empty.")
+        spine_subname = params.get("spine_subname")
+        if spine_subname is not None and not isinstance(spine_subname, str):
+            raise ValueError("spine_subname must be a string when provided.")
     elif op == "sketch_additive_loft":
         if not params.get("body_name", "").strip():
             raise ValueError("body_name must not be empty.")

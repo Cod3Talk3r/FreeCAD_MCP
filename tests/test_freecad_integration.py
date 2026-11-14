@@ -6776,3 +6776,155 @@ def test_real_freecad_sketch_additive_loft_invalid_sections(tmp_path: Path) -> N
     after = bridge.run("list_objects", {**params})["objects"]
     after_names = [obj["name"] for obj in after]
     assert after_names == before_names
+
+
+def _assert_subtractive_pipe_tree(saved_path: str, document_id: str, pipe_name: str = "Pipe") -> None:
+    """Verify the SubtractivePipe in the reopened document: valid solid, Body.Tip, group membership."""
+    path = str(saved_path)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+doc.recompute()
+body = doc.getObject('Body')
+sketch = doc.getObject('Sketch1')
+pipe = doc.getObject({pipe_name!r})
+spine = doc.getObject('SpineWire')
+assert all(obj is not None for obj in (body, sketch, pipe, spine))
+assert pipe.TypeId == 'PartDesign::SubtractivePipe'
+assert pipe in body.Group
+assert sketch in body.Group
+names = [obj.Name for obj in body.Group]
+assert {pipe_name!r} in names
+assert 'Sketch1' in names
+assert 'Pad' in names
+shape = pipe.Shape
+assert shape is not None
+assert not shape.isNull()
+assert shape.isValid()
+solids = list(shape.Solids or [])
+assert len(solids) >= 1
+assert shape.Volume > 0
+assert pipe.Profile is not None
+assert pipe.Profile[0].Name == "Sketch1"
+assert body.Tip == pipe
+print("SUBTRACTIVE_PIPE_TREE_OK")
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "SUBTRACTIVE_PIPE_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_sketch_subtractive_pipe_valid_creation(tmp_path: Path) -> None:
+    """Create a SubtractivePipe from a rectangle sketch and spine wire; verify valid solid, volume, Tip."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sksubpipevalid", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    pad_result = bridge.run("sketch_pad", {
+        **params, "sketch_name": "Sketch1", "length": 30.0,
+    })
+    assert pad_result["solids_count"] == 1
+    assert pad_result["volume"] > 0
+
+    # Create the spine wire object (outside Body.Group).
+    _make_spine_object(saved_path, "sksubpipevalid")
+
+    result = bridge.run("sketch_subtractive_pipe", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "spine_object_name": "SpineWire",
+        "pipe_name": "Pipe1",
+    })
+    assert result["body_name"] == "Body"
+    assert result["pipe_name"] == "Pipe1"
+    assert result["profile_name"] == "Sketch1"
+    assert result["spine_object_name"] == "SpineWire"
+    assert result["spine_subname"] is None
+    assert result["solids_count"] >= 1
+    assert result["volume"] is not None
+    assert result["volume"] > 0
+
+    _assert_subtractive_pipe_tree(saved_path, "sksubpipevalid", "Pipe1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_subtractive_pipe_save_reopen(tmp_path: Path) -> None:
+    """SubtractivePipe persists after save/reopen: valid shape, Tip preserved."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sksubpipereopen", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 30.0})
+    _make_spine_object(saved_path, "sksubpipereopen")
+
+    bridge.run("sketch_subtractive_pipe", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "spine_object_name": "SpineWire",
+        "pipe_name": "Pipe1",
+    })
+
+    # list_objects reopens from disk, proving persistence.
+    objects = bridge.run(
+        "list_objects", {**params}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Pipe1" in names
+    assert "Pad" in names
+    assert "Sketch1" in names
+
+    _assert_subtractive_pipe_tree(saved_path, "sksubpipereopen", "Pipe1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_subtractive_pipe_invalid_spine(tmp_path: Path) -> None:
+    """Missing or invalid spine returns structured error; document unchanged (rollback)."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sksubpipeerr", "workspace": workspace}
+
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 30.0})
+
+    before = bridge.run("list_objects", {**params})["objects"]
+    before_names = [obj["name"] for obj in before]
+
+    # Missing spine object.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_subtractive_pipe", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "spine_object_name": "NoSuchSpine",
+            "pipe_name": "Pipe1",
+        })
+    assert "not found" in str(excinfo.value).lower()
+
+    # Document unchanged after error.
+    after = bridge.run("list_objects", {**params})["objects"]
+    after_names = [obj["name"] for obj in after]
+    assert after_names == before_names
