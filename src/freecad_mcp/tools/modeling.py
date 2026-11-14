@@ -783,6 +783,49 @@ class SketchAdditiveLoftResult(BaseModel):
     meta_before: dict[str, Any] = Field(
         description="Document metadata snapshot before the operation."
     )
+
+
+class SketchSubtractiveLoftParams(BaseModel):
+    """Parameters for creating a PartDesign::SubtractiveLoft from an existing sketch profile and sections."""
+
+    document_id: str = Field(description="Existing document containing the Body, sketch, and sections.")
+    body_name: str = Field(
+        default="Body", description="Name of the PartDesign::Body that owns the sketch and will own the Loft."
+    )
+    sketch_name: str = Field(description="Name of the Sketcher::SketchObject to use as the Loft profile.")
+    section_names: list[str] = Field(
+        description="Names of existing Sketcher::SketchObjects to use as the Loft sections."
+    )
+    loft_name: str = Field(
+        default="SubtractiveLoft", description="Name for the new PartDesign::SubtractiveLoft object."
+    )
+    ruled: bool = Field(default=False, description="Whether the Loft uses ruled surfaces between sections.")
+    closed: bool = Field(default=False, description="Whether the Loft closes into a closed solid.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class SketchSubtractiveLoftResult(BaseModel):
+    """Result of sketch_subtractive_loft."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    body_name: str = Field(description="Name of the PartDesign::Body containing the Loft.")
+    loft_name: str = Field(description="Name of the created PartDesign::SubtractiveLoft.")
+    profile_name: str = Field(description="Name of the sketch used as the profile.")
+    section_names: list[str] = Field(description="Names of the sketches used as the sections.")
+    ruled: bool = Field(description="Whether ruled surfaces were used between sections.")
+    closed: bool = Field(description="Whether the Loft closes into a closed solid.")
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the resulting solid in cubic millimetres, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the resulting solid, if available."
+    )
+    solids_count: int = Field(description="Number of solids in the resulting shape.")
+    meta_before: dict[str, Any] = Field(
+        description="Document metadata snapshot before the operation."
+    )
     """Result of partdesign_fillet."""
 
     document_id: str = Field(description="Validated document identifier.")
@@ -4237,6 +4280,56 @@ def _register_tools(server: Any, settings: Settings) -> None:
         result = _run_bridge_op(bridge, "sketch_additive_loft", bridge_params)
 
         return SketchAdditiveLoftResult(
+            document_id=params.document_id,
+            body_name=result.get("body_name", params.body_name),
+            loft_name=result.get("loft_name", params.loft_name),
+            profile_name=result.get("profile_name", params.sketch_name),
+            section_names=result.get("section_names", params.section_names),
+            ruled=result.get("ruled", params.ruled),
+            closed=result.get("closed", params.closed),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            solids_count=result.get("solids_count", 0),
+            meta_before=result.get("meta_before", {}),
+        )
+
+    # ------------------------------------------------------------------
+    # sketch_subtractive_loft
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="sketch_subtractive_loft",
+        title="Create a PartDesign SubtractiveLoft from a sketch profile and sections",
+        description=(
+            "Create a native PartDesign::SubtractiveLoft that lofts an existing "
+            "Sketcher::SketchObject profile through existing section sketches, "
+            "subtracting material from the Body's current Tip.  The target "
+            "PartDesign::Body must already exist and its Tip must be a valid "
+            "solid (e.g. a Pad).  The profile sketch and all section sketches "
+            "must already be members of the specified Body; ownership is not "
+            "silently changed.  *ruled* and *closed* control the loft surface "
+            "type and closure.  The document is recomputed, saved atomically, "
+            "and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def sketch_subtractive_loft_tool(params: SketchSubtractiveLoftParams) -> SketchSubtractiveLoftResult:
+        """Create a PartDesign SubtractiveLoft from a sketch profile and sections and return its info."""
+        validate_direct_request("sketch_subtractive_loft", params.model_dump())
+
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "body_name": params.body_name,
+            "sketch_name": params.sketch_name,
+            "section_names": params.section_names,
+            "loft_name": params.loft_name,
+            "ruled": params.ruled,
+            "closed": params.closed,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "sketch_subtractive_loft", bridge_params)
+
+        return SketchSubtractiveLoftResult(
             document_id=params.document_id,
             body_name=result.get("body_name", params.body_name),
             loft_name=result.get("loft_name", params.loft_name),

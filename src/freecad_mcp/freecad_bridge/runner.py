@@ -86,6 +86,7 @@ OP_SKETCH_GROOVE = "sketch_groove"
 OP_SKETCH_ADDITIVE_PIPE = "sketch_additive_pipe"
 OP_SKETCH_SUBTRACTIVE_PIPE = "sketch_subtractive_pipe"
 OP_SKETCH_ADDITIVE_LOFT = "sketch_additive_loft"
+OP_SKETCH_SUBTRACTIVE_LOFT = "sketch_subtractive_loft"
 OP_SKETCH_ATTACH_SUPPORT = "sketch_attach_support"
 OP_SKETCH_ADD_EXTERNAL_GEOMETRY = "sketch_add_external_geometry"
 OP_DELETE_OBJECT = "delete_object"
@@ -8155,10 +8156,31 @@ def _find_body_containing(doc: Any, obj: Any) -> Any:
     return None
 
 
-def _subname_matches(sub_objects: Any, subname: str) -> bool:
-    """Best-effort check that subname names an existing subelement."""
+def _shape_has_subelement(shape: Any, subname: str, expected_type: str) -> bool:
+    """True if shape resolves subname to a non-null subshape of expected_type.
+
+    FreeCAD resolves subelement names via Shape.getElement(name); topological
+    subshapes themselves do not expose a .Name attribute. Falls back to .Name
+    iteration for mocks/tests that model subshapes with names.
+    """
+    if not shape or not subname:
+        return False
+    get_element = getattr(shape, "getElement", None)
+    if callable(get_element):
+        try:
+            element = get_element(subname)
+        except Exception:
+            element = None
+        if element is not None:
+            try:
+                if getattr(element, "isNull", lambda: False)():
+                    return False
+            except Exception:
+                pass
+            return getattr(element, "ShapeType", expected_type) == expected_type
+    # Fallback for mocks that model subshapes with .Name attributes.
     try:
-        for sub in list(sub_objects) or []:
+        for sub in list(getattr(shape, expected_type + "s", []) or []):
             if getattr(sub, "Name", None) == subname:
                 return True
     except Exception:
@@ -8243,8 +8265,7 @@ def _op_sketch_attach_support(params: dict[str, Any]) -> dict[str, Any]:
             return _fail(f"support object '{support_object_name}' not found")
 
         shape = getattr(support, "Shape", None)
-        faces = getattr(shape, "Faces", None) if shape is not None else None
-        if faces is None or not _subname_matches(faces, support_subname):
+        if shape is None or not _shape_has_subelement(shape, support_subname, "Face"):
             return _fail(
                 f"support subelement '{support_subname}' is not a face of "
                 f"object '{support_object_name}'."
@@ -8279,11 +8300,19 @@ def _op_sketch_attach_support(params: dict[str, Any]) -> dict[str, Any]:
         map_mode_readback = getattr(sketch, "MapMode", None)
     except Exception:
         map_mode_readback = None
-    placement: Any = None
+    placement_info: Any = None
     try:
         placement = getattr(sketch, "Placement", None)
+        if placement is not None:
+            base = getattr(placement, "Base", None)
+            if base is not None:
+                placement_info = {
+                    "x": float(base.x),
+                    "y": float(base.y),
+                    "z": float(base.z),
+                }
     except Exception:
-        placement = None
+        placement_info = None
     fully_constrained: Any = None
     try:
         fc_val = getattr(sketch, "FullyConstrained", None)
@@ -8320,7 +8349,7 @@ def _op_sketch_attach_support(params: dict[str, Any]) -> dict[str, Any]:
             "map_mode": map_mode,
             "attachment_support": attachment_support_readback,
             "map_mode_readback": map_mode_readback,
-            "placement": placement,
+            "placement": placement_info,
             "fully_constrained": fully_constrained,
             "degrees_of_freedom": degrees_of_freedom,
             "meta_before": meta_before,
@@ -8412,8 +8441,7 @@ def _op_sketch_add_external_geometry(params: dict[str, Any]) -> dict[str, Any]:
             return _fail(f"source object '{source_object_name}' not found")
 
         shape = getattr(source, "Shape", None)
-        edges = getattr(shape, "Edges", None) if shape is not None else None
-        if edges is None or not _subname_matches(edges, source_subname):
+        if shape is None or not _shape_has_subelement(shape, source_subname, "Edge"):
             return _fail(
                 f"source subelement '{source_subname}' is not an edge of "
                 f"object '{source_object_name}'."
@@ -8465,6 +8493,14 @@ def _op_sketch_add_external_geometry(params: dict[str, Any]) -> dict[str, Any]:
     placement: Any = None
     try:
         placement = getattr(sketch, "Placement", None)
+        if placement is not None:
+            base = getattr(placement, "Base", None)
+            if base is not None:
+                placement = {
+                    "x": float(base.x),
+                    "y": float(base.y),
+                    "z": float(base.z),
+                }
     except Exception:
         placement = None
 
@@ -10040,6 +10076,335 @@ def _op_sketch_additive_loft(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "op": "sketch_additive_loft",
+        "result": {
+            "document_id": normalized,
+            "body_name": body_name_used,
+            "loft_name": desired_loft_name,
+            "profile_name": sketch_name,
+            "section_names": section_names,
+            "ruled": ruled,
+            "closed": closed,
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "solids_count": len(solids),
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_sketch_subtractive_loft(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native PartDesign::SubtractiveLoft from an existing sketch profile and sections.
+
+    Uses a native ``PartDesign::Body`` and ``PartDesign::SubtractiveLoft``.  The
+    target Body must already exist and its Tip must be a valid solid
+    (e.g. a Pad).  The profile sketch and all section sketches must already
+    exist and already be members of the specified Body.  Ownership is never
+    silently changed.
+
+    The Loft profile is set to the existing sketch, and the sections are set
+    to the existing list of sketches.  ``Ruled`` and ``Closed`` are applied
+    as requested.  After recompute, the resulting Loft shape is validated
+    (non-null solid with at least one solid).  The document is locked,
+    recomputed, saved atomically, and its revision is bumped.
+
+    On any failure before the atomic save, the lock is released and the
+    on-disk document is left unmodified (rollback via the established
+    save-on-success pattern).
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    body_name_raw = params.get("body_name", "Body")
+    sketch_name_raw = params.get("sketch_name", "")
+    section_names_raw = params.get("section_names") or []
+    loft_name_raw = params.get("loft_name", "SubtractiveLoft")
+    ruled = params.get("ruled", False)
+    closed = params.get("closed", False)
+    workspace_str = params.get("workspace") or ""
+
+    # Validate document_id.
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "sketch_subtractive_loft", "error": str(exc)}
+
+    # Validate required names: reject empty strings, apply defaults only when
+    # the key is absent (not when it is explicitly empty).
+    if not str(body_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "body_name must not be empty.",
+        }
+    body_name = str(body_name_raw)
+
+    if not str(sketch_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "sketch_name must not be empty.",
+        }
+    sketch_name = str(sketch_name_raw)
+
+    if not isinstance(section_names_raw, list) or not section_names_raw:
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "section_names must be a non-empty list of existing sketch names.",
+        }
+    section_names = [str(s).strip() for s in section_names_raw]
+    if not section_names:
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "section_names must be a non-empty list of existing sketch names.",
+        }
+
+    if not str(loft_name_raw).strip():
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "loft_name must not be empty.",
+        }
+    loft_name = str(loft_name_raw)
+
+    # Validate boolean parameters strictly.
+    if not isinstance(ruled, bool):
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "ruled must be a boolean.",
+        }
+    if not isinstance(closed, bool):
+        return {
+            "ok": False,
+            "op": "sketch_subtractive_loft",
+            "error": "closed must be a boolean.",
+        }
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "sketch_subtractive_loft", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "sketch_subtractive_loft", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "sketch_subtractive_loft", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD runtime
+        import PartDesign  # noqa: F401,PLC0415 - register PartDesign types with FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        # Require an existing PartDesign::Body with a valid, non-null solid Tip.
+        body = doc.getObject(body_name)
+        if body is None:
+            return _fail(f"body '{body_name}' not found")
+        if getattr(body, "TypeId", "") != "PartDesign::Body":
+            return _fail(
+                f"object '{body_name}' is type '{getattr(body, 'TypeId', '?')}', not 'PartDesign::Body'; "
+                f"cannot create a SubtractiveLoft."
+            )
+        body_name_used = getattr(body, "Name", body_name)
+
+        tip = getattr(body, "Tip", None)
+        if tip is None:
+            return _fail(
+                f"Body '{body_name_used}' has no Tip.  A SubtractiveLoft requires a valid base solid.  "
+                f"Create a Pad or other base solid before adding a Loft."
+            )
+        tip_shape = getattr(tip, "Shape", None)
+        if tip_shape is None or getattr(tip_shape, "isNull", lambda: False)() or not bool(tip_shape.isValid()):
+            return _fail(
+                f"Body '{body_name_used}' Tip '{getattr(tip, 'Name', '?')}' has no valid base solid.  "
+                f"Create a Pad or other base solid before adding a Loft."
+            )
+
+        # Require an existing Sketcher::SketchObject Profile that is already
+        # a member of the specified Body.  Do not silently change ownership.
+        sketch = doc.getObject(sketch_name)
+        if sketch is None:
+            return _fail(f"sketch '{sketch_name}' not found")
+        if getattr(sketch, "TypeId", "") != "Sketcher::SketchObject":
+            return _fail(
+                f"object '{sketch_name}' is type '{getattr(sketch, 'TypeId', '?')}', not 'Sketcher::SketchObject'; "
+                f"cannot create a SubtractiveLoft from it."
+            )
+        body_members = list(getattr(body, "Group", []) or [])
+        if sketch not in body_members and sketch not in list(getattr(body, "outList", []) or []):
+            return _fail(
+                f"sketch '{sketch_name}' is not a member of Body '{body_name_used}'.  "
+                f"Add the sketch to the Body first (e.g. via sketch_pad) or choose "
+                f"the Body that already contains it."
+            )
+
+        # Require a non-empty list of Sections.  Every section must exist,
+        # be a Sketcher::SketchObject, belong to the same Body, be unique,
+        # and not duplicate the Profile.
+        section_objs: list[Any] = []
+        seen_section_names: set[str] = set()
+        for section_name in section_names:
+            section_obj = doc.getObject(section_name)
+            if section_obj is None:
+                return _fail(f"section '{section_name}' not found")
+            if getattr(section_obj, "TypeId", "") != "Sketcher::SketchObject":
+                return _fail(
+                    f"section '{section_name}' is type '{getattr(section_obj, 'TypeId', '?')}', "
+                    f"not 'Sketcher::SketchObject'; cannot use it as a SubtractiveLoft section."
+                )
+            if section_name in seen_section_names:
+                return _fail(
+                    f"section '{section_name}' appears more than once in section_names."
+                )
+            seen_section_names.add(section_name)
+            if section_name == sketch_name:
+                return _fail(
+                    f"section '{section_name}' duplicates the Profile sketch; "
+                    f"a section cannot be reused as the profile."
+                )
+            if section_obj not in body_members and section_obj not in list(getattr(body, "outList", []) or []):
+                return _fail(
+                    f"section '{section_name}' is not a member of Body '{body_name_used}'.  "
+                    f"Add the section to the Body first or choose "
+                    f"the Body that already contains it."
+                )
+            section_objs.append(section_obj)
+
+        # Create the SubtractiveLoft.  Avoid name clashes.
+        counter = 0
+        desired_loft_name = loft_name
+        while doc.getObject(desired_loft_name) is not None:
+            counter += 1
+            desired_loft_name = f"{loft_name}_{counter}"
+        try:
+            loft = doc.addObject("PartDesign::SubtractiveLoft", desired_loft_name)
+            body.addObject(loft)
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not create a PartDesign::SubtractiveLoft: {exc}.  Ensure the PartDesign "
+                f"workbench is available."
+            )
+
+        # Set the Loft profile to the existing sketch.
+        try:
+            loft.Profile = sketch
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Loft profile: {exc}.  The sketch may not contain "
+                f"a valid closed profile."
+            )
+
+        # Set the Loft sections to the existing sketches.
+        try:
+            loft.Sections = section_objs
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set the Loft sections: {exc}."
+            )
+
+        # Set Ruled and Closed.
+        try:
+            loft.Ruled = ruled
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Ruled on the Loft: {exc}."
+            )
+        try:
+            loft.Closed = closed
+        except Exception as exc:
+            return _fail(
+                f"FreeCAD could not set Closed on the Loft: {exc}."
+            )
+
+        # Recompute the document so FreeCAD evaluates the Loft feature tree.
+        doc.recompute()
+
+        # Validate the resulting Loft: it must have a valid, non-null solid shape.
+        shape = getattr(loft, "Shape", None)
+        if shape is None:
+            return _fail(
+                f"SubtractiveLoft '{desired_loft_name}' produced no shape.  The sketch profile may be "
+                f"open, malformed, or degenerate, or the sections may be invalid."
+            )
+        try:
+            if getattr(shape, "isNull", lambda: False)():
+                return _fail(
+                    f"SubtractiveLoft '{desired_loft_name}' produced a NULL shape.  The sections "
+                    f"reference was accepted but did not resolve to a valid loft path."
+                )
+            if not bool(shape.isValid()):
+                return _fail(
+                    f"SubtractiveLoft '{desired_loft_name}' produced an invalid shape."
+                )
+        except Exception as exc:
+            return _fail(
+                f"SubtractiveLoft '{desired_loft_name}' shape validation failed: {exc}"
+            )
+
+        # Check that the shape contains at least one solid.
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        if not solids:
+            return _fail(
+                f"SubtractiveLoft '{desired_loft_name}' produced no solid.  The sketch profile or "
+                f"sections configuration may not produce a valid solid."
+            )
+
+        # Verify Body.Tip advanced to the new Loft.
+        new_tip = getattr(body, "Tip", None)
+        if new_tip is None or getattr(new_tip, "Name", None) != desired_loft_name:
+            return _fail(
+                f"Body '{body_name_used}' Tip did not advance to the new SubtractiveLoft "
+                f"'{desired_loft_name}' after recompute."
+            )
+
+        # Get shape info for the result.
+        try:
+            volume = float(shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "sketch_subtractive_loft",
         "result": {
             "document_id": normalized,
             "body_name": body_name_used,
@@ -12289,6 +12654,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SKETCH_ADDITIVE_PIPE: _op_sketch_additive_pipe,
     OP_SKETCH_SUBTRACTIVE_PIPE: _op_sketch_subtractive_pipe,
     OP_SKETCH_ADDITIVE_LOFT: _op_sketch_additive_loft,
+    OP_SKETCH_SUBTRACTIVE_LOFT: _op_sketch_subtractive_loft,
     OP_SKETCH_ATTACH_SUPPORT: _op_sketch_attach_support,
     OP_SKETCH_ADD_EXTERNAL_GEOMETRY: _op_sketch_add_external_geometry,
     OP_DELETE_OBJECT: _op_delete_object,

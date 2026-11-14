@@ -6778,6 +6778,243 @@ def test_real_freecad_sketch_additive_loft_invalid_sections(tmp_path: Path) -> N
     assert after_names == before_names
 
 
+def _assert_subtractive_loft_tree(saved_path: str, document_id: str, loft_name: str = "Loft") -> None:
+    """Verify the SubtractiveLoft in the reopened document: valid solid, Body.Tip, group membership."""
+    path = str(saved_path)
+    code = f"""
+import FreeCAD as App
+import PartDesign
+doc = App.openDocument({path!r})
+doc.recompute()
+body = doc.getObject('Body')
+sketch1 = doc.getObject('Sketch1')
+sketch2 = doc.getObject('Sketch2')
+loft = doc.getObject({loft_name!r})
+assert all(obj is not None for obj in (body, sketch1, sketch2, loft))
+assert loft.TypeId == 'PartDesign::SubtractiveLoft'
+assert loft in body.Group
+assert sketch1 in body.Group
+assert sketch2 in body.Group
+names = [obj.Name for obj in body.Group]
+assert {loft_name!r} in names
+assert 'Sketch1' in names
+assert 'Sketch2' in names
+assert 'Pad' in names
+shape = loft.Shape
+assert shape is not None
+assert not shape.isNull()
+assert shape.isValid()
+solids = list(shape.Solids or [])
+assert len(solids) >= 1
+assert shape.Volume > 0
+assert loft.Profile is not None
+assert loft.Profile[0].Name == "Sketch1"
+assert body.Tip == loft
+print("SUBTRACTIVE_LOFT_TREE_OK")
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0 and "SUBTRACTIVE_LOFT_TREE_OK" in process.stdout, process.stdout + process.stderr
+
+
+@requires_freecad
+def test_real_freecad_sketch_subtractive_loft_valid_creation(tmp_path: Path) -> None:
+    """Create a SubtractiveLoft from a profile sketch and section; verify valid solid, volume, Tip.
+
+    The profile sketch (Sketch1) is attached to a side face (Face1) of the pad
+    via sketch_attach_support, so its plane sits at a different Z than the
+    section sketch (Sketch2) at default Z=0. FreeCAD 1.1.4's SubtractiveLoft
+    requires non-coplanar profile/section to produce a valid cutting volume.
+    The profile (16x16) is smaller than the pad base (20x20) so the cut does
+    not remove everything. Both sketches are padded so they are Body members.
+    """
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sksubloftvalid", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+
+    # Base sketch: 20x20 pad -> 20x20x30 solid
+    bridge.run("create_sketch", {**params, "sketch_name": "SketchBase"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "SketchBase", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    pad_result = bridge.run("sketch_pad", {
+        **params, "sketch_name": "SketchBase", "length": 30.0,
+    })
+    assert pad_result["solids_count"] == 1
+    assert pad_result["volume"] > 0
+
+    # Profile sketch: 16x16 rectangle attached to a side face of the pad
+    # (Face1, center Z=15), so it is not coplanar with the section sketch.
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 2.0, "y": 2.0,
+        "width": 16.0, "height": 16.0,
+    })
+    bridge.run("sketch_attach_support", {
+        **params,
+        "sketch_name": "Sketch1",
+        "support_object_name": "Pad",
+        "support_subname": "Face1",
+        "map_mode": "FlatFace",
+    })
+    bridge.run("sketch_pad", {
+        **params, "sketch_name": "Sketch1", "length": 10.0,
+    })
+
+    # Section sketch: 12x12 rectangle at default Z=0, smaller than the profile
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch2"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch2", "x": 4.0, "y": 4.0,
+        "width": 12.0, "height": 12.0,
+    })
+    bridge.run("sketch_pad", {
+        **params, "sketch_name": "Sketch2", "length": 10.0,
+    })
+
+    result = bridge.run("sketch_subtractive_loft", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "section_names": ["Sketch2"],
+        "loft_name": "Loft1",
+    })
+    assert result["body_name"] == "Body"
+    assert result["loft_name"] == "Loft1"
+    assert result["profile_name"] == "Sketch1"
+    assert result["section_names"] == ["Sketch2"]
+    assert result["ruled"] is False
+    assert result["closed"] is False
+    assert result["solids_count"] >= 1
+    assert result["volume"] is not None
+    assert result["volume"] > 0
+
+    _assert_subtractive_loft_tree(saved_path, "sksubloftvalid", "Loft1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_subtractive_loft_save_reopen(tmp_path: Path) -> None:
+    """SubtractiveLoft persists after save/reopen: valid shape, Tip preserved.
+
+    Same non-coplanar setup as valid_creation: profile (Sketch1) attached to a
+    side face (Face1) of the pad; section (Sketch2) at default Z=0. Both
+    sketches are padded so they are Body members.
+    """
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sksubloftreopen", "workspace": workspace}
+
+    created = bridge.run("create_document", params)
+    saved_path = str(created["saved_path"])
+
+    # Base sketch: 20x20 pad -> 20x20x30 solid
+    bridge.run("create_sketch", {**params, "sketch_name": "SketchBase"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "SketchBase", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {
+        **params, "sketch_name": "SketchBase", "length": 30.0,
+    })
+
+    # Profile sketch: 16x16 rectangle attached to a side face (Face1) of the pad
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 2.0, "y": 2.0,
+        "width": 16.0, "height": 16.0,
+    })
+    bridge.run("sketch_attach_support", {
+        **params,
+        "sketch_name": "Sketch1",
+        "support_object_name": "Pad",
+        "support_subname": "Face1",
+        "map_mode": "FlatFace",
+    })
+    bridge.run("sketch_pad", {
+        **params, "sketch_name": "Sketch1", "length": 10.0,
+    })
+
+    # Section sketch: 12x12 rectangle at default Z=0
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch2"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch2", "x": 4.0, "y": 4.0,
+        "width": 12.0, "height": 12.0,
+    })
+    bridge.run("sketch_pad", {
+        **params, "sketch_name": "Sketch2", "length": 10.0,
+    })
+
+    bridge.run("sketch_subtractive_loft", {
+        **params,
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "section_names": ["Sketch2"],
+        "loft_name": "Loft1",
+    })
+
+    # list_objects reopens from disk, proving persistence.
+    objects = bridge.run(
+        "list_objects", {**params}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Loft1" in names
+    assert "Pad" in names
+    assert "Sketch1" in names
+    assert "Sketch2" in names
+
+    _assert_subtractive_loft_tree(saved_path, "sksubloftreopen", "Loft1")
+
+
+@requires_freecad
+def test_real_freecad_sketch_subtractive_loft_invalid_section(tmp_path: Path) -> None:
+    """Missing or invalid section returns structured error; document unchanged (rollback)."""
+    workspace = for_target(tmp_path, "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native")
+    bridge = FreeCadBridge.from_settings(_settings())
+    params = {"document_id": "sksublofterr", "workspace": workspace}
+
+    bridge.run("create_document", params)
+    bridge.run("create_sketch", {**params, "sketch_name": "Sketch1"})
+    bridge.run("sketch_add_rectangle", {
+        **params, "sketch_name": "Sketch1", "x": 0.0, "y": 0.0,
+        "width": 20.0, "height": 20.0,
+    })
+    bridge.run("sketch_pad", {**params, "sketch_name": "Sketch1", "length": 30.0})
+
+    before = bridge.run("list_objects", {**params})["objects"]
+    before_names = [obj["name"] for obj in before]
+
+    # Missing section object.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_subtractive_loft", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["NoSuchSection"],
+            "loft_name": "Loft1",
+        })
+    assert "not found" in str(excinfo.value).lower()
+
+    # Empty sections.
+    with pytest.raises(FreeCadOperationError) as excinfo:
+        bridge.run("sketch_subtractive_loft", {
+            **params,
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": [],
+            "loft_name": "Loft1",
+        })
+    assert "non-empty list" in str(excinfo.value).lower()
+
+    # Document unchanged after errors.
+    after = bridge.run("list_objects", {**params})["objects"]
+    after_names = [obj["name"] for obj in after]
+    assert after_names == before_names
+
+
 def _assert_subtractive_pipe_tree(saved_path: str, document_id: str, pipe_name: str = "Pipe") -> None:
     """Verify the SubtractivePipe in the reopened document: valid solid, Body.Tip, group membership."""
     path = str(saved_path)

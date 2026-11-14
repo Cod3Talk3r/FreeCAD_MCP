@@ -334,6 +334,7 @@ class _FakeEdge:
     def __init__(self, index: int) -> None:
         self.index = index
         self.Name = f"Edge{index}"
+        self.ShapeType = "Edge"
 
     def tangentAt(self, parameter: float) -> _FakeVector:
         if self.index in (1, 3, 9, 11):
@@ -370,6 +371,7 @@ class _FakeFace:
     def __init__(self, index: int) -> None:
         self.index = index
         self.Name = f"Face{index}"
+        self.ShapeType = "Face"
 
     def isValid(self) -> bool:
         return True
@@ -404,6 +406,16 @@ class _FakeShape:
 
     def isValid(self) -> bool:
         return True
+
+    def getElement(self, name: str) -> object:
+        """Native-like subelement lookup: Face1..FaceN, Edge1..EdgeN, Wire1..WireN."""
+        if name.startswith("Face"):
+            return self.Faces[int(name[4:]) - 1]
+        if name.startswith("Edge"):
+            return self.Edges[int(name[4:]) - 1]
+        if name.startswith("Wire"):
+            return self.Wires[int(name[4:]) - 1]
+        raise ValueError(f"subelement '{name}' not found")
 
 
 class _FakeBody:
@@ -519,6 +531,20 @@ class _FakeAdditiveLoft:
         self.Name = name
         self.Label = name
         self.TypeId = "PartDesign::AdditiveLoft"
+        self.Profile: object = None
+        self.Sections: list = []
+        self.Ruled: bool = False
+        self.Closed: bool = False
+        self.Shape: object = _FakeShape()
+
+
+class _FakeSubtractiveLoft:
+    """Minimal stand-in for a PartDesign::SubtractiveLoft."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "PartDesign::SubtractiveLoft"
         self.Profile: object = None
         self.Sections: list = []
         self.Ruled: bool = False
@@ -650,6 +676,8 @@ class _FakeDoc:
             obj: object = _FakeSubtractivePipe(name)
         elif type_id == "PartDesign::AdditiveLoft":
             obj: object = _FakeAdditiveLoft(name)
+        elif type_id == "PartDesign::SubtractiveLoft":
+            obj: object = _FakeSubtractiveLoft(name)
         elif type_id == "PartDesign::Fillet":
             obj: object = _FakeFillet(name)
         elif type_id == "PartDesign::Chamfer":
@@ -9351,6 +9379,43 @@ def test_sketch_attach_support_standalone_flat_face(
     assert sketch.MapMode == "FlatFace"
 
 
+def test_sketch_attach_support_placement_is_json_serializable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The placement readback must be JSON-serializable (FreeCAD Placement objects
+    are not). Verifies the result contains scalar x/y/z floats, never a raw object."""
+    import json
+
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "attach2", "workspace": str(tmp_path)})
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "attach2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "attach2",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "Box1",
+            "support_subname": "Face1",
+            "map_mode": "FlatFace",
+        }
+    )
+
+    assert result["ok"] is True
+    placement = result["result"]["placement"]
+    # JSON-serializable: either None or a dict of scalar floats.
+    if placement is not None:
+        assert isinstance(placement, dict)
+        assert set(placement.keys()) == {"x", "y", "z"}
+        assert all(isinstance(placement[k], float) for k in ("x", "y", "z"))
+        json.dumps(placement)  # must not raise
+
+
 def test_sketch_attach_support_rejects_unsupported_map_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9582,6 +9647,71 @@ def test_sketch_add_external_geometry_rejects_non_edge_subname(
     assert result["ok"] is False
     assert result["op"] == "sketch_add_external_geometry"
     assert "not an edge" in result["error"].lower()
+
+
+def test_sketch_attach_support_validates_via_getelement_without_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Native faces expose no .Name; attachment must still resolve via getElement."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "geo1", "workspace": str(tmp_path)})
+    box = doc.addObject("Part::Box", "Box1")
+    shape = _FakeShape(volume=64.0)
+    # Native faces carry no .Name; getElement resolves them by index name.
+    shape.Faces = [types.SimpleNamespace() for _ in range(6)]
+    box.Shape = shape
+    runner._op_create_sketch(
+        {"document_id": "geo1", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "geo1",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "Box1",
+            "support_subname": "Face1",
+            "map_mode": "FlatFace",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_attach_support"
+    assert result["result"]["support_subname"] == "Face1"
+    assert result["result"]["map_mode"] == "FlatFace"
+    sketch = doc.objects["Sketch1"]
+    assert sketch.AttachmentSupport == [(box, ["Face1"])]
+    assert sketch.MapMode == "FlatFace"
+
+
+def test_sketch_attach_support_rejects_unknown_subname_via_getelement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """getElement raising for an unknown name falls back to rejection."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "geo2", "workspace": str(tmp_path)})
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = _FakeShape(volume=64.0)
+    runner._op_create_sketch(
+        {"document_id": "geo2", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_attach_support(
+        {
+            "document_id": "geo2",
+            "workspace": str(tmp_path),
+            "sketch_name": "Sketch1",
+            "support_object_name": "Box1",
+            "support_subname": "Face99",
+            "map_mode": "FlatFace",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_attach_support"
+    assert "not a face" in result["error"].lower()
 
 
 def test_sketch_pocket_standalone_sketch_uses_unambiguous_body(
@@ -12360,6 +12490,617 @@ def test_handle_request_dispatches_sketch_additive_loft(
 
     assert response["ok"] is True
     assert response["op"] == "sketch_additive_loft"
+    assert response["result"]["loft_name"] == "Loft1"
+    assert response["result"]["solids_count"] == 1
+    assert response["result"]["volume"] == 100.0
+
+
+def test_sketch_subtractive_loft_successful_from_rectangle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    _make_rectangle_sketch(s2, x=0.0, y=0.0, width=2.0, height=2.0)
+
+    s3 = doc.addObject("Sketcher::SketchObject", "Sketch3")
+    body.addObject(s3)
+    _make_rectangle_sketch(s3, x=0.0, y=0.0, width=1.0, height=1.0)
+    body.Tip = saved_tip
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2", "Sketch3"],
+            "loft_name": "Loft1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "sketch_subtractive_loft"
+    assert result["result"]["body_name"] == "Body"
+    assert result["result"]["loft_name"] == "Loft1"
+    assert result["result"]["profile_name"] == "Sketch1"
+    assert result["result"]["section_names"] == ["Sketch2", "Sketch3"]
+    assert result["result"]["ruled"] is False
+    assert result["result"]["closed"] is False
+    assert result["result"]["solids_count"] == 1
+    assert result["result"]["volume"] == 100.0
+
+    loft = doc.objects["Loft1"]
+    assert loft.Profile is sketch
+    assert loft.Sections == [doc.objects["Sketch2"], doc.objects["Sketch3"]]
+    assert body.Tip is loft
+
+
+def test_sketch_subtractive_loft_with_ruled_and_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch, x=0.0, y=0.0, width=4.0, height=3.0)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    body.Tip = saved_tip
+    _make_rectangle_sketch(s2)
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "loft_name": "Loft1",
+            "ruled": True,
+            "closed": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["ruled"] is True
+    assert result["result"]["closed"] is True
+
+    loft = doc.objects["Loft1"]
+    assert loft.Ruled is True
+    assert loft.Closed is True
+
+
+def test_sketch_subtractive_loft_missing_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NoSuchBody",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_wrong_body_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "NotABody")
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "NotABody",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not 'PartDesign::Body'" in result["error"]
+
+
+def test_sketch_subtractive_loft_body_without_valid_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = None  # No base solid
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "no tip" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_missing_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NoSuchSketch",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_wrong_profile_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    doc.addObject("Part::Box", "NotASketch")
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "NotASketch",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_subtractive_loft_profile_not_member_of_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch1 is NOT added to body.Group -> ownership mismatch.
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not a member" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_empty_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": [],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "non-empty list" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_missing_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["NoSuchSection"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not found" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_wrong_section_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    doc.addObject("Part::Box", "NotASketch")
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["NotASketch"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not 'Sketcher::SketchObject'" in result["error"]
+
+
+def test_sketch_subtractive_loft_section_not_member_of_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch2"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    # Sketch2 is NOT added to body.Group -> ownership mismatch.
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "not a member" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_duplicate_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch2"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.addObject(doc.objects["Sketch2"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2", "Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "appears more than once" in result["error"].lower()
+
+
+def test_sketch_subtractive_loft_profile_reused_as_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch1"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "duplicates the Profile sketch" in result["error"]
+
+
+def test_sketch_subtractive_loft_invalid_ruled_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "ruled": "yes",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "ruled must be a boolean" in result["error"]
+
+
+def test_sketch_subtractive_loft_invalid_closed_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(doc.objects["Sketch1"])
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "closed": "yes",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+    assert "closed must be a boolean" in result["error"]
+
+
+def test_sketch_subtractive_loft_name_clash_auto_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    body.Tip = saved_tip
+    _make_rectangle_sketch(s2)
+    # Pre-create a Loft1 to force auto-suffixing.
+    doc.addObject("PartDesign::SubtractiveLoft", "Loft1")
+
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "edit",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+            "loft_name": "Loft1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["loft_name"] == "Loft1_1"
+    assert doc.getObject("Loft1_1") is not None
+
+
+def test_sketch_subtractive_loft_invalid_document_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    result = runner._op_sketch_subtractive_loft(
+        {
+            "document_id": "../evil",
+            "workspace": str(tmp_path),
+            "body_name": "Body",
+            "sketch_name": "Sketch1",
+            "section_names": ["Sketch2"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "sketch_subtractive_loft"
+
+
+def test_sketch_subtractive_loft_empty_required_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+
+    base_params = {
+        "document_id": "edit",
+        "workspace": str(tmp_path),
+        "body_name": "Body",
+        "sketch_name": "Sketch1",
+        "section_names": ["Sketch2"],
+        "loft_name": "Loft1",
+    }
+    for missing in ("body_name", "sketch_name", "loft_name"):
+        params = dict(base_params)
+        params[missing] = ""
+        result = runner._op_sketch_subtractive_loft(params)
+        assert result["ok"] is False
+        assert result["op"] == "sketch_subtractive_loft"
+        assert "must not be empty" in result["error"].lower()
+
+
+def test_handle_request_dispatches_sketch_subtractive_loft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "edit", "workspace": str(tmp_path)})
+    runner._op_create_sketch(
+        {"document_id": "edit", "workspace": str(tmp_path), "sketch_name": "Sketch1"}
+    )
+    sketch = doc.objects["Sketch1"]
+    _make_rectangle_sketch(sketch)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.addObject(sketch)
+    body.Tip = types.SimpleNamespace(Shape=_FakeShape())
+    saved_tip = body.Tip
+    s2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    body.addObject(s2)
+    body.Tip = saved_tip
+    _make_rectangle_sketch(s2)
+
+    response = runner.handle_request(
+        {
+            "op": "sketch_subtractive_loft",
+            "params": {
+                "document_id": "edit",
+                "workspace": str(tmp_path),
+                "body_name": "Body",
+                "sketch_name": "Sketch1",
+                "section_names": ["Sketch2"],
+                "loft_name": "Loft1",
+            },
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["op"] == "sketch_subtractive_loft"
     assert response["result"]["loft_name"] == "Loft1"
     assert response["result"]["solids_count"] == 1
     assert response["result"]["volume"] == 100.0

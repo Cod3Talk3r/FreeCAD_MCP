@@ -26,6 +26,7 @@ from freecad_mcp.tools.modeling import (
     SketchAttachSupportParams,
     SketchAttachSupportResult,
     SketchSubtractivePipeParams,
+    SketchSubtractiveLoftParams,
     SketchAddExternalGeometryParams,
     SketchAddExternalGeometryResult,
     SketchDeleteConstraintParams,
@@ -724,4 +725,37 @@ def test_sketch_subtractive_pipe_params_with_all_fields():
     )
     assert p.pipe_name == "MyPipe"
     assert p.spine_subname == "Edge1"
+    assert p.workspace == "/tmp/ws"
+
+
+def test_sketch_subtractive_loft_params_valid():
+    """SketchSubtractiveLoftParams should be accepted."""
+    p = SketchSubtractiveLoftParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        section_names=["Sketch2"],
+    )
+    assert p.document_id == "mydoc"
+    assert p.sketch_name == "MySketch"
+    assert p.section_names == ["Sketch2"]
+    assert p.body_name == "Body"
+    assert p.loft_name == "SubtractiveLoft"
+    assert p.ruled is False
+    assert p.closed is False
+    assert p.workspace is None
+
+
+def test_sketch_subtractive_loft_params_with_all_fields():
+    p = SketchSubtractiveLoftParams(
+        document_id="mydoc",
+        sketch_name="MySketch",
+        section_names=["Sketch2", "Sketch3"],
+        loft_name="MyLoft",
+        ruled=True,
+        closed=True,
+        workspace="/tmp/ws",
+    )
+    assert p.loft_name == "MyLoft"
+    assert p.ruled is True
+    assert p.closed is True
     assert p.workspace == "/tmp/ws"
