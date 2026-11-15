@@ -7826,3 +7826,267 @@ def test_real_freecad_remove_splitter(tmp_path: Path) -> None:
     assert result["after"]["is_valid"] is True
     assert result["after"]["solid_count"] == 1
     assert result["volume"] > 0
+
+
+@requires_freecad
+def test_real_freecad_topology_inspection_named_face(tmp_path: Path) -> None:
+    """topology_inspection with subelement_name returns named face metadata."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16topo4", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16topo4",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "topology_inspection",
+        {
+            "document_id": "m16topo4",
+            "object_name": "Box1",
+            "subelement_name": "Face1",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["subelement"] is not None
+    sub = result["subelement"]
+    assert sub["kind"] == "face"
+    assert sub["name"] == "Face1"
+    assert sub["surface"] == "Plane"
+    assert sub["area"] > 0
+
+
+@requires_freecad
+def test_real_freecad_topology_inspection_named_edge(tmp_path: Path) -> None:
+    """topology_inspection with subelement_name returns named edge metadata."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16topo5", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16topo5",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "topology_inspection",
+        {
+            "document_id": "m16topo5",
+            "object_name": "Box1",
+            "subelement_name": "Edge1",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["subelement"] is not None
+    sub = result["subelement"]
+    assert sub["kind"] == "edge"
+    assert sub["name"] == "Edge1"
+    assert sub["curve"] == "Line"
+    assert sub["length"] > 0
+
+
+@requires_freecad
+def test_real_freecad_reference_validation_edge1(tmp_path: Path) -> None:
+    """reference_validation on Edge1 returns exists=True with edge metadata."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16ref3", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16ref3",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "reference_validation",
+        {
+            "document_id": "m16ref3",
+            "object_name": "Box1",
+            "subelement_reference": "Edge1",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["exists"] is True
+    assert result["kind"] == "edge"
+    assert result["name"] == "Edge1"
+    assert "warning" in result
+
+
+@requires_freecad
+def test_real_freecad_remove_splitter_original_unchanged(tmp_path: Path) -> None:
+    """remove_splitter creates a new result object without mutating the original.
+
+    Note: A plain box has no redundant splitters, so removeSplitter() returns
+    an equivalent shape.  This test verifies the operation mechanics — a new
+    result object is created, the original object's shape/counts are unchanged,
+    and before/after diagnostics match — not a geometric refinement effect.
+    """
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16split2", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16split2",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    # Record original object state before remove_splitter.
+    before_diag = bridge.run(
+        "shape_diagnostics",
+        {
+            "document_id": "m16split2",
+            "object_name": "Box1",
+            "workspace": workspace,
+        },
+    )
+    assert before_diag["is_valid"] is True
+    assert before_diag["solid_count"] == 1
+
+    result = bridge.run(
+        "remove_splitter",
+        {
+            "document_id": "m16split2",
+            "object_name": "Box1",
+            "result_name": "Cleaned2",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["result_name"] == "Cleaned2"
+    assert result["type"] == "Part::Feature"
+    assert result["before"]["is_valid"] is True
+    assert result["before"]["solid_count"] == 1
+    assert result["after"]["is_valid"] is True
+    assert result["after"]["solid_count"] == 1
+    assert result["volume"] > 0
+
+    # Verify the original object is unchanged (separate bridge process = reopen).
+    after_diag = bridge.run(
+        "shape_diagnostics",
+        {
+            "document_id": "m16split2",
+            "object_name": "Box1",
+            "workspace": workspace,
+        },
+    )
+    assert after_diag["is_valid"] is True
+    assert after_diag["solid_count"] == 1
+    assert after_diag["face_count"] == 6
+    assert after_diag["edge_count"] == 12
+    assert after_diag["vertex_count"] == 8
+
+    # Verify the result object exists in the document.
+    objects = bridge.run(
+        "list_objects", {"document_id": "m16split2", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Box1" in names
+    assert "Cleaned2" in names
+
+
+@requires_freecad
+def test_real_freecad_m16_save_reopen_persistence(tmp_path: Path) -> None:
+    """Save/reopen persistence for M16 operations.
+
+    Creates a box, runs remove_splitter, saves the document, then reopens
+    via list_objects (fresh FreeCAD process) and verifies both objects and
+    their shapes persist.  Re-runs shape_diagnostics and topology_inspection
+    on the reopened result object.
+    """
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16persist", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16persist",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 20.0,
+            "height": 30.0,
+            "workspace": workspace,
+        },
+    )
+
+    bridge.run(
+        "remove_splitter",
+        {
+            "document_id": "m16persist",
+            "object_name": "Box1",
+            "result_name": "Persisted1",
+            "workspace": workspace,
+        },
+    )
+
+    # Save the document.
+    bridge.run("save_document", {"document_id": "m16persist", "workspace": workspace})
+
+    # Reopen via list_objects (fresh FreeCAD process opens from disk).
+    objects = bridge.run(
+        "list_objects", {"document_id": "m16persist", "workspace": workspace}
+    )["objects"]
+    names = [obj["name"] for obj in objects]
+    assert "Box1" in names
+    assert "Persisted1" in names
+
+    # Re-run shape_diagnostics on the reopened original object.
+    diag = bridge.run(
+        "shape_diagnostics",
+        {
+            "document_id": "m16persist",
+            "object_name": "Box1",
+            "workspace": workspace,
+        },
+    )
+    assert diag["is_valid"] is True
+    assert diag["solid_count"] == 1
+    assert diag["face_count"] == 6
+    assert diag["edge_count"] == 12
+    assert diag["vertex_count"] == 8
+
+    # Re-run topology_inspection on the reopened result object.
+    topo = bridge.run(
+        "topology_inspection",
+        {
+            "document_id": "m16persist",
+            "object_name": "Persisted1",
+            "workspace": workspace,
+        },
+    )
+    assert topo["solid_count"] == 1
+    assert topo["face_count"] == 6
+    assert topo["edge_count"] == 12
+    assert topo["vertex_count"] == 8
