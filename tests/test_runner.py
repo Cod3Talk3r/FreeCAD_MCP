@@ -339,6 +339,8 @@ class _FakeEdge:
         self.index = index
         self.Name = f"Edge{index}"
         self.ShapeType = "Edge"
+        self.Curve = _FakeCurve()
+        self.Length = 4.0
 
     def tangentAt(self, parameter: float) -> _FakeVector:
         if self.index in (1, 3, 9, 11):
@@ -346,6 +348,13 @@ class _FakeEdge:
         if self.index in (2, 4, 10, 12):
             return _FakeVector(0.0, 1.0, 0.0)
         return _FakeVector(0.0, 0.0, 1.0)
+
+
+class _FakeCurve:
+    """Minimal stand-in for a FreeCAD curve."""
+
+    def __init__(self, name: str = "Line") -> None:
+        self.Name = name
 
 
 class _FakeWire:
@@ -376,6 +385,9 @@ class _FakeFace:
         self.index = index
         self.Name = f"Face{index}"
         self.ShapeType = "Face"
+        self.Surface = _FakeSurface()
+        self.Area = 16.0
+        self.CenterOfMass = _FakeVector(0.0, 2.0, 2.0)
 
     def isValid(self) -> bool:
         return True
@@ -396,20 +408,36 @@ class _FakeFace:
         return _FakeVector(0.0, 0.0, 1.0)
 
 
+class _FakeSurface:
+    """Minimal stand-in for a FreeCAD surface."""
+
+    def __init__(self, name: str = "Plane") -> None:
+        self.Name = name
+
+
 class _FakeShape:
     """Minimal stand-in for a FreeCAD shape with a valid solid."""
 
     def __init__(self, volume: float = 100.0) -> None:
         self.Volume = volume
         self._volume = volume
-        self.Solids = [SimpleNamespace(Volume=volume)]
+        self.ShapeType = "Solid"
+        self.Solids = [SimpleNamespace(Volume=volume, isValid=lambda: True)]
         self.Edges = [_FakeEdge(i) for i in range(1, 13)]
         self.Faces = [_FakeFace(i) for i in range(1, 7)]
+        self.Vertexes = [SimpleNamespace(Point=_FakeVector(0.0, 0.0, 0.0)) for _ in range(8)]
         self.Wires = [_FakeWire(i, closed=True, valid=True) for i in range(1, 7)]
         self.BoundBox = _FakeBoundBox()
 
     def isValid(self) -> bool:
         return True
+
+    def isNull(self) -> bool:
+        return False
+
+    def removeSplitter(self) -> object:
+        """Return a new fake shape (removeSplitter does not mutate in-place)."""
+        return _FakeShape(volume=self._volume)
 
     def getElement(self, name: str) -> object:
         """Native-like subelement lookup: Face1..FaceN, Edge1..EdgeN, Wire1..WireN."""
@@ -420,6 +448,26 @@ class _FakeShape:
         if name.startswith("Wire"):
             return self.Wires[int(name[4:]) - 1]
         raise ValueError(f"subelement '{name}' not found")
+
+    def __getattr__(self, name: str) -> object:
+        """Enable named subelement access: shape.Face1, shape.Edge1, etc."""
+        if name.startswith("Face"):
+            idx = int(name[4:]) - 1
+            if 0 <= idx < len(self.Faces):
+                return self.Faces[idx]
+        if name.startswith("Edge"):
+            idx = int(name[4:]) - 1
+            if 0 <= idx < len(self.Edges):
+                return self.Edges[idx]
+        if name.startswith("Vertex"):
+            idx = int(name[6:]) - 1
+            if 0 <= idx < len(self.Vertexes):
+                return self.Vertexes[idx]
+        if name.startswith("Solid"):
+            idx = int(name[5:]) - 1
+            if 0 <= idx < len(self.Solids):
+                return self.Solids[idx]
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
 
 class _FakeBody:
@@ -16258,3 +16306,330 @@ def test_partdesign_thickness_equal_volume_rejected(
     assert result["ok"] is False
     assert result["op"] == "partdesign_thickness"
     assert "equal to the base volume" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# M16 — Topology References and Shape Robustness (mock tests)
+# ---------------------------------------------------------------------------
+
+
+def test_op_shape_diagnostics_valid_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """shape_diagnostics on a valid box returns counts and validity."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "diag", "workspace": str(tmp_path)})
+
+    box = _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_shape_diagnostics(
+        {"document_id": "diag", "object_name": "Box1", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "shape_diagnostics"
+    r = result["result"]
+    assert r["document_id"] == "diag"
+    assert r["object_name"] == "Box1"
+    assert r["has_shape"] is True
+    assert r["is_null"] is False
+    assert r["is_valid"] is True
+    assert r["shape_type"] == "Solid"
+    assert r["solid_count"] == 1
+    assert r["face_count"] == 6
+    assert r["edge_count"] == 12
+    assert r["vertex_count"] == 8
+    assert len(r["per_solid"]) == 1
+    assert r["per_solid"][0]["index"] == 0
+    assert r["per_solid"][0]["is_valid"] is True
+
+
+def test_op_shape_diagnostics_null_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """shape_diagnostics on a shape-less object reports has_shape=False without crashing."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "diag2", "workspace": str(tmp_path)})
+
+    obj = doc.addObject("Part::Feature", "NoShape")
+    # No Shape attribute set.
+
+    result = runner._op_shape_diagnostics(
+        {"document_id": "diag2", "object_name": "NoShape", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    r = result["result"]
+    assert r["has_shape"] is False
+    assert r["is_null"] is None
+    assert r["is_valid"] is None
+    assert r["solid_count"] == 0
+
+
+def test_op_shape_diagnostics_object_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """shape_diagnostics on a missing object returns a structured error."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "diag3", "workspace": str(tmp_path)})
+
+    result = runner._op_shape_diagnostics(
+        {
+            "document_id": "diag3",
+            "object_name": "DoesNotExist",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "shape_diagnostics"
+    assert "not found" in result["error"].lower()
+
+
+def test_op_topology_inspection_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """topology_inspection reports aggregate counts."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "topo", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_topology_inspection(
+        {"document_id": "topo", "object_name": "Box1", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "topology_inspection"
+    r = result["result"]
+    assert r["solid_count"] == 1
+    assert r["face_count"] == 6
+    assert r["edge_count"] == 12
+    assert r["vertex_count"] == 8
+    assert r["subelement"] is None
+
+
+def test_op_topology_inspection_indexed_subelement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """topology_inspection with subelement_index returns face metadata."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "topo2", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_topology_inspection(
+        {
+            "document_id": "topo2",
+            "object_name": "Box1",
+            "subelement_index": 0,
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    r = result["result"]
+    sub = r["subelement"]
+    assert sub is not None
+    assert sub["kind"] == "face"
+    assert sub["index"] == 0
+    assert sub["surface"] == "Plane"
+    assert sub["area"] == 16.0  # 4x4 face of a 4x4x4 box
+    assert sub["center"] == {"x": 0.0, "y": 2.0, "z": 2.0}
+
+
+def test_op_topology_inspection_named_subelement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """topology_inspection with subelement_name returns named subelement metadata."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "topo3", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_topology_inspection(
+        {
+            "document_id": "topo3",
+            "object_name": "Box1",
+            "subelement_name": "Edge1",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    r = result["result"]
+    sub = r["subelement"]
+    assert sub is not None
+    assert sub["kind"] == "edge"
+    assert sub["name"] == "Edge1"
+    assert sub["type"] == "Line"
+    assert sub["length"] == 4.0
+
+
+def test_op_topology_inspection_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """topology_inspection with an out-of-range index returns an error."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "topo4", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_topology_inspection(
+        {
+            "document_id": "topo4",
+            "object_name": "Box1",
+            "subelement_index": 999,
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    r = result["result"]
+    assert r["subelement"] is None
+    assert r["subelement_error"] is not None
+    assert "out of range" in r["subelement_error"].lower()
+
+
+def test_op_reference_validation_valid_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reference_validation on Face1 returns exists=True with face metadata."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ref", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_reference_validation(
+        {
+            "document_id": "ref",
+            "object_name": "Box1",
+            "subelement_reference": "Face1",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "reference_validation"
+    r = result["result"]
+    assert r["exists"] is True
+    assert r["kind"] == "face"
+    assert r["name"] == "Face1"
+    assert r["metadata"]["type"] == "Face"
+    assert r["metadata"]["surface"] == "Plane"
+    assert "warning" in r
+
+
+def test_op_reference_validation_invalid_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reference_validation on a non-existent reference returns exists=False."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ref2", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_reference_validation(
+        {
+            "document_id": "ref2",
+            "object_name": "Box1",
+            "subelement_reference": "Face999",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    r = result["result"]
+    assert r["exists"] is False
+    assert r["kind"] is None
+    assert "warning" in r
+
+
+def test_op_reference_validation_integer_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reference_validation on an integer index resolves to a face."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "ref3", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_reference_validation(
+        {
+            "document_id": "ref3",
+            "object_name": "Box1",
+            "subelement_reference": "0",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    r = result["result"]
+    assert r["exists"] is True
+    assert r["kind"] == "face"
+    assert r["index"] == 0
+    assert r["name"] == "Face1"
+
+
+def test_op_remove_splitter_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """remove_splitter creates a new result object with before/after state."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "split", "workspace": str(tmp_path)})
+
+    _make_box_solid(doc, volume=64.0)
+
+    result = runner._op_remove_splitter(
+        {
+            "document_id": "split",
+            "object_name": "Box1",
+            "result_name": "Cleaned1",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["op"] == "remove_splitter"
+    r = result["result"]
+    assert r["document_id"] == "split"
+    assert r["object_name"] == "Box1"
+    assert r["result_name"] == "Cleaned1"
+    assert r["type"] == "Part::Feature"
+    assert r["before"]["is_valid"] is True
+    assert r["before"]["solid_count"] == 1
+    assert r["after"]["is_valid"] is True
+    assert r["after"]["solid_count"] == 1
+    assert r["volume"] == 64.0
+
+
+def test_op_remove_splitter_object_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """remove_splitter on a missing object returns a structured error."""
+    doc = _FakeDoc()
+    _install_fake_freecad(monkeypatch, doc)
+    runner._op_create_document({"document_id": "split2", "workspace": str(tmp_path)})
+
+    result = runner._op_remove_splitter(
+        {
+            "document_id": "split2",
+            "object_name": "Missing",
+            "workspace": str(tmp_path),
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["op"] == "remove_splitter"
+    assert "not found" in result["error"].lower()

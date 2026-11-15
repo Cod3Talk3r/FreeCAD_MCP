@@ -38,6 +38,14 @@ from freecad_mcp.tools.modeling import (
     SketchEditLineParams,
     TankParams,
     TubularCoilParams,
+    ShapeDiagnosticsParams,
+    ShapeDiagnosticsResult,
+    TopologyInspectionParams,
+    TopologyInspectionResult,
+    ReferenceValidationParams,
+    ReferenceValidationResult,
+    RemoveSplitterParams,
+    RemoveSplitterResult,
 )
 
 
@@ -798,3 +806,192 @@ def test_sketch_hole_params_with_all_fields():
     assert p.diameter == 8.0
     assert p.depth == 6.0
     assert p.workspace == "/tmp/ws"
+
+
+# ---------------------------------------------------------------------------
+# M16 schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_shape_diagnostics_params_valid():
+    p = ShapeDiagnosticsParams(
+        document_id="mydoc", object_name="Box1", workspace="/tmp/ws"
+    )
+    assert p.document_id == "mydoc"
+    assert p.object_name == "Box1"
+    assert p.workspace == "/tmp/ws"
+
+
+def test_shape_diagnostics_params_defaults():
+    p = ShapeDiagnosticsParams(document_id="mydoc", object_name="Box1")
+    assert p.workspace is None
+
+
+def test_shape_diagnostics_result_fields():
+    r = ShapeDiagnosticsResult(
+        document_id="mydoc",
+        object_name="Box1",
+        type="Part::Box",
+        has_shape=True,
+        is_null=False,
+        is_valid=True,
+        shape_type="Solid",
+        solid_count=1,
+        face_count=6,
+        edge_count=12,
+        vertex_count=8,
+        per_solid=[{"index": 0, "is_valid": True, "volume": 64.0}],
+    )
+    assert r.is_valid is True
+    assert r.solid_count == 1
+    assert r.per_solid[0]["index"] == 0
+
+
+def test_shape_diagnostics_result_null_shape():
+    r = ShapeDiagnosticsResult(
+        document_id="mydoc",
+        object_name="NoShape",
+        type="Part::Feature",
+        has_shape=False,
+        is_null=None,
+        is_valid=None,
+        shape_type=None,
+        solid_count=0,
+        face_count=0,
+        edge_count=0,
+        vertex_count=0,
+        per_solid=[],
+    )
+    assert r.has_shape is False
+    assert r.is_null is None
+    assert r.is_valid is None
+
+
+def test_topology_inspection_params_valid():
+    p = TopologyInspectionParams(
+        document_id="mydoc",
+        object_name="Box1",
+        subelement_index=0,
+        subelement_name="Face1",
+        workspace="/tmp/ws",
+    )
+    assert p.document_id == "mydoc"
+    assert p.object_name == "Box1"
+    assert p.subelement_index == 0
+    assert p.subelement_name == "Face1"
+
+
+def test_topology_inspection_params_defaults():
+    p = TopologyInspectionParams(document_id="mydoc", object_name="Box1")
+    assert p.subelement_index is None
+    assert p.subelement_name is None
+    assert p.workspace is None
+
+
+def test_topology_inspection_result_fields():
+    r = TopologyInspectionResult(
+        document_id="mydoc",
+        object_name="Box1",
+        type="Part::Box",
+        has_shape=True,
+        solid_count=1,
+        face_count=6,
+        edge_count=12,
+        vertex_count=8,
+        subelement={"kind": "face", "index": 0, "surface": "Plane"},
+    )
+    assert r.solid_count == 1
+    assert r.subelement["kind"] == "face"
+
+
+def test_reference_validation_params_valid():
+    p = ReferenceValidationParams(
+        document_id="mydoc",
+        object_name="Box1",
+        subelement_reference="Face1",
+        workspace="/tmp/ws",
+    )
+    assert p.document_id == "mydoc"
+    assert p.object_name == "Box1"
+    assert p.subelement_reference == "Face1"
+
+
+def test_reference_validation_params_integer_index():
+    p = ReferenceValidationParams(
+        document_id="mydoc",
+        object_name="Box1",
+        subelement_reference="0",
+    )
+    assert p.subelement_reference == "0"
+
+
+def test_reference_validation_result_fields():
+    r = ReferenceValidationResult(
+        document_id="mydoc",
+        object_name="Box1",
+        type="Part::Box",
+        has_shape=True,
+        reference="Face1",
+        exists=True,
+        kind="face",
+        index=0,
+        name="Face1",
+        metadata={"type": "Face", "surface": "Plane", "area": 16.0},
+        warning="FaceN/EdgeN names are positional...",
+    )
+    assert r.exists is True
+    assert r.kind == "face"
+    assert r.metadata["surface"] == "Plane"
+
+
+def test_reference_validation_result_not_found():
+    r = ReferenceValidationResult(
+        document_id="mydoc",
+        object_name="Box1",
+        type="Part::Box",
+        has_shape=True,
+        reference="Face999",
+        exists=False,
+        kind=None,
+        index=None,
+        name=None,
+        metadata={},
+        warning="FaceN/EdgeN names are positional...",
+    )
+    assert r.exists is False
+
+
+def test_remove_splitter_params_valid():
+    p = RemoveSplitterParams(
+        document_id="mydoc",
+        object_name="Box1",
+        result_name="Cleaned1",
+        workspace="/tmp/ws",
+    )
+    assert p.document_id == "mydoc"
+    assert p.object_name == "Box1"
+    assert p.result_name == "Cleaned1"
+
+
+def test_remove_splitter_params_defaults():
+    p = RemoveSplitterParams(document_id="mydoc", object_name="Box1")
+    assert p.result_name == "SplitterRemoved"
+    assert p.workspace is None
+
+
+def test_remove_splitter_result_fields():
+    r = RemoveSplitterResult(
+        document_id="mydoc",
+        object_name="Box1",
+        result_name="Cleaned1",
+        type="Part::Feature",
+        before={"is_valid": True, "solid_count": 1},
+        after={"is_valid": True, "solid_count": 1},
+        volume=64.0,
+        bounding_box={"xmin": 0, "ymin": 0, "zmin": 0, "xmax": 4, "ymax": 4, "zmax": 4},
+        meta_before={"revision": 1},
+    )
+    assert r.result_name == "Cleaned1"
+    assert r.before["is_valid"] is True
+    assert r.after["is_valid"] is True
+    assert r.volume == 64.0

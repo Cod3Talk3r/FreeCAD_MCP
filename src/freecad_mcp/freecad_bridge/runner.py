@@ -101,6 +101,12 @@ OP_CREATE_SNAPSHOT = "create_snapshot"
 OP_LIST_SNAPSHOTS = "list_snapshots"
 OP_RESTORE_SNAPSHOT = "restore_snapshot"
 
+# M16 — Topology References and Shape Robustness
+OP_SHAPE_DIAGNOSTICS = "shape_diagnostics"
+OP_TOPOLOGY_INSPECTION = "topology_inspection"
+OP_REFERENCE_VALIDATION = "reference_validation"
+OP_REMOVE_SPLITTER = "remove_splitter"
+
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
 #: parameter schema.  Raise this only after confirming real-FreeCAD performance.
@@ -13022,6 +13028,773 @@ def _op_partdesign_thickness(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# M16 — Topology References and Shape Robustness
+# ---------------------------------------------------------------------------
+
+def _op_shape_diagnostics(params: dict[str, Any]) -> dict[str, Any]:
+    """Report shape validity and diagnostics for an existing object.
+
+    Read-only: never mutates the document.  Guards against OCCError from
+    isValid() on null shapes and returns structured per-solid information.
+
+    M16.1 — Shape Diagnostics.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "shape_diagnostics", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "shape_diagnostics", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "shape_diagnostics", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "shape_diagnostics", "error": f"object '{object_name}' not found"}
+
+        shape = getattr(obj, "Shape", None)
+        if shape is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": True,
+                "op": "shape_diagnostics",
+                "result": {
+                    "document_id": normalized,
+                    "object_name": object_name,
+                    "type": obj.TypeId,
+                    "has_shape": False,
+                    "is_null": None,
+                    "is_valid": None,
+                    "shape_type": None,
+                    "solid_count": 0,
+                    "face_count": 0,
+                    "edge_count": 0,
+                    "vertex_count": 0,
+                    "per_solid": [],
+                },
+            }
+
+        # isNull first — isValid() raises OCCError on null shapes.
+        try:
+            is_null = bool(shape.isNull())
+        except Exception:
+            is_null = None
+
+        # isValid guarded — raises OCCError on null shapes.
+        is_valid = None
+        if not is_null:
+            try:
+                is_valid = bool(shape.isValid())
+            except Exception:
+                is_valid = None
+
+        # shapeType.
+        try:
+            shape_type = shape.ShapeType
+        except Exception:
+            shape_type = None
+
+        # Topology counts.
+        try:
+            solid_count = len(list(getattr(shape, "Solids", []) or []))
+        except Exception:
+            solid_count = 0
+        try:
+            face_count = len(list(getattr(shape, "Faces", []) or []))
+        except Exception:
+            face_count = 0
+        try:
+            edge_count = len(list(getattr(shape, "Edges", []) or []))
+        except Exception:
+            edge_count = 0
+        try:
+            vertex_count = len(list(getattr(shape, "Vertexes", []) or []))
+        except Exception:
+            vertex_count = 0
+
+        # Per-solid validity and topology.
+        per_solid: list[dict[str, Any]] = []
+        try:
+            solids = list(getattr(shape, "Solids", []) or [])
+        except Exception:
+            solids = []
+        for idx, solid in enumerate(solids):
+            entry: dict[str, Any] = {"index": idx}
+            try:
+                entry["is_valid"] = bool(solid.isValid())
+            except Exception:
+                entry["is_valid"] = None
+            try:
+                entry["volume"] = float(solid.Volume)
+            except Exception:
+                entry["volume"] = None
+            try:
+                entry["face_count"] = len(list(getattr(solid, "Faces", []) or []))
+            except Exception:
+                entry["face_count"] = None
+            try:
+                entry["edge_count"] = len(list(getattr(solid, "Edges", []) or []))
+            except Exception:
+                entry["edge_count"] = None
+            try:
+                entry["vertex_count"] = len(list(getattr(solid, "Vertexes", []) or []))
+            except Exception:
+                entry["vertex_count"] = None
+            per_solid.append(entry)
+
+        ws_mod.release_lock(lock_path, pid)
+        return {
+            "ok": True,
+            "op": "shape_diagnostics",
+            "result": {
+                "document_id": normalized,
+                "object_name": object_name,
+                "type": obj.TypeId,
+                "has_shape": True,
+                "is_null": is_null,
+                "is_valid": is_valid,
+                "shape_type": shape_type,
+                "solid_count": solid_count,
+                "face_count": face_count,
+                "edge_count": edge_count,
+                "vertex_count": vertex_count,
+                "per_solid": per_solid,
+            },
+        }
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "shape_diagnostics", "error": f"FreeCAD error: {exc}"}
+
+
+def _op_topology_inspection(params: dict[str, Any]) -> dict[str, Any]:
+    """Inspect topology of an existing object's shape.
+
+    Read-only: reports Faces/Edges/Vertexes/Solids counts and supports
+    controlled indexed or named subelement inspection.  Never silently
+    accepts out-of-range references.
+
+    M16.2 — Topology Inspection.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    workspace_str = params.get("workspace") or ""
+    subelement_index = params.get("subelement_index", None)
+    subelement_name = params.get("subelement_name", None)
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "topology_inspection", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "topology_inspection", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "topology_inspection", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "topology_inspection", "error": f"object '{object_name}' not found"}
+
+        shape = getattr(obj, "Shape", None)
+        if shape is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": True,
+                "op": "topology_inspection",
+                "result": {
+                    "document_id": normalized,
+                    "object_name": object_name,
+                    "type": obj.TypeId,
+                    "has_shape": False,
+                    "solid_count": 0,
+                    "face_count": 0,
+                    "edge_count": 0,
+                    "vertex_count": 0,
+                    "subelement": None,
+                },
+            }
+
+        # Aggregate counts.
+        try:
+            solid_count = len(list(getattr(shape, "Solids", []) or []))
+        except Exception:
+            solid_count = 0
+        try:
+            face_count = len(list(getattr(shape, "Faces", []) or []))
+        except Exception:
+            face_count = 0
+        try:
+            edge_count = len(list(getattr(shape, "Edges", []) or []))
+        except Exception:
+            edge_count = 0
+        try:
+            vertex_count = len(list(getattr(shape, "Vertexes", []) or []))
+        except Exception:
+            vertex_count = 0
+
+        subelement_info: dict[str, Any] | None = None
+        subelement_error: str | None = None
+
+        # Resolve the requested subelement: index takes priority over name.
+        if subelement_index is not None:
+            try:
+                idx = int(subelement_index)
+            except (TypeError, ValueError):
+                subelement_error = f"subelement_index must be an integer, got {subelement_index!r}."
+            else:
+                try:
+                    faces = list(getattr(shape, "Faces", []) or [])
+                    if 0 <= idx < len(faces):
+                        face = faces[idx]
+                        subelement_info = {
+                            "kind": "face",
+                            "index": idx,
+                            "surface": _safe_type_name(getattr(face, "Surface", None)),
+                            "area": _safe_float(getattr(face, "Area", None)),
+                            "center": _safe_vector(getattr(face, "CenterOfMass", None)),
+                        }
+                    else:
+                        subelement_error = (
+                            f"face index {idx} out of range: object '{object_name}' has {len(faces)} face(s)."
+                        )
+                except Exception as exc:
+                    subelement_error = f"face index access failed: {exc}"
+        elif subelement_name is not None:
+            if not isinstance(subelement_name, str) or not subelement_name.strip():
+                subelement_error = "subelement_name must be a non-empty string (e.g. 'Face1', 'Edge1')."
+            else:
+                try:
+                    target = getattr(shape, subelement_name, None)
+                    if target is None:
+                        subelement_error = (
+                            f"subelement '{subelement_name}' not found on object '{object_name}'. "
+                            f"FaceN/EdgeN names are positional and can change after topology modifications."
+                        )
+                    else:
+                        kind = subelement_name.rstrip("0123456789").rstrip()
+                        kind = (kind if kind else "subelement").lower()
+                        entry: dict[str, Any] = {"kind": kind, "name": subelement_name}
+                        try:
+                            if kind == "edge":
+                                entry["type"] = _safe_type_name(getattr(target, "Curve", None))
+                            else:
+                                entry["type"] = getattr(target, "ShapeType", type(target).__name__)
+                        except Exception:
+                            pass
+                        if kind == "face":
+                            entry["surface"] = _safe_type_name(getattr(target, "Surface", None))
+                            entry["area"] = _safe_float(getattr(target, "Area", None))
+                            entry["center"] = _safe_vector(getattr(target, "CenterOfMass", None))
+                        elif kind == "edge":
+                            entry["curve"] = _safe_type_name(getattr(target, "Curve", None))
+                            entry["length"] = _safe_float(getattr(target, "Length", None))
+                            try:
+                                entry["vertex_count"] = len(list(getattr(target, "Vertexes", []) or []))
+                            except Exception:
+                                entry["vertex_count"] = None
+                        elif kind in ("vertex", "vertexes"):
+                            entry["point"] = _safe_vector(getattr(target, "Point", None))
+                        subelement_info = entry
+                except Exception as exc:
+                    subelement_error = f"named subelement access failed: {exc}"
+
+        ws_mod.release_lock(lock_path, pid)
+        result: dict[str, Any] = {
+            "document_id": normalized,
+            "object_name": object_name,
+            "type": obj.TypeId,
+            "has_shape": True,
+            "solid_count": solid_count,
+            "face_count": face_count,
+            "edge_count": edge_count,
+            "vertex_count": vertex_count,
+            "subelement": subelement_info,
+        }
+        if subelement_error:
+            result["subelement_error"] = subelement_error
+        return {"ok": True, "op": "topology_inspection", "result": result}
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "topology_inspection", "error": f"FreeCAD error: {exc}"}
+
+
+def _op_reference_validation(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate whether a requested subelement reference currently exists.
+
+    Read-only: checks existence, returns current type and metadata.
+    Explicitly documents that FaceN/EdgeN names are positional and can
+    change meaning after topology modifications.  Does not claim
+    persistent identity or stable references.
+
+    M16.3 — Reference Validation.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    workspace_str = params.get("workspace") or ""
+    subelement_reference = params.get("subelement_reference") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "reference_validation", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "reference_validation", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "reference_validation", "error": lock_status.get("error", "lock failed")}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {"ok": False, "op": "reference_validation", "error": f"object '{object_name}' not found"}
+
+        shape = getattr(obj, "Shape", None)
+        if shape is None:
+            ws_mod.release_lock(lock_path, pid)
+            return {
+                "ok": True,
+                "op": "reference_validation",
+                "result": {
+                    "document_id": normalized,
+                    "object_name": object_name,
+                    "type": obj.TypeId,
+                    "has_shape": False,
+                    "reference": subelement_reference,
+                    "exists": False,
+                    "warning": "Object has no shape; no subelement references are available.",
+                },
+            }
+
+        exists = False
+        kind = None
+        index = None
+        name = None
+        metadata: dict[str, Any] = {}
+        error: str | None = None
+
+        # Try as a name first (Face1, Edge1, etc.), then as an integer index.
+        try:
+            target = getattr(shape, subelement_reference, None)
+            if target is not None:
+                exists = True
+                name = subelement_reference
+                kind = (subelement_reference.rstrip("0123456789") or "subelement").lower()
+                try:
+                    index = int(subelement_reference[len(kind):]) if subelement_reference[len(kind):] else None
+                except (ValueError, IndexError):
+                    index = None
+                metadata["type"] = (
+                    _safe_type_name(getattr(target, "Curve", None))
+                    if kind == "edge"
+                    else getattr(target, "ShapeType", type(target).__name__)
+                )
+                if kind == "face":
+                    metadata["surface"] = _safe_type_name(getattr(target, "Surface", None))
+                    metadata["area"] = _safe_float(getattr(target, "Area", None))
+                    metadata["center"] = _safe_vector(getattr(target, "CenterOfMass", None))
+                elif kind == "edge":
+                    metadata["curve"] = _safe_type_name(getattr(target, "Curve", None))
+                    metadata["length"] = _safe_float(getattr(target, "Length", None))
+                    try:
+                        metadata["vertex_count"] = len(list(getattr(target, "Vertexes", []) or []))
+                    except Exception:
+                        metadata["vertex_count"] = None
+                elif kind in ("vertex", "vertexes"):
+                    metadata["point"] = _safe_vector(getattr(target, "Point", None))
+                elif kind == "solid":
+                    try:
+                        metadata["volume"] = float(getattr(target, "Volume", None))
+                    except Exception:
+                        metadata["volume"] = None
+                    try:
+                        metadata["is_valid"] = bool(target.isValid())
+                    except Exception:
+                        metadata["is_valid"] = None
+        except AttributeError:
+            # Not a named attribute — try as an integer index.
+            pass
+
+        if not exists:
+            try:
+                idx = int(subelement_reference)
+                # Ambiguous: could be face/edge/vertex/solid index.  Check faces first.
+                faces = list(getattr(shape, "Faces", []) or [])
+                if 0 <= idx < len(faces):
+                    exists = True
+                    kind = "face"
+                    index = idx
+                    name = f"Face{idx + 1}"
+                    target = faces[idx]
+                    metadata["surface"] = _safe_type_name(getattr(target, "Surface", None))
+                    metadata["area"] = _safe_float(getattr(target, "Area", None))
+                    metadata["center"] = _safe_vector(getattr(target, "CenterOfMass", None))
+                else:
+                    edges = list(getattr(shape, "Edges", []) or [])
+                    if 0 <= idx < len(edges):
+                        exists = True
+                        kind = "edge"
+                        index = idx
+                        name = f"Edge{idx + 1}"
+                        target = edges[idx]
+                        metadata["curve"] = _safe_type_name(getattr(target, "Curve", None))
+                        metadata["length"] = _safe_float(getattr(target, "Length", None))
+                        try:
+                            metadata["vertex_count"] = len(list(getattr(target, "Vertexes", []) or []))
+                        except Exception:
+                            metadata["vertex_count"] = None
+                    else:
+                        vertexes = list(getattr(shape, "Vertexes", []) or [])
+                        if 0 <= idx < len(vertexes):
+                            exists = True
+                            kind = "vertex"
+                            index = idx
+                            name = f"Vertex{idx + 1}"
+                            target = vertexes[idx]
+                            metadata["point"] = _safe_vector(getattr(target, "Point", None))
+                        else:
+                            solids = list(getattr(shape, "Solids", []) or [])
+                            if 0 <= idx < len(solids):
+                                exists = True
+                                kind = "solid"
+                                index = idx
+                                name = f"Solid{idx + 1}"
+                                target = solids[idx]
+                                metadata["type"] = (
+                                    _safe_type_name(getattr(target, "Curve", None))
+                                    if kind == "edge"
+                                    else getattr(target, "ShapeType", type(target).__name__)
+                                )
+                                try:
+                                    metadata["volume"] = float(getattr(target, "Volume", None))
+                                except Exception:
+                                    metadata["volume"] = None
+                                try:
+                                    metadata["is_valid"] = bool(target.isValid())
+                                except Exception:
+                                    metadata["is_valid"] = None
+            except (TypeError, ValueError):
+                error = f"subelement_reference '{subelement_reference}' is not a valid name (e.g. 'Face1') or integer index."
+
+        ws_mod.release_lock(lock_path, pid)
+        result: dict[str, Any] = {
+            "document_id": normalized,
+            "object_name": object_name,
+            "type": obj.TypeId,
+            "has_shape": True,
+            "reference": subelement_reference,
+            "exists": exists,
+            "kind": kind,
+            "index": index,
+            "name": name,
+            "metadata": metadata,
+            "warning": (
+                "FaceN/EdgeN names are positional and can change meaning after topology "
+                "modifications (fuse, cut, dimension change).  This operation does not "
+                "claim persistent identity or stable references."
+            ),
+        }
+        if error:
+            result["error"] = error
+        return {"ok": True, "op": "reference_validation", "result": result}
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "reference_validation", "error": f"FreeCAD error: {exc}"}
+
+
+def _op_remove_splitter(params: dict[str, Any]) -> dict[str, Any]:
+    """Explicit removeSplitter() on an existing object's shape.
+
+    User-invoked only.  Returns a new shape via a result object; does not
+    silently replace or mutate the original document object.  Reports
+    before/after validity and topology counts.
+
+    M16.4 — Explicit Refinement.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    object_name = params.get("object_name") or ""
+    result_name = params.get("result_name") or "SplitterRemoved"
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "remove_splitter", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "remove_splitter", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "remove_splitter", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    transaction_open = False
+    doc = None
+
+    def _fail(message: str) -> dict[str, Any]:
+        nonlocal transaction_open
+        if transaction_open:
+            try:
+                doc.abortTransaction()
+                doc.recompute()
+            except Exception as exc:
+                message += f" Rollback failed: {exc}"
+            transaction_open = False
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "remove_splitter", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            return _fail(f"object '{object_name}' not found")
+
+        shape = getattr(obj, "Shape", None)
+        if shape is None:
+            return _fail(f"object '{object_name}' has no shape; removeSplitter cannot be applied.")
+
+        # Capture before-state.
+        try:
+            before_valid = bool(shape.isValid())
+        except Exception:
+            before_valid = None
+        try:
+            before_solids = len(list(getattr(shape, "Solids", []) or []))
+        except Exception:
+            before_solids = 0
+        try:
+            before_faces = len(list(getattr(shape, "Faces", []) or []))
+        except Exception:
+            before_faces = 0
+        try:
+            before_edges = len(list(getattr(shape, "Edges", []) or []))
+        except Exception:
+            before_edges = 0
+        try:
+            before_vertexes = len(list(getattr(shape, "Vertexes", []) or []))
+        except Exception:
+            before_vertexes = 0
+
+        doc.openTransaction("Remove Splitter")
+        transaction_open = True
+
+        # Create a new Feature object holding the removeSplitter() result.
+        # removeSplitter() returns a new Shape; it does not mutate in-place.
+        counter = 0
+        desired_result_name = result_name
+        while doc.getObject(desired_result_name) is not None:
+            counter += 1
+            desired_result_name = f"{result_name}_{counter}"
+
+        try:
+            result_obj = doc.addObject("Part::Feature", desired_result_name)
+        except Exception as exc:
+            return _fail(f"FreeCAD could not create result object '{desired_result_name}': {exc}.")
+
+        try:
+            new_shape = shape.removeSplitter()
+        except Exception as exc:
+            return _fail(f"removeSplitter() failed: {exc}.")
+
+        if new_shape is None:
+            return _fail("removeSplitter() returned None.")
+
+        try:
+            result_obj.Shape = new_shape
+        except Exception as exc:
+            return _fail(f"FreeCAD could not assign result shape: {exc}.")
+
+        # Capture after-state.
+        try:
+            after_valid = bool(new_shape.isValid())
+        except Exception:
+            after_valid = None
+        try:
+            after_solids = len(list(getattr(new_shape, "Solids", []) or []))
+        except Exception:
+            after_solids = 0
+        try:
+            after_faces = len(list(getattr(new_shape, "Faces", []) or []))
+        except Exception:
+            after_faces = 0
+        try:
+            after_edges = len(list(getattr(new_shape, "Edges", []) or []))
+        except Exception:
+            after_edges = 0
+        try:
+            after_vertexes = len(list(getattr(new_shape, "Vertexes", []) or []))
+        except Exception:
+            after_vertexes = 0
+
+        # Validate the result shape.
+        try:
+            if not bool(new_shape.isValid()):
+                return _fail(
+                    f"removeSplitter() produced an invalid shape for '{desired_result_name}'."
+                )
+        except Exception as exc:
+            return _fail(f"removeSplitter() result validation failed: {exc}.")
+
+        doc.commitTransaction()
+        transaction_open = False
+
+        try:
+            volume = float(new_shape.Volume)
+        except Exception:
+            volume = None
+        try:
+            bbox = new_shape.BoundBox
+            bbox_info = {
+                "xmin": float(bbox.XMin),
+                "ymin": float(bbox.YMin),
+                "zmin": float(bbox.ZMin),
+                "xmax": float(bbox.XMax),
+                "ymax": float(bbox.YMax),
+                "zmax": float(bbox.ZMax),
+            }
+        except Exception:
+            bbox_info = None
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "remove_splitter",
+        "result": {
+            "document_id": normalized,
+            "object_name": object_name,
+            "result_name": desired_result_name,
+            "type": "Part::Feature",
+            "before": {
+                "is_valid": before_valid,
+                "solid_count": before_solids,
+                "face_count": before_faces,
+                "edge_count": before_edges,
+                "vertex_count": before_vertexes,
+            },
+            "after": {
+                "is_valid": after_valid,
+                "solid_count": after_solids,
+                "face_count": after_faces,
+                "edge_count": after_edges,
+                "vertex_count": after_vertexes,
+            },
+            "volume": volume,
+            "bounding_box": bbox_info,
+            "meta_before": meta_before,
+        },
+    }
+
+
+# Helper functions used by M16 operations.
+
+def _safe_type_name(obj: Any) -> str | None:
+    """Safely return the type name of an object, or None."""
+    try:
+        # Prefer a .Name attribute (FreeCAD surfaces/curves expose .Name).
+        name = getattr(obj, "Name", None)
+        if name is not None:
+            return str(name)
+        return type(obj).__name__
+    except Exception:
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    """Safely convert a value to float, or None."""
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _safe_vector(value: Any) -> dict[str, float] | None:
+    """Safely convert a FreeCAD Vector to {x, y, z}, or None."""
+    try:
+        return {"x": float(value.x), "y": float(value.y), "z": float(value.z)}
+    except Exception:
+        return None
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -13085,6 +13858,10 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PARTDESIGN_POLAR_PATTERN: _op_partdesign_polar_pattern,
     OP_PARTDESIGN_MIRRORED: _op_partdesign_mirrored,
     OP_PARTDESIGN_THICKNESS: _op_partdesign_thickness,
+    OP_SHAPE_DIAGNOSTICS: _op_shape_diagnostics,
+    OP_TOPOLOGY_INSPECTION: _op_topology_inspection,
+    OP_REFERENCE_VALIDATION: _op_reference_validation,
+    OP_REMOVE_SPLITTER: _op_remove_splitter,
     OP_CREATE_SNAPSHOT: _op_create_snapshot,
     OP_LIST_SNAPSHOTS: _op_list_snapshots,
     OP_RESTORE_SNAPSHOT: _op_restore_snapshot,

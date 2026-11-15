@@ -1050,9 +1050,164 @@ class PartDesignThicknessResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# M16 — Topology References and Shape Robustness output schemas
+# ---------------------------------------------------------------------------
+
+
+class ShapeDiagnosticsResult(BaseModel):
+    """Result of shape_diagnostics (M16.1)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the inspected object.")
+    type: str = Field(description="FreeCAD TypeId of the object.")
+    has_shape: bool = Field(description="Whether the object has a Shape attribute.")
+    is_null: Optional[bool] = Field(
+        default=None, description="Whether the shape is null (empty)."
+    )
+    is_valid: Optional[bool] = Field(
+        default=None, description="Whether the shape is valid (guarded against OCCError)."
+    )
+    shape_type: Optional[str] = Field(
+        default=None, description="Shape.ShapeType (e.g. 'Solid', 'Compound')."
+    )
+    solid_count: int = Field(description="Number of solids in the shape.")
+    face_count: int = Field(description="Number of faces in the shape.")
+    edge_count: int = Field(description="Number of edges in the shape.")
+    vertex_count: int = Field(description="Number of vertexes in the shape.")
+    per_solid: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-solid validity, volume, and topology counts.",
+    )
+
+
+class TopologyInspectionResult(BaseModel):
+    """Result of topology_inspection (M16.2)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the inspected object.")
+    type: str = Field(description="FreeCAD TypeId of the object.")
+    has_shape: bool = Field(description="Whether the object has a Shape attribute.")
+    solid_count: int = Field(description="Number of solids in the shape.")
+    face_count: int = Field(description="Number of faces in the shape.")
+    edge_count: int = Field(description="Number of edges in the shape.")
+    vertex_count: int = Field(description="Number of vertexes in the shape.")
+    subelement: Optional[dict[str, Any]] = Field(
+        default=None, description="Inspected subelement metadata, if requested."
+    )
+    subelement_error: Optional[str] = Field(
+        default=None, description="Error message if subelement inspection failed."
+    )
+
+
+class ReferenceValidationResult(BaseModel):
+    """Result of reference_validation (M16.3)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the inspected object.")
+    type: str = Field(description="FreeCAD TypeId of the object.")
+    has_shape: bool = Field(description="Whether the object has a Shape attribute.")
+    reference: str = Field(description="The requested subelement reference (e.g. 'Face1' or '0').")
+    exists: bool = Field(description="Whether the subelement currently exists on the shape.")
+    kind: Optional[str] = Field(
+        default=None, description="Subelement kind: 'face', 'edge', 'vertex', 'solid'."
+    )
+    index: Optional[int] = Field(
+        default=None, description="Zero-based index, if resolved from an integer reference."
+    )
+    name: Optional[str] = Field(
+        default=None, description="Resolved 1-based name (e.g. 'Face1'), if applicable."
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Per-subelement metadata (surface/area/center for faces, curve/length for edges, etc.)."
+    )
+    warning: str = Field(
+        description=(
+            "FaceN/EdgeN names are positional and can change meaning after topology "
+            "modifications (fuse, cut, dimension change).  This operation does not "
+            "claim persistent identity or stable references."
+        )
+    )
+
+
+class RemoveSplitterResult(BaseModel):
+    """Result of remove_splitter (M16.4)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    object_name: str = Field(description="Name of the source object.")
+    result_name: str = Field(description="Name of the new result object holding the refined shape.")
+    type: str = Field(description="FreeCAD TypeId of the result object ('Part::Feature').")
+    before: dict[str, Any] = Field(
+        description="Before-state: is_valid, solid_count, face_count, edge_count, vertex_count."
+    )
+    after: dict[str, Any] = Field(
+        description="After-state: is_valid, solid_count, face_count, edge_count, vertex_count."
+    )
+    volume: Optional[float] = Field(
+        default=None, description="Volume of the refined shape in mm^3, if available."
+    )
+    bounding_box: Optional[dict[str, float]] = Field(
+        default=None, description="Bounding box of the refined shape, if available."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the operation."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Input schemas (per-operation) — minimal fields; validation is done manually
 # in the tool handlers because Pydantic V2-style @validator is not guaranteed.
 # ---------------------------------------------------------------------------
+
+
+class ShapeDiagnosticsParams(BaseModel):
+    """Parameters for shape_diagnostics (M16.1)."""
+
+    document_id: str = Field(description="Existing document containing the object.")
+    object_name: str = Field(description="Name of the object whose shape to diagnose.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class TopologyInspectionParams(BaseModel):
+    """Parameters for topology_inspection (M16.2)."""
+
+    document_id: str = Field(description="Existing document containing the object.")
+    object_name: str = Field(description="Name of the object whose shape to inspect.")
+    subelement_index: Optional[int] = Field(
+        default=None, description="Zero-based subelement index (face/edge/vertex/solid). Takes priority over subelement_name."
+    )
+    subelement_name: Optional[str] = Field(
+        default=None, description="Named subelement reference (e.g. 'Face1', 'Edge1')."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class ReferenceValidationParams(BaseModel):
+    """Parameters for reference_validation (M16.3)."""
+
+    document_id: str = Field(description="Existing document containing the object.")
+    object_name: str = Field(description="Name of the object whose shape to validate against.")
+    subelement_reference: str = Field(
+        description="Subelement reference to validate: a name (e.g. 'Face1') or zero-based integer index."
+    )
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class RemoveSplitterParams(BaseModel):
+    """Parameters for remove_splitter (M16.4)."""
+
+    document_id: str = Field(description="Existing document containing the object.")
+    object_name: str = Field(description="Name of the object whose shape to refine.")
+    result_name: str = Field(default="SplitterRemoved", description="Name for the new result object.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
 
 
 class CreateDocumentParams(BaseModel):
@@ -4956,6 +5111,169 @@ def _register_tools(server: Any, settings: Settings) -> None:
             restored_from_snapshot=result["restored_from_snapshot"],
             preservation_snapshot=result.get("preservation_snapshot"),
             validation=result.get("validation"),
+        )
+
+    # ------------------------------------------------------------------
+    # shape_diagnostics (M16.1)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="shape_diagnostics",
+        title="Shape diagnostics",
+        description=(
+            "Report shape validity and diagnostics for an existing object. "
+            "Read-only: never mutates the document.  Guards against OCCError "
+            "from isValid() on null shapes.  Returns is_null, is_valid, "
+            "shape_type, solid/face/edge/vertex counts, and per-solid "
+            "validity and topology information."
+        ),
+        structured_output=True,
+    )
+    def shape_diagnostics_tool(params: ShapeDiagnosticsParams) -> ShapeDiagnosticsResult:
+        """Diagnose a shape and return validity and topology info."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "shape_diagnostics", bridge_params)
+
+        return ShapeDiagnosticsResult(
+            document_id=params.document_id,
+            object_name=params.object_name,
+            type=result.get("type", ""),
+            has_shape=result.get("has_shape", False),
+            is_null=result.get("is_null"),
+            is_valid=result.get("is_valid"),
+            shape_type=result.get("shape_type"),
+            solid_count=result.get("solid_count", 0),
+            face_count=result.get("face_count", 0),
+            edge_count=result.get("edge_count", 0),
+            vertex_count=result.get("vertex_count", 0),
+            per_solid=result.get("per_solid", []),
+        )
+
+    # ------------------------------------------------------------------
+    # topology_inspection (M16.2)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="topology_inspection",
+        title="Topology inspection",
+        description=(
+            "Inspect topology of an existing object's shape.  Read-only.  "
+            "Reports Faces/Edges/Vertexes/Solids counts and supports controlled "
+            "indexed or named subelement inspection (e.g. subelement_index=0 "
+            "or subelement_name='Face1').  Never silently accepts out-of-range "
+            "references."
+        ),
+        structured_output=True,
+    )
+    def topology_inspection_tool(params: TopologyInspectionParams) -> TopologyInspectionResult:
+        """Inspect topology and optionally resolve a subelement."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "workspace": params.workspace or "",
+        }
+        if params.subelement_index is not None:
+            bridge_params["subelement_index"] = params.subelement_index
+        if params.subelement_name is not None:
+            bridge_params["subelement_name"] = params.subelement_name
+        result = _run_bridge_op(bridge, "topology_inspection", bridge_params)
+
+        return TopologyInspectionResult(
+            document_id=params.document_id,
+            object_name=params.object_name,
+            type=result.get("type", ""),
+            has_shape=result.get("has_shape", False),
+            solid_count=result.get("solid_count", 0),
+            face_count=result.get("face_count", 0),
+            edge_count=result.get("edge_count", 0),
+            vertex_count=result.get("vertex_count", 0),
+            subelement=result.get("subelement"),
+            subelement_error=result.get("subelement_error"),
+        )
+
+    # ------------------------------------------------------------------
+    # reference_validation (M16.3)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="reference_validation",
+        title="Reference validation",
+        description=(
+            "Validate whether a requested subelement reference currently "
+            "exists on an object's shape.  Read-only.  Returns existence, "
+            "kind, index, name, and metadata.  Explicitly documents that "
+            "FaceN/EdgeN names are positional and can change meaning after "
+            "topology modifications.  Does not claim persistent identity."
+        ),
+        structured_output=True,
+    )
+    def reference_validation_tool(params: ReferenceValidationParams) -> ReferenceValidationResult:
+        """Validate a subelement reference on a shape."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "subelement_reference": params.subelement_reference,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "reference_validation", bridge_params)
+
+        return ReferenceValidationResult(
+            document_id=params.document_id,
+            object_name=params.object_name,
+            type=result.get("type", ""),
+            has_shape=result.get("has_shape", False),
+            reference=params.subelement_reference,
+            exists=result.get("exists", False),
+            kind=result.get("kind"),
+            index=result.get("index"),
+            name=result.get("name"),
+            metadata=result.get("metadata", {}),
+            warning=result.get(
+                "warning",
+                "FaceN/EdgeN names are positional and can change meaning after topology modifications.",
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # remove_splitter (M16.4)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="remove_splitter",
+        title="Remove splitter",
+        description=(
+            "Explicit user-invoked removeSplitter() on an existing object's "
+            "shape.  Returns a new shape via a result object; does not "
+            "silently replace or mutate the original document object.  Reports "
+            "before/after validity and topology counts.  The document is "
+            "locked, recomputed, saved atomically, and its revision is bumped."
+        ),
+        structured_output=True,
+    )
+    def remove_splitter_tool(params: RemoveSplitterParams) -> RemoveSplitterResult:
+        """Remove splitter from a shape and return a new result object."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "object_name": params.object_name,
+            "result_name": params.result_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "remove_splitter", bridge_params)
+
+        return RemoveSplitterResult(
+            document_id=params.document_id,
+            object_name=params.object_name,
+            result_name=result.get("result_name", params.result_name),
+            type=result.get("type", "Part::Feature"),
+            before=result.get("before", {}),
+            after=result.get("after", {}),
+            volume=result.get("volume"),
+            bounding_box=result.get("bounding_box"),
+            meta_before=result.get("meta_before"),
         )
 
 # ---------------------------------------------------------------------------

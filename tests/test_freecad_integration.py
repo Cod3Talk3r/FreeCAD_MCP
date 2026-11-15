@@ -7565,3 +7565,264 @@ def test_real_freecad_sketch_subtractive_pipe_invalid_spine(tmp_path: Path) -> N
     after = bridge.run("list_objects", {**params})["objects"]
     after_names = [obj["name"] for obj in after]
     assert after_names == before_names
+
+
+# ---------------------------------------------------------------------------
+# M16 — Topology References and Shape Robustness (native FreeCAD 1.1.4)
+# ---------------------------------------------------------------------------
+
+
+@requires_freecad
+def test_real_freecad_shape_diagnostics_valid_box(tmp_path: Path) -> None:
+    """shape_diagnostics on a real Part::Box returns validity and counts."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16diag", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16diag",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 20.0,
+            "height": 30.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "shape_diagnostics",
+        {"document_id": "m16diag", "object_name": "Box1", "workspace": workspace},
+    )
+
+    assert result["has_shape"] is True
+    assert result["is_null"] is False
+    assert result["is_valid"] is True
+    assert result["shape_type"] == "Solid"
+    assert result["solid_count"] == 1
+    assert result["face_count"] == 6
+    assert result["edge_count"] == 12
+    assert result["vertex_count"] == 8
+    assert len(result["per_solid"]) == 1
+    assert result["per_solid"][0]["is_valid"] is True
+
+
+@requires_freecad
+def test_real_freecad_shape_diagnostics_object_not_found(tmp_path: Path) -> None:
+    """shape_diagnostics on a missing object raises FreeCadOperationError."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16diag2", "workspace": workspace})
+
+    with pytest.raises(FreeCadOperationError):
+        bridge.run(
+            "shape_diagnostics",
+            {"document_id": "m16diag2", "object_name": "NoSuchObject", "workspace": workspace},
+        )
+
+
+@requires_freecad
+def test_real_freecad_topology_inspection_counts(tmp_path: Path) -> None:
+    """topology_inspection reports aggregate counts for a real box."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16topo", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16topo",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "topology_inspection",
+        {"document_id": "m16topo", "object_name": "Box1", "workspace": workspace},
+    )
+
+    assert result["solid_count"] == 1
+    assert result["face_count"] == 6
+    assert result["edge_count"] == 12
+    assert result["vertex_count"] == 8
+
+
+@requires_freecad
+def test_real_freecad_topology_inspection_indexed_face(tmp_path: Path) -> None:
+    """topology_inspection with subelement_index returns face metadata."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16topo2", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16topo2",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "topology_inspection",
+        {
+            "document_id": "m16topo2",
+            "object_name": "Box1",
+            "subelement_index": 0,
+            "workspace": workspace,
+        },
+    )
+
+    assert result["subelement"] is not None
+    sub = result["subelement"]
+    assert sub["kind"] == "face"
+    assert sub["index"] == 0
+    assert sub["surface"] == "Plane"
+    assert sub["area"] > 0
+
+
+@requires_freecad
+def test_real_freecad_topology_inspection_out_of_range(tmp_path: Path) -> None:
+    """topology_inspection with out-of-range index returns an error."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16topo3", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16topo3",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "topology_inspection",
+        {
+            "document_id": "m16topo3",
+            "object_name": "Box1",
+            "subelement_index": 999,
+            "workspace": workspace,
+        },
+    )
+
+    assert result["subelement"] is None
+    assert result["subelement_error"] is not None
+
+
+@requires_freecad
+def test_real_freecad_reference_validation_face1(tmp_path: Path) -> None:
+    """reference_validation on Face1 returns exists=True."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16ref", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16ref",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "reference_validation",
+        {
+            "document_id": "m16ref",
+            "object_name": "Box1",
+            "subelement_reference": "Face1",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["exists"] is True
+    assert result["kind"] == "face"
+    assert result["name"] == "Face1"
+    assert "warning" in result
+
+
+@requires_freecad
+def test_real_freecad_reference_validation_invalid(tmp_path: Path) -> None:
+    """reference_validation on Face999 returns exists=False."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16ref2", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16ref2",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "reference_validation",
+        {
+            "document_id": "m16ref2",
+            "object_name": "Box1",
+            "subelement_reference": "Face999",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["exists"] is False
+
+
+@requires_freecad
+def test_real_freecad_remove_splitter(tmp_path: Path) -> None:
+    """remove_splitter creates a new result object with before/after state."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m16split", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m16split",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+
+    result = bridge.run(
+        "remove_splitter",
+        {
+            "document_id": "m16split",
+            "object_name": "Box1",
+            "result_name": "Cleaned1",
+            "workspace": workspace,
+        },
+    )
+
+    assert result["result_name"] == "Cleaned1"
+    assert result["type"] == "Part::Feature"
+    assert result["before"]["is_valid"] is True
+    assert result["before"]["solid_count"] == 1
+    assert result["after"]["is_valid"] is True
+    assert result["after"]["solid_count"] == 1
+    assert result["volume"] > 0

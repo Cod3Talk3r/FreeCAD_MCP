@@ -402,7 +402,13 @@ documentation. Features already implemented are not repeated as new work.
   classification, downstream dependency impact and operation recovery.
 - **Dependencies:** M13 lifecycle and M15 feature variety; selectively parallel
   with M14 only for reference research.
-- **Implementation status:** Not yet started; upcoming milestone.
+- **Implementation status:** M16.1 Shape Diagnostics, M16.2 Topology Inspection,
+  M16.3 Reference Validation, and M16.4 Explicit removeSplitter completed and
+  committed. Implemented as read-only bridge operations (`shape_diagnostics`,
+  `topology_inspection`, `reference_validation`, `remove_splitter`) with MCP
+  tool adapters and Pydantic schemas. `Shape.fix()` intentionally excluded —
+  repair efficacy not yet verified on a genuinely invalid shape. FaceN/EdgeN
+  names confirmed positional and unstable across topology modifications.
 - **FreeCAD APIs:** `Shape.check`, `isValid`, `fix`/`removeSplitter` and
   subelement access are candidate APIs, not blanket guarantees; test each on
   representative invalid/valid geometry. Avoid claiming universal stable
