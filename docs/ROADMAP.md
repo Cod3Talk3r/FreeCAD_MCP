@@ -336,6 +336,14 @@ documentation. Features already implemented are not repeated as new work.
   `sketch_add_external_geometry` — add external edge geometry via
   `addExternal`. Both are exposed as MCP tools and Workbench operations through
   the shared `freecad_bridge.runner` operation layer.
+- **Implemented (M14.2):** `sketch_add_constraint`, `sketch_delete_constraint`,
+  `sketch_edit_constraint` — geometric/dimensional constraint operations with
+  solver status diagnostics (`recompute_ok`, `solver_status`) captured via
+  `sketch.recompute()`; exposed as MCP tools and Workbench operations through
+  the shared `freecad_bridge.runner` operation layer. Note: `DistanceX`/`DistanceY`
+  constraint types are not supported in production, so `fully_constrained`,
+  `redundant`, and `conflicting` solver statuses cannot be constructed through
+  production constraint operations; only `under_constrained` can be asserted.
 - **Verified cases:** standalone sketch attachment to a support Face; Body sketch
   attachment to a same-Body Face; standalone sketch external geometry from an
   external Part feature edge; Body sketch external geometry from a same-Body
@@ -365,6 +373,11 @@ documentation. Features already implemented are not repeated as new work.
   (sweep/revolution/loft/shell/refinement/repair) based on verified need. Do not
   reimplement existing booleans, Pad, Pocket, Groove, Revolution, Fillet,
   Chamfer, patterns, Mirrored or Thickness.
+- **Implementation status:** AdditivePipe, AdditiveLoft, SubtractivePipe,
+  SubtractiveLoft and Hole completed and committed. Hole implemented (sketch
+  profile + base face, diameter/depth, conservative Body/same-Body eligibility,
+  solid validation, save/reopen, revision bump). No M15 features remain pending;
+  do not reopen completed features.
 - **Dependencies:** M12 capability evidence, M13 body/dependency lifecycle, M14
   profile/solver foundation for sketch-driven features.
 - **FreeCAD APIs:** native `PartDesign::*Pipe`, `*Loft`, `Hole` object types and
@@ -389,6 +402,7 @@ documentation. Features already implemented are not repeated as new work.
   classification, downstream dependency impact and operation recovery.
 - **Dependencies:** M13 lifecycle and M15 feature variety; selectively parallel
   with M14 only for reference research.
+- **Implementation status:** Not yet started; upcoming milestone.
 - **FreeCAD APIs:** `Shape.check`, `isValid`, `fix`/`removeSplitter` and
   subelement access are candidate APIs, not blanket guarantees; test each on
   representative invalid/valid geometry. Avoid claiming universal stable
