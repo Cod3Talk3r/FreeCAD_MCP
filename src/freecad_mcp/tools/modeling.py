@@ -1210,6 +1210,189 @@ class RemoveSplitterParams(BaseModel):
     )
 
 
+class AssemblyCreateParams(BaseModel):
+    """Parameters for assembly_create (M17)."""
+
+    document_id: str = Field(description="Document to create the assembly in.")
+    assembly_name: str = Field(default="Assembly", description="Name for the new Assembly::AssemblyObject.")
+    joint_group_name: str = Field(default="Joints", description="Name for the Assembly::JointGroup child.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class AssemblyCreateResult(BaseModel):
+    """Result of assembly_create (M17)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    assembly_name: str = Field(description="Name of the new Assembly::AssemblyObject.")
+    joint_group_name: str = Field(description="Name of the Assembly::JointGroup child.")
+    type: str = Field(description="FreeCAD TypeId, 'Assembly::AssemblyObject'.")
+    solver_type: str = Field(description="Native solver type, always 'Assembly' when solvable.")
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the assembly was created."
+    )
+
+
+class AssemblyAddComponentParams(BaseModel):
+    """Parameters for assembly_add_component (M17)."""
+
+    document_id: str = Field(description="Existing document containing the assembly and target object.")
+    assembly_name: str = Field(description="Name of the Assembly::AssemblyObject.")
+    object_name: str = Field(description="Name of the existing object to link into the assembly.")
+    component_name: str = Field(default="Component1", description="Name for the new App::Link component.")
+    x: float = Field(default=0.0, description="Component placement X in millimetres.")
+    y: float = Field(default=0.0, description="Component placement Y in millimetres.")
+    z: float = Field(default=0.0, description="Component placement Z in millimetres.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class AssemblyAddComponentResult(BaseModel):
+    """Result of assembly_add_component (M17)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    assembly_name: str = Field(description="Name of the assembly.")
+    component_name: str = Field(description="Name of the new App::Link component.")
+    object_name: str = Field(description="Name of the linked (original) object.")
+    type: str = Field(description="FreeCAD TypeId of the component, 'App::Link'.")
+    placement: Optional[dict[str, Any]] = Field(
+        default=None, description="Component placement after recompute (base XYZ and rotation)."
+    )
+    target_volume_before: Optional[float] = Field(
+        default=None, description="Volume of the linked object before component creation (mm^3)."
+    )
+    target_volume_after: Optional[float] = Field(
+        default=None, description="Volume of the linked object after recompute (mm^3); unchanged proves the original was not modified."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the component was added."
+    )
+
+
+class AssemblyCreateJointParams(BaseModel):
+    """Parameters for assembly_create_joint (M17)."""
+
+    document_id: str = Field(description="Existing document containing the assembly and components.")
+    assembly_name: str = Field(description="Name of the Assembly::AssemblyObject.")
+    joint_name: str = Field(description="Name for the new joint object.")
+    joint_type: str = Field(description="Joint type: 'Fixed' or 'Revolute' (the only verified types).")
+    component1: str = Field(description="Name of the first component (App::Link or part).")
+    refs1: list[str] = Field(description="Subelement names on component1's original geometry (e.g. ['Face6', 'Vertex7']).")
+    component2: str = Field(description="Name of the second component.")
+    refs2: list[str] = Field(description="Subelement names on component2's original geometry.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class AssemblyCreateJointResult(BaseModel):
+    """Result of assembly_create_joint (M17)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    assembly_name: str = Field(description="Name of the assembly.")
+    joint_name: str = Field(description="Name of the new joint object.")
+    joint_type: str = Field(description="Requested joint type ('Fixed' or 'Revolute').")
+    joint_type_actual: str = Field(description="Native JointType property after creation.")
+    component1: str = Field(description="Name of the first component.")
+    refs1: list[str] = Field(description="Subelement names used on component1.")
+    component2: str = Field(description="Name of the second component.")
+    refs2: list[str] = Field(description="Subelement names used on component2.")
+    component1_placement_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Component1 placement before setJointConnectors."
+    )
+    component2_placement_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Component2 placement before setJointConnectors."
+    )
+    component1_placement_after: Optional[dict[str, Any]] = Field(
+        default=None, description="Component1 placement after setJointConnectors and recompute (may differ: preSolve repositions components)."
+    )
+    component2_placement_after: Optional[dict[str, Any]] = Field(
+        default=None, description="Component2 placement after setJointConnectors and recompute."
+    )
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the joint was created."
+    )
+
+
+class AssemblyGroundComponentParams(BaseModel):
+    """Parameters for assembly_ground_component (M17)."""
+
+    document_id: str = Field(description="Existing document containing the assembly and component.")
+    assembly_name: str = Field(description="Name of the Assembly::AssemblyObject.")
+    component_name: str = Field(description="Name of the component to ground.")
+    ground_name: str = Field(default="GroundedJoint1", description="Name for the new GroundedJoint object.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class AssemblyGroundComponentResult(BaseModel):
+    """Result of assembly_ground_component (M17)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    assembly_name: str = Field(description="Name of the assembly.")
+    ground_name: str = Field(description="Name of the new GroundedJoint object.")
+    component_name: str = Field(description="Name of the grounded component.")
+    type: str = Field(description="FreeCAD TypeId of the grounded joint object ('App::FeaturePython').")
+    meta_before: Optional[dict[str, Any]] = Field(
+        default=None, description="Document metadata side-car before the grounding was added."
+    )
+
+
+class AssemblySolveParams(BaseModel):
+    """Parameters for assembly_solve (M17)."""
+
+    document_id: str = Field(description="Existing document containing the assembly.")
+    assembly_name: str = Field(description="Name of the Assembly::AssemblyObject to solve.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class AssemblySolveResult(BaseModel):
+    """Result of assembly_solve (M17)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    assembly_name: str = Field(description="Name of the solved assembly.")
+    solve_status: int = Field(description="Native assembly.solve() return value (0 = success).")
+    solved: bool = Field(description="True when solve_status == 0.")
+    components: list[dict[str, Any]] = Field(
+        description="Per-component state after solve (name, type, placement, connected, volume)."
+    )
+    joints: list[dict[str, Any]] = Field(description="Regular joints in the assembly's JointGroup.")
+    grounded_joints: list[dict[str, Any]] = Field(description="Grounded joints in the assembly's JointGroup.")
+
+
+class AssemblyInspectParams(BaseModel):
+    """Parameters for assembly_inspect (M17)."""
+
+    document_id: str = Field(description="Existing document containing the assembly.")
+    assembly_name: str = Field(description="Name of the Assembly::AssemblyObject to inspect.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
+class AssemblyInspectResult(BaseModel):
+    """Result of assembly_inspect (M17)."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    assembly_name: str = Field(description="Name of the inspected assembly.")
+    type: str = Field(description="FreeCAD TypeId, 'Assembly::AssemblyObject'.")
+    solver_type: str = Field(description="Native solver type, always 'Assembly' when solvable.")
+    joint_group_name: Optional[str] = Field(
+        default=None, description="Name of the assembly's JointGroup child, when present."
+    )
+    component_count: int = Field(description="Number of components in the assembly.")
+    joint_count: int = Field(description="Number of regular joints in the JointGroup.")
+    grounded_joint_count: int = Field(description="Number of grounded joints in the JointGroup.")
+    components: list[dict[str, Any]] = Field(description="Per-component details.")
+    joints: list[dict[str, Any]] = Field(description="Per-joint details (JointType, references).")
+    grounded_joints: list[dict[str, Any]] = Field(description="Per-grounded-joint details (ObjectToGround).")
+
+
 class CreateDocumentParams(BaseModel):
     """Parameters for creating a new document."""
 
@@ -5274,6 +5457,261 @@ def _register_tools(server: Any, settings: Settings) -> None:
             volume=result.get("volume"),
             bounding_box=result.get("bounding_box"),
             meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # assembly_create (M17)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="assembly_create",
+        title="Create assembly",
+        description=(
+            "Create a native FreeCAD 1.1.4 Assembly::AssemblyObject with "
+            "Type='Assembly' (required for the native solver) and an "
+            "Assembly::JointGroup child named *joint_group_name* (default "
+            "'Joints').  Components are added afterwards with "
+            "assembly_add_component and joints with assembly_create_joint / "
+            "assembly_ground_component.  The document is locked exclusively "
+            "during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def assembly_create_tool(params: AssemblyCreateParams) -> AssemblyCreateResult:
+        """Create an assembly and return its info."""
+        validate_direct_request("assembly_create", params.model_dump())
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "assembly_name": params.assembly_name,
+            "joint_group_name": params.joint_group_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "assembly_create", bridge_params)
+
+        return AssemblyCreateResult(
+            document_id=params.document_id,
+            assembly_name=result.get("assembly_name", params.assembly_name),
+            joint_group_name=result.get("joint_group_name", params.joint_group_name),
+            type=result.get("type", "Assembly::AssemblyObject"),
+            solver_type=result.get("solver_type", "Assembly"),
+            meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # assembly_add_component (M17)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="assembly_add_component",
+        title="Add component to assembly",
+        description=(
+            "Link an existing document object into an assembly as an App::Link "
+            "component with an explicit placement (x, y, z in millimetres).  The "
+            "original (linked) object is never modified; its volume before and "
+            "after recompute is reported as evidence.  Requires an assembly "
+            "created by assembly_create.  The document is locked exclusively "
+            "during the operation and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def assembly_add_component_tool(params: AssemblyAddComponentParams) -> AssemblyAddComponentResult:
+        """Add a component link to an assembly and return its info."""
+        validate_direct_request("assembly_add_component", params.model_dump())
+        for name, value in (("x", params.x), ("y", params.y), ("z", params.z)):
+            if math.isnan(value) or math.isinf(value):
+                raise ValueError(f"{name} must be a finite number.")
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "assembly_name": params.assembly_name,
+            "object_name": params.object_name,
+            "component_name": params.component_name,
+            "x": params.x,
+            "y": params.y,
+            "z": params.z,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "assembly_add_component", bridge_params)
+
+        return AssemblyAddComponentResult(
+            document_id=params.document_id,
+            assembly_name=result.get("assembly_name", params.assembly_name),
+            component_name=result.get("component_name", params.component_name),
+            object_name=result.get("object_name", params.object_name),
+            type=result.get("type", "App::Link"),
+            placement=result.get("placement"),
+            target_volume_before=result.get("target_volume_before"),
+            target_volume_after=result.get("target_volume_after"),
+            meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # assembly_create_joint (M17)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="assembly_create_joint",
+        title="Create assembly joint",
+        description=(
+            "Create a native Fixed or Revolute joint between two assembly "
+            "components.  Connectors are assigned with the verified "
+            "JointObject.setJointConnectors API using subelement references on "
+            "the components' geometry (e.g. ['Face6', 'Vertex7']); refs must "
+            "exist on the original objects or the operation fails with a "
+            "structured error.  NOTE: setJointConnectors may reposition "
+            "components through its preSolve step - both components' placements "
+            "before and after are reported.  Detach1/Detach2 only protect "
+            "placements during recompute, not connector setup, so they are not "
+            "exposed.  The document is locked exclusively during the operation "
+            "and saved atomically."
+        ),
+        structured_output=True,
+    )
+    def assembly_create_joint_tool(params: AssemblyCreateJointParams) -> AssemblyCreateJointResult:
+        """Create a joint between two assembly components."""
+        validate_direct_request("assembly_create_joint", params.model_dump())
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "assembly_name": params.assembly_name,
+            "joint_name": params.joint_name,
+            "joint_type": params.joint_type,
+            "component1": params.component1,
+            "refs1": params.refs1,
+            "component2": params.component2,
+            "refs2": params.refs2,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "assembly_create_joint", bridge_params)
+
+        return AssemblyCreateJointResult(
+            document_id=params.document_id,
+            assembly_name=result.get("assembly_name", params.assembly_name),
+            joint_name=result.get("joint_name", params.joint_name),
+            joint_type=result.get("joint_type", params.joint_type),
+            joint_type_actual=result.get("joint_type_actual", ""),
+            component1=result.get("component1", params.component1),
+            refs1=result.get("refs1", params.refs1),
+            component2=result.get("component2", params.component2),
+            refs2=result.get("refs2", params.refs2),
+            component1_placement_before=result.get("component1_placement_before"),
+            component2_placement_before=result.get("component2_placement_before"),
+            component1_placement_after=result.get("component1_placement_after"),
+            component2_placement_after=result.get("component2_placement_after"),
+            meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # assembly_ground_component (M17)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="assembly_ground_component",
+        title="Ground assembly component",
+        description=(
+            "Ground an assembly component with a native GroundedJoint "
+            "(JointObject.GroundedJoint).  A grounded component is fixed in "
+            "place during solve; the GroundedJoint is a distinct proxy type "
+            "(ObjectToGround property) and is never modeled as a regular Joint. "
+            "The document is locked exclusively during the operation and saved "
+            "atomically."
+        ),
+        structured_output=True,
+    )
+    def assembly_ground_component_tool(params: AssemblyGroundComponentParams) -> AssemblyGroundComponentResult:
+        """Ground an assembly component."""
+        validate_direct_request("assembly_ground_component", params.model_dump())
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "assembly_name": params.assembly_name,
+            "component_name": params.component_name,
+            "ground_name": params.ground_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "assembly_ground_component", bridge_params)
+
+        return AssemblyGroundComponentResult(
+            document_id=params.document_id,
+            assembly_name=result.get("assembly_name", params.assembly_name),
+            ground_name=result.get("ground_name", params.ground_name),
+            component_name=result.get("component_name", params.component_name),
+            type=result.get("type", "App::FeaturePython"),
+            meta_before=result.get("meta_before"),
+        )
+
+    # ------------------------------------------------------------------
+    # assembly_solve (M17)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="assembly_solve",
+        title="Solve assembly",
+        description=(
+            "Run the native assembly solver (assembly.solve()).  Returns the "
+            "native solve status (0 = success), per-component placements and "
+            "connectivity, plus the assembly's joints and grounded joints.  "
+            "Read-only with respect to the saved artifact: the document is "
+            "recomputed after solving but not saved."
+        ),
+        structured_output=True,
+    )
+    def assembly_solve_tool(params: AssemblySolveParams) -> AssemblySolveResult:
+        """Solve the assembly and return structured results."""
+        validate_direct_request("assembly_solve", params.model_dump())
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "assembly_name": params.assembly_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "assembly_solve", bridge_params)
+
+        return AssemblySolveResult(
+            document_id=params.document_id,
+            assembly_name=result.get("assembly_name", params.assembly_name),
+            solve_status=result.get("solve_status", -1),
+            solved=result.get("solved", False),
+            components=result.get("components", []),
+            joints=result.get("joints", []),
+            grounded_joints=result.get("grounded_joints", []),
+        )
+
+    # ------------------------------------------------------------------
+    # assembly_inspect (M17)
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="assembly_inspect",
+        title="Inspect assembly",
+        description=(
+            "Inspect a native assembly's hierarchy (read-only).  Reports "
+            "components (App::Link and direct children) with placements, "
+            "connectivity and volumes; regular joints (JointType, Reference1/"
+            "Reference2 with subelement names); and grounded joints "
+            "(ObjectToGround).  Read-only; does not modify or save the "
+            "document."
+        ),
+        structured_output=True,
+    )
+    def assembly_inspect_tool(params: AssemblyInspectParams) -> AssemblyInspectResult:
+        """Inspect an assembly and return structured hierarchy info."""
+        validate_direct_request("assembly_inspect", params.model_dump())
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "assembly_name": params.assembly_name,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "assembly_inspect", bridge_params)
+
+        return AssemblyInspectResult(
+            document_id=params.document_id,
+            assembly_name=result.get("assembly_name", params.assembly_name),
+            type=result.get("type", "Assembly::AssemblyObject"),
+            solver_type=result.get("solver_type", ""),
+            joint_group_name=result.get("joint_group_name"),
+            component_count=result.get("component_count", 0),
+            joint_count=result.get("joint_count", 0),
+            grounded_joint_count=result.get("grounded_joint_count", 0),
+            components=result.get("components", []),
+            joints=result.get("joints", []),
+            grounded_joints=result.get("grounded_joints", []),
         )
 
 # ---------------------------------------------------------------------------

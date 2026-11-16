@@ -2,6 +2,14 @@
 
 ## Current task
 
+- M17 Native Assembly foundation implemented (research gate had PASSED on
+  FreeCAD 1.1.4): six allowlisted bridge operations (`assembly_create`,
+  `assembly_add_component`, `assembly_create_joint`, `assembly_ground_component`,
+  `assembly_solve`, `assembly_inspect`) with MCP tools, Pydantic schemas, and
+  shared-layer validation. Only Fixed/Revolute joints; GroundedJoint kept
+  distinct; original linked objects verified unmodified; save/reopen
+  persistence verified. 8 mock tests + 6 native 1.1.4 integration tests pass.
+  Working tree only; not committed.
 - Product architecture research and canonical forward roadmap documented in
   `docs/ROADMAP.md`, including FreeCAD 1.1.4 capability evidence, explicit
   Assembly research gate, shared GUI/MCP boundary, solver isolation, and M12+

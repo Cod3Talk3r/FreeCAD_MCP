@@ -107,6 +107,18 @@ OP_TOPOLOGY_INSPECTION = "topology_inspection"
 OP_REFERENCE_VALIDATION = "reference_validation"
 OP_REMOVE_SPLITTER = "remove_splitter"
 
+# M17 — Native Assembly foundation (research gate passed on 1.1.4)
+OP_ASSEMBLY_CREATE = "assembly_create"
+OP_ASSEMBLY_ADD_COMPONENT = "assembly_add_component"
+OP_ASSEMBLY_CREATE_JOINT = "assembly_create_joint"
+OP_ASSEMBLY_GROUND_COMPONENT = "assembly_ground_component"
+OP_ASSEMBLY_SOLVE = "assembly_solve"
+OP_ASSEMBLY_INSPECT = "assembly_inspect"
+
+#: Verified joint types only (M17 scope). Indices match the installed
+#: ``Assembly/JointObject.py`` JointType enum ordering.
+ASSEMBLY_JOINT_TYPE_INDICES: dict[str, int] = {"Fixed": 0, "Revolute": 1}
+
 #: Upper bound on polygon sides to prevent accidental huge geometry creation.
 #: Enforced consistently in the runner, the parent-side validator, and the MCP
 #: parameter schema.  Raise this only after confirming real-FreeCAD performance.
@@ -13795,6 +13807,938 @@ def _safe_vector(value: Any) -> dict[str, float] | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# M17 — Native Assembly handlers (FreeCAD 1.1.4 verified APIs only)
+# ---------------------------------------------------------------------------
+
+
+def _assembly_find(doc: Any, assembly_name: str) -> Any:
+    """Resolve an ``Assembly::AssemblyObject`` by name or raise ValueError."""
+    obj = doc.getObject(assembly_name)
+    if obj is None:
+        raise ValueError(f"object '{assembly_name}' not found")
+    type_id = getattr(obj, "TypeId", "")
+    if type_id != "Assembly::AssemblyObject":
+        raise ValueError(
+            f"object '{assembly_name}' is type '{type_id}', not 'Assembly::AssemblyObject'"
+        )
+    return obj
+
+
+def _assembly_joint_group(assembly: Any) -> Any:
+    """Return the assembly's first ``Assembly::JointGroup`` child, or None."""
+    try:
+        group = list(getattr(assembly, "Group", []) or [])
+    except Exception:
+        group = []
+    for child in group:
+        if getattr(child, "TypeId", "") == "Assembly::JointGroup":
+            return child
+    return None
+
+
+def _import_joint_object() -> Any:
+    """Import the installed Assembly ``JointObject`` proxy module.
+
+    ``freecadcmd`` registers the Assembly module path at startup; if the direct
+    import fails, importing the ``Assembly`` package first registers the path
+    and the import is retried once.
+    """
+    try:
+        import JointObject  # noqa: PLC0415 - only importable inside FreeCAD
+    except ImportError:
+        import Assembly  # noqa: F401, PLC0415 - registers the Assembly module path
+        import JointObject
+    return JointObject
+
+
+def _unique_child_name(parent: Any, doc: Any, base_name: str) -> str:
+    """Return a name unique in both the document and the parent's Group."""
+    name = base_name
+    counter = 0
+    while doc.getObject(name) is not None:
+        counter += 1
+        name = f"{base_name}_{counter}"
+    try:
+        group_names = {getattr(c, "Name", "") for c in (getattr(parent, "Group", []) or [])}
+    except Exception:
+        group_names = set()
+    while name in group_names:
+        counter += 1
+        name = f"{base_name}_{counter}"
+    return name
+
+
+def _placement_to_dict(plc: Any) -> dict[str, Any] | None:
+    """Serialize a FreeCAD Placement to a plain dict (best effort)."""
+    if plc is None:
+        return None
+    try:
+        base = plc.Base
+        rot = plc.Rotation
+        axis = getattr(rot, "Axis", None)
+        return {
+            "x": float(base.x),
+            "y": float(base.y),
+            "z": float(base.z),
+            "rotation_angle_deg": float(rot.Angle) * 180.0 / math.pi,
+            "rotation_axis": (
+                [float(axis.x), float(axis.y), float(axis.z)] if axis is not None else None
+            ),
+        }
+    except Exception:
+        return None
+
+
+def _assembly_component_summary(assembly: Any) -> list[dict[str, Any]]:
+    """Summarize assembly children: type, placement, connectivity.
+
+    ``AssemblyObject.Group`` is flattened: objects created inside the
+    assembly's JointGroup (joints, grounded joints) also appear as direct
+    assembly children.  Joint objects are therefore excluded from the
+    component list via the JointGroup's membership.
+    """
+    components: list[dict[str, Any]] = []
+    try:
+        group = list(getattr(assembly, "Group", []) or [])
+    except Exception:
+        group = []
+
+    joint_group_names: set[str] = set()
+    joint_group = _assembly_joint_group(assembly)
+    if joint_group is not None:
+        try:
+            joint_group_names = {
+                getattr(c, "Name", "") for c in (getattr(joint_group, "Group", []) or [])
+            }
+        except Exception:
+            joint_group_names = set()
+
+    for child in group:
+        type_id = getattr(child, "TypeId", "")
+        name = getattr(child, "Name", "")
+        if type_id == "Assembly::JointGroup":
+            continue
+        if name in joint_group_names:
+            continue
+        entry: dict[str, Any] = {"name": name, "type": type_id}
+        if hasattr(child, "Placement"):
+            entry["placement"] = _placement_to_dict(child.Placement)
+        if type_id == "App::Link":
+            try:
+                linked = getattr(child, "LinkedObject", None)
+                entry["linked_object"] = getattr(linked, "Name", None)
+            except Exception:
+                entry["linked_object"] = None
+        if hasattr(assembly, "isPartConnected"):
+            try:
+                entry["connected"] = bool(assembly.isPartConnected(child))
+            except Exception:
+                entry["connected"] = None
+        shape = getattr(child, "Shape", None)
+        if shape is not None:
+            try:
+                entry["volume"] = float(shape.Volume)
+            except Exception:
+                pass
+        components.append(entry)
+    return components
+
+
+def _assembly_joint_summary(joint_group: Any) -> dict[str, list[dict[str, Any]]]:
+    """Summarize JointGroup children into joints and grounded joints."""
+    joints: list[dict[str, Any]] = []
+    grounded: list[dict[str, Any]] = []
+    try:
+        group = list(getattr(joint_group, "Group", []) or [])
+    except Exception:
+        group = []
+    for child in group:
+        name = getattr(child, "Name", "")
+        type_id = getattr(child, "TypeId", "")
+        if hasattr(child, "ObjectToGround"):
+            try:
+                grounded_obj = getattr(child, "ObjectToGround", None)
+            except Exception:
+                grounded_obj = None
+            grounded.append(
+                {
+                    "name": name,
+                    "type": type_id,
+                    "grounded_object": getattr(grounded_obj, "Name", None),
+                }
+            )
+        elif hasattr(child, "JointType"):
+            entry: dict[str, Any] = {
+                "name": name,
+                "type": type_id,
+                "joint_type": str(getattr(child, "JointType", "")),
+            }
+            for side in ("Reference1", "Reference2"):
+                try:
+                    ref = getattr(child, side, None)
+                except Exception:
+                    ref = None
+                ref_obj = ref[0] if isinstance(ref, tuple) and len(ref) > 0 else ref
+                ref_subs = list(ref[1]) if isinstance(ref, tuple) and len(ref) > 1 else []
+                entry[side.lower()] = {
+                    "object": getattr(ref_obj, "Name", None),
+                    "subelements": ref_subs,
+                }
+            joints.append(entry)
+        else:
+            joints.append({"name": name, "type": type_id, "joint_type": None})
+    return {"joints": joints, "grounded_joints": grounded}
+
+
+def _op_assembly_create(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a native Assembly::AssemblyObject with a JointGroup.
+
+    M17 — verified APIs: ``doc.addObject("Assembly::AssemblyObject", ...)``,
+    ``assembly.Type = "Assembly"`` (required for the native solver) and
+    ``assembly.newObject("Assembly::JointGroup", ...)``.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    assembly_name = params.get("assembly_name") or "Assembly"
+    joint_group_name = params.get("joint_group_name") or "Joints"
+    workspace_str = params.get("workspace") or ""
+
+    if not assembly_name.strip():
+        return {"ok": False, "op": "assembly_create", "error": "assembly_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "assembly_create", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "assembly_create", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "assembly_create", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "assembly_create", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_or_create_document(_FC, wks, normalized)
+
+        # Object names are unique within a document; never silently reuse one.
+        if doc.getObject(assembly_name) is not None:
+            return _fail(f"object '{assembly_name}' already exists")
+
+        assembly = doc.addObject("Assembly::AssemblyObject", assembly_name)
+        if assembly is None:
+            return _fail("FreeCAD could not create 'Assembly::AssemblyObject'")
+
+        try:
+            assembly.Type = "Assembly"
+        except Exception as exc:
+            return _fail(f"could not set assembly Type='Assembly': {exc}")
+
+        joint_group = assembly.newObject("Assembly::JointGroup", joint_group_name)
+        if joint_group is None:
+            return _fail("FreeCAD could not create 'Assembly::JointGroup'")
+
+        doc.recompute()
+
+        try:
+            type_now = str(assembly.Type)
+        except Exception:
+            type_now = ""
+        if type_now != "Assembly":
+            return _fail(f"assembly Type is '{type_now}' after recompute, expected 'Assembly'")
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "assembly_create", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "assembly_create",
+        "result": {
+            "document_id": normalized,
+            "assembly_name": assembly.Name,
+            "joint_group_name": joint_group.Name,
+            "type": assembly.TypeId,
+            "solver_type": str(assembly.Type),
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_assembly_add_component(params: dict[str, Any]) -> dict[str, Any]:
+    """Add an existing document object into an assembly via ``App::Link``.
+
+    M17 — verified APIs: ``assembly.newObject("App::Link", ...)`` and
+    ``link.LinkedObject = target``.  The original (linked) object is never
+    modified; its volume is reported before and after recompute as evidence.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    assembly_name = params.get("assembly_name") or ""
+    object_name = params.get("object_name") or ""
+    component_name = params.get("component_name") or "Component1"
+    x = float(params.get("x") or 0.0)
+    y = float(params.get("y") or 0.0)
+    z = float(params.get("z") or 0.0)
+    workspace_str = params.get("workspace") or ""
+
+    if not assembly_name.strip():
+        return {"ok": False, "op": "assembly_add_component", "error": "assembly_name must not be empty."}
+    if not object_name.strip():
+        return {"ok": False, "op": "assembly_add_component", "error": "object_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "assembly_add_component", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "assembly_add_component", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "assembly_add_component", "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "assembly_add_component", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        try:
+            assembly = _assembly_find(doc, assembly_name)
+        except ValueError as exc:
+            return _fail(str(exc))
+
+        target = doc.getObject(object_name)
+        if target is None:
+            return _fail(f"object '{object_name}' not found")
+
+        target_volume_before = None
+        target_shape = getattr(target, "Shape", None)
+        if target_shape is not None:
+            try:
+                target_volume_before = float(target_shape.Volume)
+            except Exception:
+                target_volume_before = None
+
+        component_name = _unique_child_name(assembly, doc, component_name)
+        try:
+            link = assembly.newObject("App::Link", component_name)
+        except Exception as exc:
+            return _fail(f"FreeCAD could not create App::Link component: {exc}")
+        if link is None:
+            return _fail("FreeCAD could not create App::Link component")
+
+        try:
+            link.LinkedObject = target
+        except Exception as exc:
+            try:
+                doc.removeObject(link.Name)
+            except Exception:
+                pass
+            return _fail(f"could not link '{object_name}': {exc}")
+
+        try:
+            link.Placement = _FC.Placement(_FC.Vector(x, y, z), _FC.Rotation())
+        except Exception as exc:
+            try:
+                doc.removeObject(link.Name)
+            except Exception:
+                pass
+            return _fail(f"could not set component placement: {exc}")
+
+        doc.recompute()
+
+        # Post-conditions: link resolves to the target; the original object
+        # kept its shape (volume unchanged) despite link manipulation.
+        linked_now = getattr(link, "LinkedObject", None)
+        if getattr(linked_now, "Name", None) != getattr(target, "Name", ""):
+            return _fail(
+                f"component link does not resolve to '{object_name}' after recompute"
+            )
+
+        target_volume_after = None
+        target_shape_after = getattr(target, "Shape", None)
+        if target_shape_after is not None:
+            try:
+                target_volume_after = float(target_shape_after.Volume)
+            except Exception:
+                target_volume_after = None
+        if (
+            target_volume_before is not None
+            and target_volume_after is not None
+            and not math.isclose(target_volume_before, target_volume_after, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            return _fail(
+                f"linked object '{object_name}' volume changed during component creation "
+                f"({target_volume_before} -> {target_volume_after})"
+            )
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": "assembly_add_component", "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "assembly_add_component",
+        "result": {
+            "document_id": normalized,
+            "assembly_name": assembly_name,
+            "component_name": link.Name,
+            "object_name": object_name,
+            "type": link.TypeId,
+            "placement": _placement_to_dict(link.Placement),
+            "target_volume_before": target_volume_before,
+            "target_volume_after": target_volume_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_assembly_create_joint(params: dict[str, Any]) -> dict[str, Any]:
+    """Create a Fixed or Revolute joint between two assembly components.
+
+    M17 — verified APIs: ``App::FeaturePython`` object inside the assembly's
+    JointGroup, ``JointObject.Joint(joint, type_index)``, and
+    ``joint.Proxy.setJointConnectors(joint, refs)`` with
+    ``[component, [subelement, ...]]`` pairs.
+
+    Verified behavior recorded by the M17 probes: ``setJointConnectors`` may
+    reposition components through its preSolve step, so both components'
+    placements are captured before and after and reported in the result.
+    ``Detach1``/``Detach2`` do not influence connector setup; they only protect
+    joint placements during recompute, so they are not exposed here.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    assembly_name = params.get("assembly_name") or ""
+    joint_name = params.get("joint_name") or ""
+    joint_type = params.get("joint_type") or ""
+    component1 = params.get("component1") or ""
+    refs1 = params.get("refs1")
+    component2 = params.get("component2") or ""
+    refs2 = params.get("refs2")
+    workspace_str = params.get("workspace") or ""
+
+    op = "assembly_create_joint"
+
+    if not assembly_name.strip():
+        return {"ok": False, "op": op, "error": "assembly_name must not be empty."}
+    if not joint_name.strip():
+        return {"ok": False, "op": op, "error": "joint_name must not be empty."}
+    if joint_type not in ASSEMBLY_JOINT_TYPE_INDICES:
+        return {
+            "ok": False,
+            "op": op,
+            "error": (
+                f"joint_type '{joint_type}' is not supported. "
+                f"Supported types: {', '.join(sorted(ASSEMBLY_JOINT_TYPE_INDICES))}."
+            ),
+        }
+    if not component1.strip() or not component2.strip():
+        return {"ok": False, "op": op, "error": "component1 and component2 must not be empty."}
+    if component1 == component2:
+        return {"ok": False, "op": op, "error": "component1 and component2 must be different."}
+
+    def _validate_refs(refs: Any, side: str) -> list[str]:
+        if not isinstance(refs, list) or not refs:
+            raise ValueError(f"{side} must be a non-empty list of subelement names (e.g. ['Face6', 'Vertex7']).")
+        cleaned = []
+        for item in refs:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"{side} must contain only non-empty subelement name strings.")
+            cleaned.append(item.strip())
+        return cleaned
+
+    try:
+        refs1_clean = _validate_refs(refs1, "refs1")
+        refs2_clean = _validate_refs(refs2, "refs2")
+    except ValueError as exc:
+        return {"ok": False, "op": op, "error": str(exc)}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": op, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": op, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": op, "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": op, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        try:
+            assembly = _assembly_find(doc, assembly_name)
+        except ValueError as exc:
+            return _fail(str(exc))
+
+        joint_group = _assembly_joint_group(assembly)
+        if joint_group is None:
+            return _fail(
+                f"assembly '{assembly_name}' has no Assembly::JointGroup child; "
+                f"create the assembly with 'assembly_create' first."
+            )
+
+        comp1 = doc.getObject(component1)
+        if comp1 is None:
+            return _fail(f"component '{component1}' not found")
+        comp2 = doc.getObject(component2)
+        if comp2 is None:
+            return _fail(f"component '{component2}' not found")
+
+        plc1_before = _placement_to_dict(getattr(comp1, "Placement", None))
+        plc2_before = _placement_to_dict(getattr(comp2, "Placement", None))
+
+        joint_name = _unique_child_name(joint_group, doc, joint_name)
+        joint = joint_group.newObject("App::FeaturePython", joint_name)
+        if joint is None:
+            return _fail("FreeCAD could not create the joint App::FeaturePython object")
+
+        try:
+            joint_object = _import_joint_object()
+            joint_object.Joint(joint, ASSEMBLY_JOINT_TYPE_INDICES[joint_type])
+        except Exception as exc:
+            try:
+                doc.removeObject(joint.Name)
+            except Exception:
+                pass
+            return _fail(f"could not attach {joint_type} joint proxy: {exc}")
+
+        refs = [
+            [comp1, list(refs1_clean)],
+            [comp2, list(refs2_clean)],
+        ]
+        try:
+            joint.Proxy.setJointConnectors(joint, refs)
+        except Exception as exc:
+            try:
+                doc.removeObject(joint.Name)
+            except Exception:
+                pass
+            return _fail(f"setJointConnectors failed: {exc}")
+
+        doc.recompute()
+
+        plc1_after = _placement_to_dict(getattr(comp1, "Placement", None))
+        plc2_after = _placement_to_dict(getattr(comp2, "Placement", None))
+
+        actual_joint_type = str(getattr(joint, "JointType", ""))
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": op, "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": op,
+        "result": {
+            "document_id": normalized,
+            "assembly_name": assembly_name,
+            "joint_name": joint.Name,
+            "joint_type": joint_type,
+            "joint_type_actual": actual_joint_type,
+            "component1": component1,
+            "refs1": refs1_clean,
+            "component2": component2,
+            "refs2": refs2_clean,
+            "component1_placement_before": plc1_before,
+            "component2_placement_before": plc2_before,
+            "component1_placement_after": plc1_after,
+            "component2_placement_after": plc2_after,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_assembly_ground_component(params: dict[str, Any]) -> dict[str, Any]:
+    """Ground an assembly component with a native GroundedJoint.
+
+    M17 — verified APIs: ``App::FeaturePython`` inside the JointGroup plus
+    ``JointObject.GroundedJoint(joint, component)``.  GroundedJoint is a
+    distinct proxy (``ObjectToGround`` property, no JointType/Reference1/2) and
+    is never modeled as a regular Joint.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    assembly_name = params.get("assembly_name") or ""
+    component_name = params.get("component_name") or ""
+    ground_name = params.get("ground_name") or "GroundedJoint1"
+    workspace_str = params.get("workspace") or ""
+
+    op = "assembly_ground_component"
+
+    if not assembly_name.strip():
+        return {"ok": False, "op": op, "error": "assembly_name must not be empty."}
+    if not component_name.strip():
+        return {"ok": False, "op": op, "error": "component_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": op, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": op, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": op, "error": lock_status.get("error", "lock failed")}
+
+    meta_before = ws_mod.read_meta(wks.meta_path(normalized))
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": op, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        try:
+            assembly = _assembly_find(doc, assembly_name)
+        except ValueError as exc:
+            return _fail(str(exc))
+
+        joint_group = _assembly_joint_group(assembly)
+        if joint_group is None:
+            return _fail(
+                f"assembly '{assembly_name}' has no Assembly::JointGroup child; "
+                f"create the assembly with 'assembly_create' first."
+            )
+
+        component = doc.getObject(component_name)
+        if component is None:
+            return _fail(f"component '{component_name}' not found")
+
+        ground_name = _unique_child_name(joint_group, doc, ground_name)
+        grounded_joint = joint_group.newObject("App::FeaturePython", ground_name)
+        if grounded_joint is None:
+            return _fail("FreeCAD could not create the grounded App::FeaturePython object")
+
+        try:
+            joint_object = _import_joint_object()
+            joint_object.GroundedJoint(grounded_joint, component)
+        except Exception as exc:
+            try:
+                doc.removeObject(grounded_joint.Name)
+            except Exception:
+                pass
+            return _fail(f"could not attach GroundedJoint proxy: {exc}")
+
+        doc.recompute()
+
+        grounded_now = getattr(grounded_joint, "ObjectToGround", None)
+        if getattr(grounded_now, "Name", None) != getattr(component, "Name", ""):
+            return _fail(
+                f"GroundedJoint does not reference '{component_name}' after recompute"
+            )
+
+        fcstd_path = wks.document_path(normalized)
+
+        def _write_tmp(tmp_path: str) -> None:
+            doc.saveAs(str(tmp_path))
+
+        ws_mod.atomic_save(fcstd_path, _write_tmp)
+
+        meta = ws_mod.read_meta(wks.meta_path(normalized))
+        meta["revision"] = meta.get("revision", 0) + 1
+        meta["last_modified_at"] = datetime.now(timezone.utc).isoformat()
+        ws_mod.write_meta(wks.meta_path(normalized), meta)
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": op, "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": op,
+        "result": {
+            "document_id": normalized,
+            "assembly_name": assembly_name,
+            "ground_name": grounded_joint.Name,
+            "component_name": component_name,
+            "type": grounded_joint.TypeId,
+            "meta_before": meta_before,
+        },
+    }
+
+
+def _op_assembly_solve(params: dict[str, Any]) -> dict[str, Any]:
+    """Run the native assembly solver and report per-component state.
+
+    M17 — verified API: ``assembly.solve()`` returns ``0`` on success.  The
+    document is recomputed afterwards so reported placements reflect the solve.
+    Read-only on the artifact besides that recompute: the document is not saved,
+    so a failed solve never persists.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    assembly_name = params.get("assembly_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    op = "assembly_solve"
+
+    if not assembly_name.strip():
+        return {"ok": False, "op": op, "error": "assembly_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": op, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": op, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": op, "error": lock_status.get("error", "lock failed")}
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": op, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        try:
+            assembly = _assembly_find(doc, assembly_name)
+        except ValueError as exc:
+            return _fail(str(exc))
+
+        try:
+            solve_status = int(assembly.solve())
+        except Exception as exc:
+            return _fail(f"assembly.solve() failed: {exc}")
+
+        doc.recompute()
+
+        solved = solve_status == 0
+        components = _assembly_component_summary(assembly)
+
+        joint_group = _assembly_joint_group(assembly)
+        joints: list[dict[str, Any]] = []
+        grounded_joints: list[dict[str, Any]] = []
+        if joint_group is not None:
+            summary = _assembly_joint_summary(joint_group)
+            joints = summary["joints"]
+            grounded_joints = summary["grounded_joints"]
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": op, "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": op,
+        "result": {
+            "document_id": normalized,
+            "assembly_name": assembly_name,
+            "solve_status": solve_status,
+            "solved": solved,
+            "components": components,
+            "joints": joints,
+            "grounded_joints": grounded_joints,
+        },
+    }
+
+
+def _op_assembly_inspect(params: dict[str, Any]) -> dict[str, Any]:
+    """Inspect a native assembly's hierarchy (read-only).
+
+    M17 — reports components (App::Link and direct children), regular joints
+    (JointType + Reference1/Reference2) and grounded joints (ObjectToGround)
+    from the assembly's JointGroup, plus per-component connectivity.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    assembly_name = params.get("assembly_name") or ""
+    workspace_str = params.get("workspace") or ""
+
+    op = "assembly_inspect"
+
+    if not assembly_name.strip():
+        return {"ok": False, "op": op, "error": "assembly_name must not be empty."}
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": op, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": op, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": op, "error": lock_status.get("error", "lock failed")}
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": op, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        try:
+            assembly = _assembly_find(doc, assembly_name)
+        except ValueError as exc:
+            return _fail(str(exc))
+
+        components = _assembly_component_summary(assembly)
+
+        joint_group = _assembly_joint_group(assembly)
+        joint_group_name = getattr(joint_group, "Name", None)
+        joints: list[dict[str, Any]] = []
+        grounded_joints: list[dict[str, Any]] = []
+        if joint_group is not None:
+            summary = _assembly_joint_summary(joint_group)
+            joints = summary["joints"]
+            grounded_joints = summary["grounded_joints"]
+    except Exception as exc:
+        try:
+            ws_mod.release_lock(lock_path, pid)
+        except Exception:
+            pass
+        return {"ok": False, "op": op, "error": f"FreeCAD error: {exc}"}
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": op,
+        "result": {
+            "document_id": normalized,
+            "assembly_name": assembly_name,
+            "type": assembly.TypeId,
+            "solver_type": str(getattr(assembly, "Type", "")),
+            "joint_group_name": joint_group_name,
+            "component_count": len(components),
+            "joint_count": len(joints),
+            "grounded_joint_count": len(grounded_joints),
+            "components": components,
+            "joints": joints,
+            "grounded_joints": grounded_joints,
+        },
+    }
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -13862,6 +14806,12 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_TOPOLOGY_INSPECTION: _op_topology_inspection,
     OP_REFERENCE_VALIDATION: _op_reference_validation,
     OP_REMOVE_SPLITTER: _op_remove_splitter,
+    OP_ASSEMBLY_CREATE: _op_assembly_create,
+    OP_ASSEMBLY_ADD_COMPONENT: _op_assembly_add_component,
+    OP_ASSEMBLY_CREATE_JOINT: _op_assembly_create_joint,
+    OP_ASSEMBLY_GROUND_COMPONENT: _op_assembly_ground_component,
+    OP_ASSEMBLY_SOLVE: _op_assembly_solve,
+    OP_ASSEMBLY_INSPECT: _op_assembly_inspect,
     OP_CREATE_SNAPSHOT: _op_create_snapshot,
     OP_LIST_SNAPSHOTS: _op_list_snapshots,
     OP_RESTORE_SNAPSHOT: _op_restore_snapshot,

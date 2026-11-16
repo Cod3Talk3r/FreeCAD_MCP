@@ -676,6 +676,51 @@ def validate_direct_request(op: str, params: Any) -> None:
             seen_faces.add(f)
             if f < 1:
                 raise ValueError(f"faces[{i}] must be >= 1: {f}.")
+    elif op in ("assembly_create", "assembly_add_component", "assembly_create_joint",
+                "assembly_ground_component", "assembly_solve", "assembly_inspect"):
+        if op == "assembly_add_component":
+            if not params.get("assembly_name", "").strip():
+                raise ValueError("assembly_name must not be empty.")
+            if not params.get("object_name", "").strip():
+                raise ValueError("object_name must not be empty.")
+        elif op == "assembly_create_joint":
+            if not params.get("assembly_name", "").strip():
+                raise ValueError("assembly_name must not be empty.")
+            if not params.get("joint_name", "").strip():
+                raise ValueError("joint_name must not be empty.")
+            joint_type = params.get("joint_type", "")
+            supported_joint_types = ("Fixed", "Revolute")
+            if joint_type not in supported_joint_types:
+                raise ValueError(
+                    f"joint_type '{joint_type}' is not supported. "
+                    f"Supported types: {', '.join(supported_joint_types)}."
+                )
+            if not params.get("component1", "").strip():
+                raise ValueError("component1 must not be empty.")
+            if not params.get("component2", "").strip():
+                raise ValueError("component2 must not be empty.")
+            if params["component1"] == params["component2"]:
+                raise ValueError("component1 and component2 must be different.")
+            for side in ("refs1", "refs2"):
+                refs = params.get(side)
+                if not isinstance(refs, list) or not refs:
+                    raise ValueError(
+                        f"{side} must be a non-empty list of subelement names (e.g. ['Face6', 'Vertex7'])."
+                    )
+                for i, item in enumerate(refs):
+                    if not isinstance(item, str) or not item.strip():
+                        raise ValueError(f"{side}[{i}] must be a non-empty subelement name string.")
+        elif op == "assembly_ground_component":
+            if not params.get("assembly_name", "").strip():
+                raise ValueError("assembly_name must not be empty.")
+            if not params.get("component_name", "").strip():
+                raise ValueError("component_name must not be empty.")
+        elif op == "assembly_solve":
+            if not params.get("assembly_name", "").strip():
+                raise ValueError("assembly_name must not be empty.")
+        elif op == "assembly_inspect":
+            if not params.get("assembly_name", "").strip():
+                raise ValueError("assembly_name must not be empty.")
 
 
 class DirectBackend:

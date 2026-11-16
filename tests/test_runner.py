@@ -16633,3 +16633,437 @@ def test_op_remove_splitter_object_not_found(
     assert result["ok"] is False
     assert result["op"] == "remove_splitter"
     assert "not found" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# M17 — Native Assembly handlers (mocked FreeCAD / JointObject)
+# ---------------------------------------------------------------------------
+
+
+class _FakeJointConnectorProxy:
+    """Stand-in for joint.Proxy (carries setJointConnectors)."""
+
+    def __init__(self, joint: "_FakeAssemblyJointObject") -> None:
+        self._joint = joint
+
+    def setJointConnectors(self, joint: object, refs: list) -> None:
+        self._joint._connectors = refs
+
+
+class _FakeAssemblyJointObject:
+    """Stand-in for a joint created inside a JointGroup."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = "App::FeaturePython"
+        self.Group: list = []
+        self.Placement: object | None = None
+        self.Proxy = _FakeJointConnectorProxy(self)
+
+
+class _FakeJointProxy:
+    """Stand-in for JointObject module proxy functions."""
+
+    @staticmethod
+    def Joint(obj: object, type_index: int) -> None:
+        obj.JointType = {0: "Fixed", 1: "Revolute"}.get(type_index, "Unknown")
+        obj.Detach1 = False
+        obj.Detach2 = False
+
+    @staticmethod
+    def GroundedJoint(obj: object, component: object) -> None:
+        obj.ObjectToGround = component
+
+
+class _FakeAssemblyGroupChild:
+    """Stand-in for App::Link component or JointGroup child."""
+
+    def __init__(self, name: str, type_id: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = type_id
+        self.Group: list = []
+        self.Placement: object | None = None
+        self.LinkedObject: object | None = None
+        self.Shape: object | None = None
+
+    def newObject(self, tid: str, child_name: str) -> object:
+        """Mimic Assembly::JointGroup.newObject for fake children."""
+        if tid == "App::FeaturePython":
+            child: object = _FakeAssemblyJointObject(child_name)
+        else:
+            child = _FakeAssemblyGroupChild(child_name, tid)
+        child.Parent = self
+        self.Group.append(child)
+        return child
+
+
+class _FakeAssemblyDoc:
+    """Minimal Assembly-aware fake document used by M17 mock tests."""
+
+    def __init__(self, name: str) -> None:
+        self.Name = name
+        self.Objects: list = []
+        self.ObjectsByName: dict[str, object] = {}
+        self.ActiveDocument: object | None = None
+
+    def recompute(self) -> None:
+        return None
+
+    def saveAs(self, path: str) -> None:
+        Path(path).write_bytes(b"fake fcstd")
+
+    def getObject(self, name: str) -> object | None:
+        return self.ObjectsByName.get(name)
+
+    def removeObject(self, name: str) -> None:
+        self.Objects = [o for o in self.Objects if getattr(o, "Name", "") != name]
+        self.ObjectsByName.pop(name, None)
+
+    def addObject(self, type_id: str, name: str) -> object:
+        if type_id == "Assembly::AssemblyObject":
+            obj = _FakeAssemblyGroupChild(name, type_id)
+            obj.Type = "Assembly"
+
+            def newObject(tid: str, child_name: str) -> object:
+                if tid == "Assembly::JointGroup":
+                    child = _FakeAssemblyGroupChild(child_name, tid)
+                elif tid == "App::Link":
+                    child = _FakeAssemblyGroupChild(child_name, tid)
+                elif tid == "App::FeaturePython":
+                    child = _FakeAssemblyJointObject(child_name)
+                elif tid == "Part::Box":
+                    child = _FakeAssemblyGroupChild(child_name, tid)
+                else:
+                    child = _FakeAssemblyGroupChild(child_name, tid)
+                child.Parent = obj
+                obj.Group.append(child)
+                self.Objects.append(child)
+                self.ObjectsByName[child_name] = child
+                return child
+
+            def solve() -> int:
+                return 0
+
+            obj.newObject = newObject
+            obj.solve = solve
+            obj.isPartConnected = lambda child: getattr(child, "_connected", True)
+        else:
+            obj = _FakeAssemblyGroupChild(name, type_id)
+        self.Objects.append(obj)
+        self.ObjectsByName[name] = obj
+        return obj
+
+
+def _install_fake_jointobject(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install a fake JointObject module into sys.modules."""
+    module = types.ModuleType("JointObject")
+    module.Joint = _FakeJointProxy.Joint
+    module.GroundedJoint = _FakeJointProxy.GroundedJoint
+    monkeypatch.setitem(sys.modules, "JointObject", module)
+
+
+def test_assembly_create_creates_assembly_and_jointgroup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_create creates Assembly::AssemblyObject + JointGroup."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+
+    result = runner._op_assembly_create(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "joint_group_name": "Joints",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["assembly_name"] == "Assembly"
+    assert result["result"]["joint_group_name"] == "Joints"
+    assert result["result"]["type"] == "Assembly::AssemblyObject"
+    assert result["result"]["solver_type"] == "Assembly"
+
+    assembly = doc.getObject("Assembly")
+    assert assembly is not None
+    assert assembly.Type == "Assembly"
+    assert len(assembly.Group) == 1
+    assert assembly.Group[0].Name == "Joints"
+    assert assembly.Group[0].TypeId == "Assembly::JointGroup"
+
+
+def test_assembly_add_component_links_object_without_modifying_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_add_component creates App::Link; original volume unchanged."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    # Create a Part::Box as the target object.
+    box = doc.addObject("Part::Box", "Box1")
+    box.Shape = SimpleNamespace(Volume=1000.0)
+
+    result = runner._op_assembly_add_component(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "object_name": "Box1",
+            "component_name": "Component1",
+            "x": 10.0,
+            "y": 20.0,
+            "z": 30.0,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["component_name"] == "Component1"
+    assert result["result"]["object_name"] == "Box1"
+    assert result["result"]["type"] == "App::Link"
+    assert result["result"]["target_volume_before"] == 1000.0
+    assert result["result"]["target_volume_after"] == 1000.0
+    assert result["result"]["placement"]["x"] == 10.0
+    assert result["result"]["placement"]["y"] == 20.0
+    assert result["result"]["placement"]["z"] == 30.0
+
+    # The original Box1 object still exists and was not modified.
+    box_after = doc.getObject("Box1")
+    assert box_after is not None
+    assert box_after.Shape.Volume == 1000.0
+
+
+def test_assembly_add_component_rejects_missing_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_add_component fails with structured error for missing object."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    result = runner._op_assembly_add_component(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "object_name": "Missing",
+        }
+    )
+
+    assert result["ok"] is False
+    assert "not found" in result["error"].lower()
+
+
+def test_assembly_create_joint_fixed_between_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_create_joint creates Fixed joint with setJointConnectors."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    comp1 = doc.getObject("Assembly").newObject("App::Link", "Comp1")
+    comp2 = doc.getObject("Assembly").newObject("App::Link", "Comp2")
+    comp1.Placement = SimpleNamespace(Base=SimpleNamespace(x=0, y=0, z=0),
+                                      Rotation=SimpleNamespace(Angle=0.0, Axis=None))
+    comp2.Placement = SimpleNamespace(Base=SimpleNamespace(x=30, y=0, z=0),
+                                      Rotation=SimpleNamespace(Angle=0.0, Axis=None))
+
+    result = runner._op_assembly_create_joint(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "joint_name": "Joint1",
+            "joint_type": "Fixed",
+            "component1": "Comp1",
+            "refs1": ["Face6", "Vertex7"],
+            "component2": "Comp2",
+            "refs2": ["Face6", "Vertex7"],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["joint_name"] == "Joint1"
+    assert result["result"]["joint_type"] == "Fixed"
+    assert result["result"]["joint_type_actual"] == "Fixed"
+    assert result["result"]["component1_placement_before"]["x"] == 0.0
+    assert result["result"]["component2_placement_before"]["x"] == 30.0
+    assert result["result"]["component1_placement_after"] is not None
+    assert result["result"]["component2_placement_after"] is not None
+
+    # The joint object was created and holds the connectors.
+    joint_group = doc.getObject("Joints")
+    assert joint_group is not None
+    joints = [c for c in joint_group.Group]
+    assert len(joints) == 1
+    joint = joints[0]
+    assert joint.JointType == "Fixed"
+    assert hasattr(joint, "_connectors")
+
+
+def test_assembly_create_joint_rejects_unverified_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_create_joint rejects unverified joint types."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    comp1 = doc.addObject("App::Link", "Comp1")
+    comp2 = doc.addObject("App::Link", "Comp2")
+
+    result = runner._op_assembly_create_joint(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "joint_name": "Joint1",
+            "joint_type": "Slider",  # not supported
+            "component1": "Comp1",
+            "refs1": ["Face6"],
+            "component2": "Comp2",
+            "refs2": ["Face6"],
+        }
+    )
+
+    assert result["ok"] is False
+    assert "not supported" in result["error"].lower()
+
+
+def test_assembly_ground_component_attaches_groundedjoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_ground_component attaches GroundedJoint proxy to component."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    comp = doc.addObject("App::Link", "Comp1")
+
+    result = runner._op_assembly_ground_component(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "component_name": "Comp1",
+            "ground_name": "Grounded1",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["ground_name"] == "Grounded1"
+    assert result["result"]["component_name"] == "Comp1"
+    assert result["result"]["type"] == "App::FeaturePython"
+
+    joint_group = doc.getObject("Joints")
+    assert joint_group is not None
+    grounded = joint_group.Group[0]
+    assert hasattr(grounded, "ObjectToGround")
+    assert grounded.ObjectToGround.Name == "Comp1"
+
+
+def test_assembly_solve_returns_success_and_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_solve returns solve_status=0 and per-component state."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    comp1 = doc.getObject("Assembly").newObject("App::Link", "Comp1")
+    comp2 = doc.getObject("Assembly").newObject("App::Link", "Comp2")
+    comp1._connected = True
+    comp2._connected = False
+
+    result = runner._op_assembly_solve(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["solve_status"] == 0
+    assert result["result"]["solved"] is True
+    assert len(result["result"]["components"]) == 2
+    comp_names = {c["name"] for c in result["result"]["components"]}
+    assert comp_names == {"Comp1", "Comp2"}
+    comp1_entry = next(c for c in result["result"]["components"] if c["name"] == "Comp1")
+    comp2_entry = next(c for c in result["result"]["components"] if c["name"] == "Comp2")
+    assert comp1_entry["connected"] is True
+    assert comp2_entry["connected"] is False
+
+
+def test_assembly_inspect_reports_hierarchy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """assembly_inspect reports components, joints and grounded joints."""
+    doc = _FakeAssemblyDoc("adoc")
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+    _install_fake_jointobject(monkeypatch)
+    runner._op_assembly_create({"document_id": "adoc", "workspace": str(tmp_path)})
+
+    comp1 = doc.getObject("Assembly").newObject("App::Link", "Comp1")
+    comp2 = doc.getObject("Assembly").newObject("App::Link", "Comp2")
+    comp1.Placement = SimpleNamespace(Base=SimpleNamespace(x=0, y=0, z=0),
+                                      Rotation=SimpleNamespace(Angle=0.0, Axis=None))
+    comp2.Placement = SimpleNamespace(Base=SimpleNamespace(x=30, y=0, z=0),
+                                      Rotation=SimpleNamespace(Angle=0.0, Axis=None))
+
+    # Create a fixed joint and a grounded joint.
+    runner._op_assembly_create_joint(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "joint_name": "Joint1",
+            "joint_type": "Fixed",
+            "component1": "Comp1",
+            "refs1": ["Face6"],
+            "component2": "Comp2",
+            "refs2": ["Face6"],
+        }
+    )
+    runner._op_assembly_ground_component(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+            "component_name": "Comp1",
+            "ground_name": "Grounded1",
+        }
+    )
+
+    result = runner._op_assembly_inspect(
+        {
+            "document_id": "adoc",
+            "workspace": str(tmp_path),
+            "assembly_name": "Assembly",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["component_count"] == 2
+    assert result["result"]["joint_count"] == 1
+    assert result["result"]["grounded_joint_count"] == 1
+
+    # Check joint details.
+    assert len(result["result"]["joints"]) == 1
+    joint_info = result["result"]["joints"][0]
+    assert joint_info["joint_type"] == "Fixed"
+
+    # Check grounded joint details.
+    assert len(result["result"]["grounded_joints"]) == 1
+    grounded_info = result["result"]["grounded_joints"][0]
+    assert grounded_info["grounded_object"] == "Comp1"

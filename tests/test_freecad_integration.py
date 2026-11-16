@@ -8090,3 +8090,431 @@ def test_real_freecad_m16_save_reopen_persistence(tmp_path: Path) -> None:
     assert topo["face_count"] == 6
     assert topo["edge_count"] == 12
     assert topo["vertex_count"] == 8
+
+
+# ---------------------------------------------------------------------------
+# M17 — Native Assembly foundation (verified on FreeCAD 1.1.4)
+# ---------------------------------------------------------------------------
+
+
+@requires_freecad
+def test_real_freecad_assembly_create(tmp_path: Path) -> None:
+    """assembly_create creates Assembly::AssemblyObject with Type='Assembly' and JointGroup."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m17asm1", "workspace": workspace})
+
+    result = bridge.run(
+        "assembly_create",
+        {
+            "document_id": "m17asm1",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "joint_group_name": "Joints",
+        },
+    )
+
+    assert result["assembly_name"] == "Assembly"
+    assert result["joint_group_name"] == "Joints"
+    assert result["type"] == "Assembly::AssemblyObject"
+    assert result["solver_type"] == "Assembly"
+
+    # The assembly and its JointGroup exist in the document.
+    listed = bridge.run("list_objects", {"document_id": "m17asm1", "workspace": workspace})
+    names = {o["name"]: o for o in listed["objects"]}
+    assert names["Assembly"]["type"] == "Assembly::AssemblyObject"
+    assert names["Joints"]["type"] == "Assembly::JointGroup"
+
+
+@requires_freecad
+def test_real_freecad_assembly_add_component_preserves_original(tmp_path: Path) -> None:
+    """assembly_add_component links an object as App::Link without modifying the original."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m17asm2", "workspace": workspace})
+    bridge.run(
+        "create_box",
+        {
+            "document_id": "m17asm2",
+            "object_name": "Box1",
+            "length": 10.0,
+            "width": 10.0,
+            "height": 10.0,
+            "workspace": workspace,
+        },
+    )
+    bridge.run("assembly_create", {"document_id": "m17asm2", "workspace": workspace})
+
+    result = bridge.run(
+        "assembly_add_component",
+        {
+            "document_id": "m17asm2",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "object_name": "Box1",
+            "component_name": "Component1",
+            "x": 10.0,
+            "y": 20.0,
+            "z": 30.0,
+        },
+    )
+
+    assert result["component_name"] == "Component1"
+    assert result["object_name"] == "Box1"
+    assert result["type"] == "App::Link"
+    assert result["placement"]["x"] == 10.0
+    assert result["placement"]["y"] == 20.0
+    assert result["placement"]["z"] == 30.0
+    # Original linked object unmodified: volume identical before/after.
+    assert math.isclose(result["target_volume_before"], result["target_volume_after"], rel_tol=1e-9)
+    assert math.isclose(result["target_volume_before"], 1000.0, rel_tol=1e-9)
+
+    # The original object still exists with its shape.
+    inspected = bridge.run(
+        "inspect_object",
+        {"document_id": "m17asm2", "object_name": "Box1", "workspace": workspace},
+    )
+    assert math.isclose(inspected["info"]["volume"], 1000.0, rel_tol=1e-9)
+
+    # assembly_inspect reports the component with its link target.
+    asm = bridge.run(
+        "assembly_inspect",
+        {"document_id": "m17asm2", "workspace": workspace, "assembly_name": "Assembly"},
+    )
+    assert asm["component_count"] == 1
+    comp = asm["components"][0]
+    assert comp["name"] == "Component1"
+    assert comp["linked_object"] == "Box1"
+
+
+@requires_freecad
+def test_real_freecad_assembly_fixed_joint_and_solve(tmp_path: Path) -> None:
+    """assembly_create_joint + assembly_ground_component + assembly_solve on real FreeCAD."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m17asm3", "workspace": workspace})
+    for name, x in (("Box1", 0.0), ("Box2", 30.0)):
+        bridge.run(
+            "create_box",
+            {
+                "document_id": "m17asm3",
+                "object_name": name,
+                "length": 10.0,
+                "width": 10.0,
+                "height": 10.0,
+                "x": x,
+                "workspace": workspace,
+            },
+        )
+    bridge.run("assembly_create", {"document_id": "m17asm3", "workspace": workspace})
+    bridge.run(
+        "assembly_add_component",
+        {
+            "document_id": "m17asm3",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "object_name": "Box1",
+            "component_name": "Component1",
+        },
+    )
+    bridge.run(
+        "assembly_add_component",
+        {
+            "document_id": "m17asm3",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "object_name": "Box2",
+            "component_name": "Component2",
+            "x": 30.0,
+        },
+    )
+
+    # Ground Component1 so the solver has a fixed reference.
+    grounded = bridge.run(
+        "assembly_ground_component",
+        {
+            "document_id": "m17asm3",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "component_name": "Component1",
+            "ground_name": "Grounded1",
+        },
+    )
+    assert grounded["ground_name"] == "Grounded1"
+    assert grounded["component_name"] == "Component1"
+
+    joint = bridge.run(
+        "assembly_create_joint",
+        {
+            "document_id": "m17asm3",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "joint_name": "FixedJoint1",
+            "joint_type": "Fixed",
+            "component1": "Component1",
+            "refs1": ["Face6", "Vertex7"],
+            "component2": "Component2",
+            "refs2": ["Face6", "Vertex7"],
+        },
+    )
+    assert joint["joint_name"] == "FixedJoint1"
+    assert joint["joint_type"] == "Fixed"
+    assert joint["joint_type_actual"] == "Fixed"
+    # setJointConnectors may reposition components: placements reported.
+    assert joint["component1_placement_after"] is not None
+    assert joint["component2_placement_after"] is not None
+
+    solved = bridge.run(
+        "assembly_solve",
+        {"document_id": "m17asm3", "workspace": workspace, "assembly_name": "Assembly"},
+    )
+    assert solved["solve_status"] == 0
+    assert solved["solved"] is True
+    assert len(solved["joints"]) == 1
+    assert solved["joints"][0]["joint_type"] == "Fixed"
+    assert len(solved["grounded_joints"]) == 1
+    assert solved["grounded_joints"][0]["grounded_object"] == "Component1"
+
+
+@requires_freecad
+def test_real_freecad_assembly_revolute_joint(tmp_path: Path) -> None:
+    """Revolute joint (type_index 1) attaches and reports JointType 'Revolute'."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m17asm4", "workspace": workspace})
+    for name, x in (("Box1", 0.0), ("Box2", 30.0)):
+        bridge.run(
+            "create_box",
+            {
+                "document_id": "m17asm4",
+                "object_name": name,
+                "length": 10.0,
+                "width": 10.0,
+                "height": 10.0,
+                "x": x,
+                "workspace": workspace,
+            },
+        )
+    bridge.run("assembly_create", {"document_id": "m17asm4", "workspace": workspace})
+    for comp, obj, x in (("Component1", "Box1", 0.0), ("Component2", "Box2", 30.0)):
+        bridge.run(
+            "assembly_add_component",
+            {
+                "document_id": "m17asm4",
+                "workspace": workspace,
+                "assembly_name": "Assembly",
+                "object_name": obj,
+                "component_name": comp,
+                "x": x,
+            },
+        )
+
+    joint = bridge.run(
+        "assembly_create_joint",
+        {
+            "document_id": "m17asm4",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "joint_name": "RevoluteJoint1",
+            "joint_type": "Revolute",
+            "component1": "Component1",
+            "refs1": ["Face6", "Vertex7"],
+            "component2": "Component2",
+            "refs2": ["Face6", "Vertex7"],
+        },
+    )
+    assert joint["joint_type"] == "Revolute"
+    assert joint["joint_type_actual"] == "Revolute"
+
+    solved = bridge.run(
+        "assembly_solve",
+        {"document_id": "m17asm4", "workspace": workspace, "assembly_name": "Assembly"},
+    )
+    assert solved["solve_status"] == 0
+    assert solved["joints"][0]["joint_type"] == "Revolute"
+
+
+@requires_freecad
+def test_real_freecad_assembly_unverified_joint_type_rejected(tmp_path: Path) -> None:
+    """Unverified joint types (e.g. Cylindrical) are rejected with a structured error."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m17asm5", "workspace": workspace})
+    for name in ("Box1", "Box2"):
+        bridge.run(
+            "create_box",
+            {
+                "document_id": "m17asm5",
+                "object_name": name,
+                "length": 10.0,
+                "width": 10.0,
+                "height": 10.0,
+                "workspace": workspace,
+            },
+        )
+    bridge.run("assembly_create", {"document_id": "m17asm5", "workspace": workspace})
+    for comp, obj in (("Component1", "Box1"), ("Component2", "Box2")):
+        bridge.run(
+            "assembly_add_component",
+            {
+                "document_id": "m17asm5",
+                "workspace": workspace,
+                "assembly_name": "Assembly",
+                "object_name": obj,
+                "component_name": comp,
+            },
+        )
+
+    with pytest.raises(FreeCadOperationError, match="not supported"):
+        bridge.run(
+            "assembly_create_joint",
+            {
+                "document_id": "m17asm5",
+                "workspace": workspace,
+                "assembly_name": "Assembly",
+                "joint_name": "BadJoint1",
+                "joint_type": "Cylindrical",
+                "component1": "Component1",
+                "refs1": ["Face6", "Vertex7"],
+                "component2": "Component2",
+                "refs2": ["Face6", "Vertex7"],
+            },
+        )
+
+
+@requires_freecad
+def test_real_freecad_assembly_save_reopen_persistence(tmp_path: Path) -> None:
+    """Assembly, App::Link components, Fixed/Revolute joints, grounded joint and solve persist."""
+    workspace = str(tmp_path)
+    bridge = FreeCadBridge.from_settings(_settings())
+
+    bridge.run("create_document", {"document_id": "m17persist", "workspace": workspace})
+    for name, x in (("Box1", 0.0), ("Box2", 30.0)):
+        bridge.run(
+            "create_box",
+            {
+                "document_id": "m17persist",
+                "object_name": name,
+                "length": 10.0,
+                "width": 10.0,
+                "height": 10.0,
+                "x": x,
+                "workspace": workspace,
+            },
+        )
+    bridge.run("assembly_create", {"document_id": "m17persist", "workspace": workspace})
+    for comp, obj, x in (("Component1", "Box1", 0.0), ("Component2", "Box2", 30.0)):
+        bridge.run(
+            "assembly_add_component",
+            {
+                "document_id": "m17persist",
+                "workspace": workspace,
+                "assembly_name": "Assembly",
+                "object_name": obj,
+                "component_name": comp,
+                "x": x,
+            },
+        )
+    bridge.run(
+        "assembly_ground_component",
+        {
+            "document_id": "m17persist",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "component_name": "Component1",
+            "ground_name": "Grounded1",
+        },
+    )
+    bridge.run(
+        "assembly_create_joint",
+        {
+            "document_id": "m17persist",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "joint_name": "FixedJoint1",
+            "joint_type": "Fixed",
+            "component1": "Component1",
+            "refs1": ["Face6", "Vertex7"],
+            "component2": "Component2",
+            "refs2": ["Face6", "Vertex7"],
+        },
+    )
+    bridge.run(
+        "assembly_create_joint",
+        {
+            "document_id": "m17persist",
+            "workspace": workspace,
+            "assembly_name": "Assembly",
+            "joint_name": "RevoluteJoint1",
+            "joint_type": "Revolute",
+            "component1": "Component1",
+            "refs1": ["Face1", "Edge1"],
+            "component2": "Component2",
+            "refs2": ["Face1", "Edge1"],
+        },
+    )
+    saved = bridge.run("save_document", {"document_id": "m17persist", "workspace": workspace})
+    assert saved["saved_path"]
+
+    # Reopen in a fresh FreeCAD process and verify the full hierarchy persists.
+    target = "windows" if str(_DISCOVERED).lower().endswith(".exe") else "native"
+    path = for_target(Path(saved["saved_path"]), target)
+    code = f"""
+import FreeCAD as App
+doc = App.openDocument({str(path)!r})
+doc.recompute()
+
+assembly = doc.getObject("Assembly")
+assert assembly is not None and assembly.TypeId == "Assembly::AssemblyObject"
+assert assembly.Type == "Assembly"
+
+joints = doc.getObject("Joints")
+assert joints is not None and joints.TypeId == "Assembly::JointGroup"
+
+comp1 = doc.getObject("Component1")
+comp2 = doc.getObject("Component2")
+assert comp1 is not None and comp1.TypeId == "App::Link"
+assert comp2 is not None and comp2.TypeId == "App::Link"
+assert comp1.LinkedObject.Name == "Box1"
+assert comp2.LinkedObject.Name == "Box2"
+
+grounded = doc.getObject("Grounded1")
+assert grounded is not None and grounded.ObjectToGround.Name == "Component1"
+
+fixed = doc.getObject("FixedJoint1")
+assert fixed is not None and fixed.JointType == "Fixed"
+revolute = doc.getObject("RevoluteJoint1")
+assert revolute is not None and revolute.JointType == "Revolute"
+
+# Original linked objects keep their geometry.
+box1 = doc.getObject("Box1")
+box2 = doc.getObject("Box2")
+assert abs(box1.Shape.Volume - 1000.0) < 1e-6
+assert abs(box2.Shape.Volume - 1000.0) < 1e-6
+
+# Solver still runs after reopen.
+status = assembly.solve()
+assert status == 0
+
+print('M17_ASSEMBLY_REOPEN_OK')
+"""
+    process = subprocess.run(
+        [str(_DISCOVERED), "-c", code], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
+
+    # Bridge-level inspection on the reopened document confirms the same state.
+    inspected = bridge.run(
+        "assembly_inspect",
+        {"document_id": "m17persist", "workspace": workspace, "assembly_name": "Assembly"},
+    )
+    assert inspected["component_count"] == 2
+    assert inspected["joint_count"] == 2
+    assert inspected["grounded_joint_count"] == 1
+    joint_types = {j["joint_type"] for j in inspected["joints"]}
+    assert joint_types == {"Fixed", "Revolute"}

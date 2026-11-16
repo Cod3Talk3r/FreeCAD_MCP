@@ -168,5 +168,23 @@ Add new dated decisions here; do not record trivial implementation details.
   recompute, valid geometry, save/reopen and parametric editability. Mocks do
   not establish native support. Rationale: prevent API names and documentation
   from being mistaken for verified CAD behavior.
+- **D25 — Native Assembly implementation scope (2026-11-16, M17):** Implement
+  only the research-gate-verified surface: `Assembly::AssemblyObject` with
+  `Type = "Assembly"`, `Assembly::JointGroup` children, `App::Link` components,
+  `App::FeaturePython` joints with `JointObject.Joint(joint, type_index)` for
+  Fixed (0) and Revolute (1) only, `JointObject.GroundedJoint` for grounding,
+  `joint.Proxy.setJointConnectors(joint, refs)` with `[component, [subelement,
+  ...]]` pairs, and `assembly.solve()` (0 = success). GroundedJoint is a
+  distinct proxy (ObjectToGround; no JointType/Reference1/2) and is never
+  modeled as a regular Joint. `setJointConnectors` may reposition components
+  via preSolve, so joint creation reports both components' placements before
+  and after; `Detach1`/`Detach2` only protect placements during recompute and
+  are therefore not exposed. Verified native 1.1.4 behaviors: AssemblyObject
+  `Group` is flattened (joints appear both in the JointGroup and as direct
+  assembly children, so component listings must exclude JointGroup members);
+  proxies and links persist across save/reopen; App::Link manipulation leaves
+  the original object's shape unchanged. GUI exposure deliberately out of
+  scope (consistent with M15/M16). Rationale: keep the product surface exactly
+  at the verified capability boundary.
 
 ---

@@ -159,6 +159,39 @@ MODELING_PARAMS_CASES: tuple[tuple[Any, dict[str, Any]], ...] = (
         modeling.BooleanCommonParams,
         {"document_id": "doc", "base_object": "Base", "tool_object": "Tool"},
     ),
+    (
+        modeling.AssemblyCreateParams,
+        {"document_id": "doc"},
+    ),
+    (
+        modeling.AssemblyAddComponentParams,
+        {"document_id": "doc", "assembly_name": "Assembly", "object_name": "Box"},
+    ),
+    (
+        modeling.AssemblyCreateJointParams,
+        {
+            "document_id": "doc",
+            "assembly_name": "Assembly",
+            "joint_name": "Joint1",
+            "joint_type": "Fixed",
+            "component1": "Comp1",
+            "refs1": ["Face6"],
+            "component2": "Comp2",
+            "refs2": ["Face6"],
+        },
+    ),
+    (
+        modeling.AssemblyGroundComponentParams,
+        {"document_id": "doc", "assembly_name": "Assembly", "component_name": "Comp1"},
+    ),
+    (
+        modeling.AssemblySolveParams,
+        {"document_id": "doc", "assembly_name": "Assembly"},
+    ),
+    (
+        modeling.AssemblyInspectParams,
+        {"document_id": "doc", "assembly_name": "Assembly"},
+    ),
 )
 
 _MODELING_PARAMS_MODELS = tuple(model for model, _ in MODELING_PARAMS_CASES)
