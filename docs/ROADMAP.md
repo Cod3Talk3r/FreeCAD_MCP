@@ -458,28 +458,17 @@ documentation. Features already implemented are not repeated as new work.
 ### M18 — Advanced GUI usability and workflow parity
 
 - **Complexity:** Large.
-- **Scope:** build on M13's essential lifecycle UI with graphical and
-  selection-aware workflows, refined parameter editing, broader operation-family
-  parity, assembly visualization if M17 passes, batched/context-aware inspection,
-  and large-model performance. Do not defer the basic tree/dependency/edit/delete/
-  reorder/recovery interface from M13 to this milestone.
-- **Dependencies:** M12 shared operation metadata; M13 lifecycle; M14/M15
-  capabilities; M17 only for assembly UI.
-- **FreeCAD APIs:** FreeCADGui selection/view APIs and Qt controls are GUI-only;
-  probe GUI version/API and ensure selections resolve to stable document/object/
-  subelement references.
-- **Shared/MCP:** shared layer remains authoritative for document mutation;
-  MCP schemas stay available regardless of GUI state.
-- **GUI:** dockable panel as a first-class product interface; no CAD algorithms
-  embedded in widgets. Maintain selection ownership and workspace document
-  boundaries.
-- **Taiga:** optional progress and action explanations can be shown but not
-  required for direct GUI use.
-- **Tests/acceptance:** headless panel import/syntax tests, GUI manual matrix for
-  selection, controls, error state, reopen and big documents; MCP and GUI invoke
-  same operation/result contract.
-- **Risks:** Qt/FreeCADGui API differences, UI blocking during child calls,
-  scaling and active-document confusion.
+- **Status:** Phase 1 complete (Model Tree & Lifecycle GUI implemented and hardened); remaining GUI work paused.
+- **Scope (Phase 1 delivered):** build on M13's essential lifecycle UI with hierarchical model tree, dependency inspector, bidirectional 3D view ↔ tree selection sync, delete/reorder/Tip context actions, and tree-state preservation across refreshes. Do not defer the basic tree/dependency/edit/delete/reorder/recovery interface from M13 to this milestone.
+- **Dependencies:** M12 shared operation metadata; M13 lifecycle; M14/M15 capabilities; M17 only for assembly UI.
+- **FreeCAD APIs:** FreeCADGui selection/view APIs and Qt controls are GUI-only; probe GUI version/API and ensure selections resolve to stable document/object/subelement references.
+- **Shared/MCP:** shared layer remains authoritative for document mutation; MCP schemas stay available regardless of GUI state.
+- **GUI (Phase 1 delivered):** dockable panel as a first-class product interface; no CAD algorithms embedded in widgets. Maintain selection ownership and workspace document boundaries. **Implemented:** hierarchical model tree (`QTreeWidget`) with ownership columns; dependency inspector (InList/OutList) as separate panel; `SelectionObserver` using `FreeCADGui.Selection.addObserver`/`removeObserver` for bidirectional sync; context menu with Delete, Reorder (Body features only), Set Tip; tree-state preservation (expanded/selected) across refreshes; 35 `_objects_list.clear()` calls replaced with `_on_refresh_tree()`.
+- **Hardening applied:** (1) SelectionObserver cleanup on dock destruction via `self._dock.destroyed.connect(self._unregister_selection_observer)`; (2) Reorder action eligibility limited to Body features only (parent in tree is Body); (3) 6 focused backend tests for `get_document_hierarchy` covering Body.Group ordering + Tip, root objects, Assembly components vs JointGroup, dependency separation from ownership, multiple bodies + root objects, Joint/GroundedJoint representation.
+- **Taiga:** optional progress and action explanations can be shown but not required for direct GUI use.
+- **Tests/acceptance (Phase 1):** headless panel import/syntax tests not yet added; 6 new hierarchy backend tests + 534 test_runner + 33 body/tip/dependency + 13 M16 E2E + 14 sketch_hole = 594 focused tests passed; pyright clean (expected PySide6/FreeCAD missing-import errors outside FreeCAD env). **Unexecuted**: Real FreeCAD GUI manual smoke-test (panel open/close/destroy, tree refresh/state, selection sync both directions, context menu actions, assembly hierarchy, dependency inspector separation).
+- **GUI development paused:** After M18 Phase 1, GUI work is intentionally paused. Future GUI development will resume after core MCP roadmap milestones (M19–M20) with an Agent Collaboration Environment direction.
+- **Risks:** Qt/FreeCADGui API differences, UI blocking during child calls, scaling and active-document confusion.
 
 ### M19 — Method A agent workflows
 

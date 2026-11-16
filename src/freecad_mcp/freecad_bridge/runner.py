@@ -115,6 +115,9 @@ OP_ASSEMBLY_GROUND_COMPONENT = "assembly_ground_component"
 OP_ASSEMBLY_SOLVE = "assembly_solve"
 OP_ASSEMBLY_INSPECT = "assembly_inspect"
 
+# M18 — Advanced GUI usability and workflow parity
+OP_GET_DOCUMENT_HIERARCHY = "get_document_hierarchy"
+
 #: Verified joint types only (M17 scope). Indices match the installed
 #: ``Assembly/JointObject.py`` JointType enum ordering.
 ASSEMBLY_JOINT_TYPE_INDICES: dict[str, int] = {"Fixed": 0, "Revolute": 1}
@@ -2384,6 +2387,175 @@ def _restore_group(body: Any, previous_group: list[Any], doc: Any) -> None:
         doc.recompute()
     except Exception:
         pass
+
+
+def _op_get_document_hierarchy(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the ownership hierarchy of all objects in a document.
+
+    This exposes the document's containment structure (Body.Group, Assembly.Group,
+    JointGroup.Group) separately from dependency relationships (InList/OutList).
+    The result is a tree rooted at the document, with nodes for each object
+    containing its name, type, and children (if it is a container).
+
+    For PartDesign::Body:
+      - children are the Body.Group members in order
+      - includes a "tip_name" field for the current Body.Tip
+
+    For Assembly::AssemblyObject:
+      - children are the assembly's direct components (App::Link and other
+        direct children, excluding JointGroup members per M17 convention)
+      - includes a "joint_group" sub-node with joints and grounded joints
+
+    For Assembly::JointGroup:
+      - children are the joints and grounded joints in the JointGroup
+
+    Other objects (sketches, pads, parts, etc.) are leaf nodes.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": "get_document_hierarchy", "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env() if not workspace_str else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": "get_document_hierarchy", "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {"ok": False, "op": "get_document_hierarchy", "error": lock_status.get("error", "lock failed")}
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": "get_document_hierarchy", "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415
+        doc = _open_existing_document(_FC, wks, normalized)
+
+        def _build_node(obj: Any, is_tip: bool = False) -> dict[str, Any]:
+            """Build a hierarchy node for a single object."""
+            node: dict[str, Any] = {
+                "name": obj.Name,
+                "type": obj.TypeId,
+                "label": getattr(obj, "Label", ""),
+            }
+            if is_tip:
+                node["is_tip"] = True
+            return node
+
+        def _build_body_node(body: Any) -> dict[str, Any]:
+            """Build a node for a PartDesign::Body with its Group children."""
+            node = _build_node(body)
+            tip_name = getattr(body, "Tip", None)
+            tip_name = getattr(tip_name, "Name", None) if tip_name is not None else None
+            if tip_name:
+                node["tip_name"] = tip_name
+
+            children: list[dict[str, Any]] = []
+            try:
+                group = list(getattr(body, "Group", []) or [])
+            except Exception:
+                group = []
+            for child in group:
+                is_tip = (getattr(child, "Name", None) == tip_name)
+                child_node = _build_node(child, is_tip=is_tip)
+                # Recursively handle nested containers (e.g., sketch in body)
+                child_type = getattr(child, "TypeId", "").split("::")[-1]
+                if child_type == "Body":
+                    child_node = _build_body_node(child)
+                elif child_type == "AssemblyObject":
+                    child_node = _build_assembly_node(child)
+                children.append(child_node)
+            node["children"] = children
+            return node
+
+        def _build_assembly_node(assembly: Any) -> dict[str, Any]:
+            """Build a node for an Assembly::AssemblyObject with components and joint group."""
+            node = _build_node(assembly)
+
+            # Components (direct children, excluding JointGroup members)
+            components = _assembly_component_summary(assembly)
+            node["children"] = components
+
+            # JointGroup as a special sub-node
+            joint_group = _assembly_joint_group(assembly)
+            if joint_group is not None:
+                joint_group_node = _build_joint_group_node(joint_group)
+                node["joint_group"] = joint_group_node
+
+            return node
+
+        def _build_joint_group_node(joint_group: Any) -> dict[str, Any]:
+            """Build a node for an Assembly::JointGroup with its joints."""
+            node = _build_node(joint_group)
+            summary = _assembly_joint_summary(joint_group)
+            node["children"] = summary["joints"] + summary["grounded_joints"]
+            return node
+
+        # Build the document hierarchy: find all root containers (Body, Assembly)
+        # and also include non-container objects at the document root.
+        root_nodes: list[dict[str, Any]] = []
+        container_names: set[str] = set()
+
+        # First pass: identify all containers (Body, Assembly) and their members
+        for obj in doc.Objects:
+            type_id = getattr(obj, "TypeId", "")
+            type_name = type_id.split("::")[-1]
+            if type_name == "Body":
+                container_names.add(obj.Name)
+                root_nodes.append(_build_body_node(obj))
+            elif type_name == "AssemblyObject":
+                container_names.add(obj.Name)
+                root_nodes.append(_build_assembly_node(obj))
+
+        # Second pass: add non-container objects that are not members of any container
+        # (i.e., not in any Body.Group or Assembly.Group)
+        all_member_names: set[str] = set()
+        for obj in doc.Objects:
+            type_id = getattr(obj, "TypeId", "")
+            type_name = type_id.split("::")[-1]
+            if type_name in ("Body", "AssemblyObject"):
+                try:
+                    group = list(getattr(obj, "Group", []) or [])
+                except Exception:
+                    group = []
+                for member in group:
+                    all_member_names.add(getattr(member, "Name", ""))
+            # Also check JointGroup members
+            if type_name == "JointGroup":
+                try:
+                    group = list(getattr(obj, "Group", []) or [])
+                except Exception:
+                    group = []
+                for member in group:
+                    all_member_names.add(getattr(member, "Name", ""))
+
+        for obj in doc.Objects:
+            if getattr(obj, "Name", "") not in container_names and getattr(obj, "Name", "") not in all_member_names:
+                root_nodes.append(_build_node(obj))
+
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {
+        "ok": True,
+        "op": "get_document_hierarchy",
+        "result": {
+            "document_id": normalized,
+            "hierarchy": root_nodes,
+        },
+    }
 
 
 def _op_create_body(params: dict[str, Any]) -> dict[str, Any]:
@@ -14761,6 +14933,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_GET_BODY_TIP: _op_get_body_tip,
     OP_SET_BODY_TIP: _op_set_body_tip,
     OP_REORDER_BODY_FEATURES: _op_reorder_body_features,
+    OP_GET_DOCUMENT_HIERARCHY: _op_get_document_hierarchy,
     OP_CREATE_BODY: _op_create_body,
     OP_VALIDATE_REOPEN: _op_validate_reopen,
     OP_CREATE_SKETCH: _op_create_sketch,

@@ -114,6 +114,33 @@ class DocumentList(BaseModel):
     )
 
 
+class HierarchyNode(BaseModel):
+    """A single node in the document ownership hierarchy."""
+
+    name: str = Field(description="Object name (internal FreeCAD Name).")
+    type: str = Field(description="FreeCAD TypeId, e.g. 'PartDesign::Body'.")
+    label: Optional[str] = Field(default=None, description="User-facing Label.")
+    is_tip: Optional[bool] = Field(default=None, description="True if this feature is the current Body.Tip.")
+    tip_name: Optional[str] = Field(default=None, description="For Body: name of the current Tip feature.")
+    children: Optional[list["HierarchyNode"]] = Field(
+        default=None, description="Child nodes in ownership hierarchy (Body.Group, Assembly components, JointGroup joints)."
+    )
+    joint_group: Optional["HierarchyNode"] = Field(
+        default=None, description="For Assembly: the JointGroup sub-node with joints and grounded joints."
+    )
+
+
+class DocumentHierarchy(BaseModel):
+    """Result of get_document_hierarchy: the full ownership tree."""
+
+    document_id: str = Field(description="Validated document identifier.")
+    hierarchy: list[HierarchyNode] = Field(description="Root-level hierarchy nodes.")
+
+
+# Rebuild forward references
+HierarchyNode.model_rebuild()
+
+
 class ValidationResult(BaseModel):
     """Result of validate_document."""
 
@@ -2237,6 +2264,15 @@ class InspectObjectParams(BaseModel):
     )
 
 
+class GetDocumentHierarchyParams(BaseModel):
+    """Parameters for getting the document ownership hierarchy."""
+
+    document_id: str = Field(description="Document to get hierarchy from.")
+    workspace: Optional[str] = Field(
+        default=None, description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE env or cwd/freecad-mcp-workspace."
+    )
+
+
 class ValidateDocParams(BaseModel):
     """Parameters for validating a document's geometry."""
 
@@ -2880,6 +2916,35 @@ def _register_tools(server: Any, settings: Settings) -> None:
             radius=raw_info.get("radius"),
             depends_on=raw_info.get("depends_on", []),
             depended_on_by=raw_info.get("depended_on_by", []),
+        )
+
+    # ------------------------------------------------------------------
+    # get_document_hierarchy
+    # ------------------------------------------------------------------
+    @server.tool(
+        name="get_document_hierarchy",
+        title="Get document hierarchy",
+        description=(
+            "Return the ownership hierarchy of all objects in a document. "
+            "This exposes the document's containment structure (Body.Group, "
+            "Assembly.Group, JointGroup.Group) separately from dependency "
+            "relationships (InList/OutList). The result is a tree rooted at "
+            "the document, with nodes for each object containing its name, "
+            "type, and children (if it is a container)."
+        ),
+        structured_output=True,
+    )
+    def get_document_hierarchy_tool(params: GetDocumentHierarchyParams) -> DocumentHierarchy:
+        """Get the document ownership hierarchy."""
+        bridge = _make_bridge(settings)
+        bridge_params: dict[str, Any] = {
+            "document_id": params.document_id,
+            "workspace": params.workspace or "",
+        }
+        result = _run_bridge_op(bridge, "get_document_hierarchy", bridge_params)
+        return DocumentHierarchy(
+            document_id=result["result"]["document_id"],
+            hierarchy=result["result"]["hierarchy"],
         )
 
     # ------------------------------------------------------------------

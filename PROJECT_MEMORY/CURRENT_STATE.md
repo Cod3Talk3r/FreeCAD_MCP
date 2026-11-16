@@ -258,7 +258,7 @@
   removal, reports constraint_count_before/after and solver state (fully_constrained, degrees_of_freedom).
   Validation rejects non-integer/boolean indices, out-of-range indices, and missing sketches. Invalid
   requests leave the document unchanged. Tests: 6 mock tests + 3 schema tests + 3 real FreeCAD integration
-tests all pass.
+  tests all pass.
 - 2026-11-12: Implemented M14.4 — `sketch_edit_constraint` operation + MCP tool for editing
   native Sketcher constraints in existing sketches. Changes: runner.py (new OP_SKETCH_EDIT_CONSTRAINT
   + `_op_sketch_edit_constraint` handler, registered in OPERATIONS), modeling.py
@@ -278,6 +278,15 @@ tests all pass.
   save/close/reopen persistence. Verifies solver fields (fully_constrained bool,
   degrees_of_freedom int) at every checkpoint and uses actual returned constraint indices.
   Passes against real FreeCAD 1.1.4 via MCP stdio.
+- 2026-11-16: **M18 Phase 1 — Model Tree & Lifecycle GUI implemented and hardened**:
+  - **Backend (`get_document_hierarchy`)**: New bridge operation in `runner.py` and MCP tool in `modeling.py` exposing ownership hierarchy (Body.Group, Assembly.Group, JointGroup.Group) separately from InList/OutList dependencies. Includes `HierarchyNode`, `DocumentHierarchy`, `GetDocumentHierarchyParams` Pydantic models.
+  - **GUI Panel (`Mod/freecad_mcp_gui/panel.py`)**: Hierarchical model tree with ownership columns; dependency inspector (InList/OutList) as separate panel; bidirectional 3D view ↔ tree selection sync via `FreeCADGui.Selection.addObserver`/`removeObserver` with proper lifecycle; context menu with Delete, Reorder (Body features only), Set Tip actions; tree-state preservation (expanded/selected) across refreshes; all 35 `_objects_list.clear()` calls replaced with `_on_refresh_tree()`.
+  - **Hardening 1 — SelectionObserver lifecycle**: Added `self._dock.destroyed.connect(self._unregister_selection_observer)` for reliable cleanup on dock destruction (workbench switch, FreeCAD close, panel destruction without explicit `hide()`).
+  - **Hardening 2 — Reorder action eligibility**: "Reorder in Body…" only enabled for objects whose parent in tree is a Body (PartDesign::Body feature children); not shown for Body containers, Assemblies, Links, Joints, or root objects.
+  - **Hardening 3 — Backend tests**: Added 6 focused tests for `get_document_hierarchy` covering Body.Group ordering + Tip, root objects, Assembly components vs JointGroup, dependency separation from ownership, multiple bodies + root objects, Joint/GroundedJoint representation.
+  - **Test results**: 6 new hierarchy tests + 534 test_runner + 33 body/tip/dependency tests + 13 M16 E2E + 14 sketch_hole = **594 focused tests passed**; pyright clean (expected PySide6/FreeCAD missing-import errors outside FreeCAD env).
+  - **Unexecuted**: Real FreeCAD GUI manual smoke-test (panel open/close/destroy, tree refresh/state, selection sync both directions, context menu actions, assembly hierarchy, dependency inspector separation) remains to be executed in a real FreeCAD GUI session.
+  - **GUI development paused**: After M18 Phase 1, GUI work is intentionally paused. Future GUI development will resume after core MCP roadmap milestones (M19-M20) with an Agent Collaboration Environment direction.
 
 ## Taiga-S1 integration (verified 2026-11-03)
 

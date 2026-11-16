@@ -17058,7 +17058,7 @@ def test_assembly_inspect_reports_hierarchy(
     assert result["result"]["joint_count"] == 1
     assert result["result"]["grounded_joint_count"] == 1
 
-    # Check joint details.
+# Check joint details.
     assert len(result["result"]["joints"]) == 1
     joint_info = result["result"]["joints"][0]
     assert joint_info["joint_type"] == "Fixed"
@@ -17067,3 +17067,315 @@ def test_assembly_inspect_reports_hierarchy(
     assert len(result["result"]["grounded_joints"]) == 1
     grounded_info = result["result"]["grounded_joints"][0]
     assert grounded_info["grounded_object"] == "Comp1"
+
+
+# =====================================================================
+# M18 — get_document_hierarchy tests
+# =====================================================================
+
+
+class _FakeBodyFeature:
+    """Minimal stand-in for a PartDesign::Body feature (Sketch, Pad, Pocket, etc.)."""
+
+    def __init__(self, name: str, type_id: str) -> None:
+        self.Name = name
+        self.Label = name
+        self.TypeId = type_id
+
+
+class _FakeDocForHierarchy:
+    """Document fake that supports Body.Group, Assembly, and JointGroup for hierarchy tests."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, object] = {}
+        self.Name = "test-doc"
+
+    @property
+    def Objects(self) -> list:
+        return list(self.objects.values())
+
+    def getObject(self, name: str) -> object | None:
+        return self.objects.get(name)
+
+    def addObject(self, type_id: str, name: str, **kwargs) -> object:
+        if type_id == "Sketcher::SketchObject":
+            obj: object = _FakeSketch(name)
+        elif type_id == "PartDesign::Body":
+            obj: object = _FakeBody(name)
+        elif type_id == "PartDesign::Pad":
+            obj: object = _FakePad(name)
+        elif type_id == "PartDesign::Pocket":
+            obj: object = _FakePocket(name)
+        elif type_id == "PartDesign::Hole":
+            obj: object = _FakeHole(name)
+        elif type_id == "Assembly::AssemblyObject":
+            obj: object = _FakeAssemblyGroupChild(name, type_id)
+            obj.Type = "Assembly"
+        elif type_id == "Assembly::JointGroup":
+            obj: object = _FakeAssemblyGroupChild(name, type_id)
+        elif type_id == "App::Link":
+            obj: object = _FakeAssemblyGroupChild(name, type_id)
+        elif type_id == "Part::Box":
+            obj: object = _FakeAssemblyGroupChild(name, type_id)
+        elif type_id == "Part::Feature":
+            obj: object = _FakeAssemblyGroupChild(name, type_id)
+        else:
+            obj = SimpleNamespace(TypeId=type_id, Name=name, Label=name)
+        self.objects[name] = obj
+        return obj
+
+    def recompute(self) -> None:
+        return None
+
+    def saveAs(self, path: str) -> None:
+        Path(path).write_bytes(b"fake fcstd")
+
+    def removeObject(self, name: str) -> None:
+        self.objects.pop(name, None)
+
+
+def test_get_document_hierarchy_body_group_ordering_and_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Body.Group ordering is preserved; Tip is correctly identified."""
+    # Create dummy document file so _open_existing_document succeeds
+    wks = Workspace(root=tmp_path)
+    wks.document_path("test-doc").write_bytes(b"fake fcstd")
+
+    doc = _FakeDocForHierarchy()
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
+    pad = doc.addObject("PartDesign::Pad", "Pad")
+    pocket = doc.addObject("PartDesign::Pocket", "Pocket")
+
+    # Add features to Body in specific order
+    body.Group = [sketch, pad, pocket]
+    body.Tip = pocket
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+
+    result = runner._op_get_document_hierarchy(
+        {"document_id": "test-doc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    hierarchy = result["result"]["hierarchy"]
+    assert len(hierarchy) == 1
+    body_node = hierarchy[0]
+    assert body_node["name"] == "Body"
+    assert body_node["type"] == "PartDesign::Body"
+    assert body_node["tip_name"] == "Pocket"
+    assert "children" in body_node
+    children = body_node["children"]
+    assert len(children) == 3
+    # Order must match Body.Group
+    assert children[0]["name"] == "Sketch"
+    assert children[1]["name"] == "Pad"
+    assert children[2]["name"] == "Pocket"
+    # Tip flag on the correct child
+    assert children[0].get("is_tip") is not True
+    assert children[1].get("is_tip") is not True
+    assert children[2].get("is_tip") is True
+
+
+def test_get_document_hierarchy_root_objects_not_in_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Objects not in any Body.Group or Assembly appear at document root."""
+    wks = Workspace(root=tmp_path)
+    wks.document_path("test-doc").write_bytes(b"fake fcstd")
+
+    doc = _FakeDocForHierarchy()
+    doc.addObject("Part::Feature", "LoosePart")
+    doc.addObject("Sketcher::SketchObject", "LooseSketch")
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+
+    result = runner._op_get_document_hierarchy(
+        {"document_id": "test-doc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    hierarchy = result["result"]["hierarchy"]
+    # Should have 2 root objects (no containers)
+    assert len(hierarchy) == 2
+    names = {n["name"] for n in hierarchy}
+    assert names == {"LoosePart", "LooseSketch"}
+
+
+def test_get_document_hierarchy_assembly_components_vs_jointgroup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assembly components are separate from JointGroup; JointGroup has joints and grounded joints."""
+    wks = Workspace(root=tmp_path)
+    wks.document_path("test-doc").write_bytes(b"fake fcstd")
+
+    doc = _FakeDocForHierarchy()
+    assembly = doc.addObject("Assembly::AssemblyObject", "Assembly")
+    comp1 = doc.addObject("App::Link", "Comp1")
+    comp2 = doc.addObject("App::Link", "Comp2")
+    joint_group = doc.addObject("Assembly::JointGroup", "Joints")
+    joint1 = doc.addObject("App::FeaturePython", "Joint1")
+    joint1.Type = "Joint"
+    grounded1 = doc.addObject("App::FeaturePython", "Grounded1")
+    grounded1.Type = "GroundedJoint"
+
+    # Assembly structure
+    assembly.Group = [comp1, comp2, joint_group]
+    joint_group.Group = [joint1, grounded1]
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+
+    result = runner._op_get_document_hierarchy(
+        {"document_id": "test-doc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    hierarchy = result["result"]["hierarchy"]
+    assert len(hierarchy) == 1
+    asm_node = hierarchy[0]
+    assert asm_node["name"] == "Assembly"
+    assert asm_node["type"] == "Assembly::AssemblyObject"
+
+    # Components (direct children, excluding JointGroup)
+    children = asm_node["children"]
+    child_names = {c["name"] for c in children}
+    assert child_names == {"Comp1", "Comp2"}  # JointGroup NOT in children
+
+    # JointGroup as sub-node
+    assert "joint_group" in asm_node
+    jg_node = asm_node["joint_group"]
+    assert jg_node["name"] == "Joints"
+    assert jg_node["type"] == "Assembly::JointGroup"
+    jg_children = jg_node["children"]
+    jg_names = {c["name"] for c in jg_children}
+    assert jg_names == {"Joint1", "Grounded1"}
+
+
+def test_get_document_hierarchy_dependency_separate_from_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """InList/OutList dependencies are not represented as ownership edges."""
+    wks = Workspace(root=tmp_path)
+    wks.document_path("test-doc").write_bytes(b"fake fcstd")
+
+    doc = _FakeDocForHierarchy()
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
+    pad = doc.addObject("PartDesign::Pad", "Pad")
+
+    # Pad references Sketch via OutList (dependency)
+    pad.OutList = [sketch]
+    sketch.InList = [pad]
+
+    # But ownership is via Body.Group only
+    body.Group = [sketch, pad]
+    body.Tip = pad
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+
+    result = runner._op_get_document_hierarchy(
+        {"document_id": "test-doc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    hierarchy = result["result"]["hierarchy"]
+    body_node = hierarchy[0]
+    children = body_node["children"]
+    child_names = [c["name"] for c in children]
+
+    # Ownership order is Body.Group, not dependency order
+    assert child_names == ["Sketch", "Pad"]
+
+    # No dependency info in hierarchy nodes
+    for child in children:
+        assert "depends_on" not in child
+        assert "depended_on_by" not in child
+
+
+def test_get_document_hierarchy_multiple_bodies_and_root_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple bodies and mixed root objects are all represented."""
+    wks = Workspace(root=tmp_path)
+    wks.document_path("test-doc").write_bytes(b"fake fcstd")
+
+    doc = _FakeDocForHierarchy()
+    body1 = doc.addObject("PartDesign::Body", "Body1")
+    body2 = doc.addObject("PartDesign::Body", "Body2")
+    sketch1 = doc.addObject("Sketcher::SketchObject", "Sketch1")
+    pad1 = doc.addObject("PartDesign::Pad", "Pad1")
+    sketch2 = doc.addObject("Sketcher::SketchObject", "Sketch2")
+    pad2 = doc.addObject("PartDesign::Pad", "Pad2")
+    loose_part = doc.addObject("Part::Feature", "LoosePart")
+
+    body1.Group = [sketch1, pad1]
+    body1.Tip = pad1
+    body2.Group = [sketch2, pad2]
+    body2.Tip = pad2
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+
+    result = runner._op_get_document_hierarchy(
+        {"document_id": "test-doc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    hierarchy = result["result"]["hierarchy"]
+    # 2 bodies + 1 root object
+    assert len(hierarchy) == 3
+    root_names = {n["name"] for n in hierarchy}
+    assert root_names == {"Body1", "Body2", "LoosePart"}
+
+    # Check Body1
+    body1_node = next(n for n in hierarchy if n["name"] == "Body1")
+    assert body1_node["tip_name"] == "Pad1"
+    assert [c["name"] for c in body1_node["children"]] == ["Sketch1", "Pad1"]
+
+    # Check Body2
+    body2_node = next(n for n in hierarchy if n["name"] == "Body2")
+    assert body2_node["tip_name"] == "Pad2"
+    assert [c["name"] for c in body2_node["children"]] == ["Sketch2", "Pad2"]
+
+
+def test_get_document_hierarchy_joint_and_grounded_joint_representation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JointGroup children correctly distinguish Joint vs GroundedJoint."""
+    wks = Workspace(root=tmp_path)
+    wks.document_path("test-doc").write_bytes(b"fake fcstd")
+
+    doc = _FakeDocForHierarchy()
+    assembly = doc.addObject("Assembly::AssemblyObject", "Assembly")
+    joint_group = doc.addObject("Assembly::JointGroup", "Joints")
+
+    joint1 = doc.addObject("App::FeaturePython", "Joint1")
+    joint1.Type = "Joint"
+    joint2 = doc.addObject("App::FeaturePython", "Joint2")
+    joint2.Type = "Joint"
+    grounded1 = doc.addObject("App::FeaturePython", "Grounded1")
+    grounded1.Type = "GroundedJoint"
+
+    assembly.Group = [joint_group]
+    joint_group.Group = [joint1, joint2, grounded1]
+
+    monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCad(doc=doc))
+
+    result = runner._op_get_document_hierarchy(
+        {"document_id": "test-doc", "workspace": str(tmp_path)}
+    )
+
+    assert result["ok"] is True
+    hierarchy = result["result"]["hierarchy"]
+    asm_node = hierarchy[0]
+    jg_node = asm_node["joint_group"]
+    jg_children = jg_node["children"]
+    assert len(jg_children) == 3
+    # Both Joint and GroundedJoint appear as children
+    names = {c["name"] for c in jg_children}
+    assert names == {"Joint1", "Joint2", "Grounded1"}
+    # Type preserved
+    types = {c["name"]: c["type"] for c in jg_children}
+    assert types["Joint1"] == "App::FeaturePython"
+    assert types["Joint2"] == "App::FeaturePython"
+    assert types["Grounded1"] == "App::FeaturePython"

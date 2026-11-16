@@ -34,6 +34,19 @@ class MCPGuiPanel:
         self._dock.setObjectName("FreeCADMCPDock")
         self._dock.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
 
+        # Ensure observer cleanup on dock destruction
+        self._dock.destroyed.connect(self._unregister_selection_observer)
+
+        # Selection observer state
+        self._selection_observer = None
+        self._observer_registered = False
+        self._syncing_from_3d = False
+        self._syncing_from_tree = False
+
+        # Tree state preservation
+        self._expanded_names: set[str] = set()
+        self._selected_names: list[str] = []
+
         container = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(container)
 
@@ -129,16 +142,44 @@ class MCPGuiPanel:
         cyl_layout.addWidget(self._create_cyl_button, 5, 0, 1, 2)
         layout.addWidget(cyl_group)
 
-        # ---- List objects -----------------------------------------------
-        list_group = QtWidgets.QGroupBox("Objects in Workspace Document")
-        list_layout = QtWidgets.QVBoxLayout(list_group)
-        self._refresh_button = QtWidgets.QPushButton("Refresh Objects")
-        self._refresh_button.clicked.connect(self._on_list_objects)
-        list_layout.addWidget(self._refresh_button)
-        self._objects_list = QtWidgets.QListWidget()
-        self._objects_list.setMaximumHeight(120)
-        list_layout.addWidget(self._objects_list)
-        layout.addWidget(list_group)
+        # ---- Model Tree (ownership hierarchy) -----------------------------
+        tree_group = QtWidgets.QGroupBox("Model Tree (Ownership Hierarchy)")
+        tree_layout = QtWidgets.QVBoxLayout(tree_group)
+
+        # Toolbar with refresh and expand/collapse
+        tree_toolbar = QtWidgets.QHBoxLayout()
+        self._refresh_button = QtWidgets.QPushButton("Refresh")
+        self._refresh_button.clicked.connect(self._on_refresh_tree)
+        tree_toolbar.addWidget(self._refresh_button)
+        self._expand_all_button = QtWidgets.QPushButton("Expand All")
+        self._expand_all_button.clicked.connect(lambda: self._model_tree.expandAll())
+        tree_toolbar.addWidget(self._expand_all_button)
+        self._collapse_all_button = QtWidgets.QPushButton("Collapse All")
+        self._collapse_all_button.clicked.connect(lambda: self._model_tree.collapseAll())
+        tree_toolbar.addWidget(self._collapse_all_button)
+        tree_toolbar.addStretch()
+        tree_layout.addLayout(tree_toolbar)
+
+        self._model_tree = QtWidgets.QTreeWidget()
+        self._model_tree.setHeaderLabels(["Object", "Type"])
+        self._model_tree.setAlternatingRowColors(True)
+        self._model_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self._model_tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self._model_tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        tree_layout.addWidget(self._model_tree)
+
+        # Dependency inspector (separate from ownership hierarchy)
+        dep_label = QtWidgets.QLabel("Dependencies (InList/OutList) — separate from ownership")
+        dep_label.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+        tree_layout.addWidget(dep_label)
+
+        self._dep_tree = QtWidgets.QTreeWidget()
+        self._dep_tree.setHeaderLabels(["Dependency", "Direction"])
+        self._dep_tree.setAlternatingRowColors(True)
+        self._dep_tree.setMaximumHeight(150)
+        tree_layout.addWidget(self._dep_tree)
+
+        layout.addWidget(tree_group)
 
         # ---- Edit parameters --------------------------------------------
         edit_group = QtWidgets.QGroupBox("Edit Object Parameter")
@@ -1042,6 +1083,504 @@ class MCPGuiPanel:
             self._doc_label.setStyleSheet("color: #000;")
 
     # ------------------------------------------------------------------
+    # Selection Observer for bidirectional 3D view <-> Tree sync
+    # ------------------------------------------------------------------
+    class SelectionObserver:
+        """Observer for FreeCADGui.Selection to sync tree selection with 3D view."""
+
+        def __init__(self, panel_ref):
+            self._panel = panel_ref
+
+        def addSelection(self, doc_name, obj_name, sub_name, *args):
+            """Called when an object is selected in FreeCAD 3D view."""
+            if self._panel._syncing_from_tree:
+                return
+            self._panel._syncing_from_3d = True
+            try:
+                self._panel._on_3d_selection_changed(doc_name, obj_name, sub_name)
+            finally:
+                self._panel._syncing_from_3d = False
+
+        def removeSelection(self, doc_name, obj_name, sub_name, *args):
+            """Called when an object is deselected in FreeCAD 3D view."""
+            if self._panel._syncing_from_tree:
+                return
+            self._panel._syncing_from_3d = True
+            try:
+                self._panel._on_3d_selection_changed(doc_name, obj_name, sub_name)
+            finally:
+                self._panel._syncing_from_3d = False
+
+        def clearSelection(self, doc_name, *args):
+            """Called when selection is cleared in FreeCAD 3D view."""
+            if self._panel._syncing_from_tree:
+                return
+            self._panel._syncing_from_3d = True
+            try:
+                self._panel._on_3d_selection_cleared(doc_name)
+            finally:
+                self._panel._syncing_from_3d = False
+
+    def _register_selection_observer(self) -> None:
+        """Register the SelectionObserver with FreeCADGui.Selection."""
+        if self._observer_registered:
+            return
+        try:
+            import FreeCADGui as Gui
+            self._selection_observer = self.SelectionObserver(self)
+            Gui.Selection.addObserver(self._selection_observer)
+            self._observer_registered = True
+        except Exception:
+            pass
+
+    def _unregister_selection_observer(self) -> None:
+        """Unregister the SelectionObserver from FreeCADGui.Selection."""
+        if not self._observer_registered:
+            return
+        try:
+            import FreeCADGui as Gui
+            if self._selection_observer:
+                Gui.Selection.removeObserver(self._selection_observer)
+        except Exception:
+            pass
+        finally:
+            self._selection_observer = None
+            self._observer_registered = False
+
+    def _on_3d_selection_changed(self, doc_name: str, obj_name: str, sub_name: str) -> None:
+        """Handle selection change from 3D view - find and select corresponding tree item."""
+        try:
+            import FreeCAD as App
+            active_doc = App.ActiveDocument
+            if not active_doc or active_doc.Name != doc_name:
+                return
+
+            self._select_tree_item_by_name(obj_name)
+        except Exception:
+            pass
+
+    def _on_3d_selection_cleared(self, doc_name: str) -> None:
+        """Handle selection cleared from 3D view - clear tree selection."""
+        try:
+            import FreeCAD as App
+            active_doc = App.ActiveDocument
+            if not active_doc or active_doc.Name != doc_name:
+                return
+
+            self._model_tree.clearSelection()
+            self._dep_tree.clear()
+        except Exception:
+            pass
+
+    def _select_tree_item_by_name(self, obj_name: str) -> None:
+        """Find and select a tree item by object name (recursive search)."""
+        from PySide6 import QtCore
+
+        def search_items(item):
+            if item.data(0, QtCore.Qt.UserRole) == obj_name:
+                return item
+            for i in range(item.childCount()):
+                result = search_items(item.child(i))
+                if result:
+                    return result
+            return None
+
+        root = self._model_tree.invisibleRootItem()
+        found = search_items(root)
+        if found:
+            self._syncing_from_3d = True
+            try:
+                self._model_tree.setCurrentItem(found)
+                self._model_tree.scrollToItem(found)
+            finally:
+                self._syncing_from_3d = False
+
+    # ------------------------------------------------------------------
+    # Tree state preservation
+    # ------------------------------------------------------------------
+    def _save_tree_state(self) -> None:
+        """Save expanded and selected item names before refresh."""
+        from PySide6 import QtCore
+        self._expanded_names.clear()
+        self._selected_names.clear()
+
+        def save_expanded(item):
+            if item.isExpanded():
+                name = item.data(0, QtCore.Qt.UserRole)
+                if name:
+                    self._expanded_names.add(name)
+            for i in range(item.childCount()):
+                save_expanded(item.child(i))
+
+        root = self._model_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            save_expanded(root.child(i))
+
+        for item in self._model_tree.selectedItems():
+            name = item.data(0, QtCore.Qt.UserRole)
+            if name:
+                self._selected_names.append(name)
+
+    def _restore_tree_state(self) -> None:
+        """Restore expanded and selected state after refresh."""
+        from PySide6 import QtCore
+
+        def restore_expanded(item):
+            name = item.data(0, QtCore.Qt.UserRole)
+            if name in self._expanded_names:
+                item.setExpanded(True)
+            for i in range(item.childCount()):
+                restore_expanded(item.child(i))
+
+        root = self._model_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            restore_expanded(root.child(i))
+
+        if self._selected_names:
+            def find_and_select(item):
+                name = item.data(0, QtCore.Qt.UserRole)
+                if name in self._selected_names:
+                    item.setSelected(True)
+                    return True
+                for i in range(item.childCount()):
+                    if find_and_select(item.child(i)):
+                        return True
+                return False
+
+            for i in range(root.childCount()):
+                if find_and_select(root.child(i)):
+                    break
+
+    # ------------------------------------------------------------------
+    # Model Tree: Refresh and Build
+    # ------------------------------------------------------------------
+    def _on_refresh_tree(self) -> None:
+        """Fetch document hierarchy and rebuild the model tree."""
+        name = self._doc_id_input.text().strip()
+        if not name:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+
+        self._save_tree_state()
+
+        response = self._run_operation("get_document_hierarchy", {"document_id": name})
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        hierarchy = result.get("hierarchy", []) if isinstance(result, dict) else []
+
+        self._model_tree.clear()
+        self._build_model_tree(hierarchy)
+        self._restore_tree_state()
+        self.refresh_document_label()
+        self._set_status(f"Refreshed model tree for workspace document '{name}'.", error=False)
+
+    def _build_model_tree(self, nodes: list, parent_item=None) -> None:
+        """Recursively build QTreeWidgetItems from hierarchy nodes."""
+        from PySide6 import QtWidgets, QtCore
+
+        if parent_item is None:
+            parent_item = self._model_tree.invisibleRootItem()
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+
+            name = node.get("name", "")
+            type_id = node.get("type", "")
+            label = node.get("label", "")
+            is_tip = node.get("is_tip", False)
+            tip_name = node.get("tip_name", "")
+            children = node.get("children", [])
+            joint_group = node.get("joint_group", None)
+
+            type_name = type_id.split("::")[-1] if "::" in type_id else type_id
+            display_name = f"{name} ({type_name})"
+            if label and label != name:
+                display_name += f" — {label}"
+            if is_tip:
+                display_name += " [TIP]"
+            if tip_name:
+                display_name += f" (Tip: {tip_name})"
+
+            item = QtWidgets.QTreeWidgetItem([display_name, type_name])
+            item.setData(0, QtCore.Qt.UserRole, name)
+            item.setData(0, QtCore.Qt.UserRole + 1, type_id)
+            item.setData(0, QtCore.Qt.UserRole + 2, node)
+
+            parent_item.addChild(item)
+
+            if children:
+                self._build_model_tree(children, item)
+
+            if joint_group and isinstance(joint_group, dict):
+                jg_name = joint_group.get("name", "")
+                jg_type = joint_group.get("type", "")
+                jg_type_name = jg_type.split("::")[-1] if "::" in jg_type else jg_type
+                jg_display = f"{jg_name} ({jg_type_name})"
+                jg_item = QtWidgets.QTreeWidgetItem([jg_display, jg_type_name])
+                jg_item.setData(0, QtCore.Qt.UserRole, jg_name)
+                jg_item.setData(0, QtCore.Qt.UserRole + 1, jg_type)
+                jg_item.setData(0, QtCore.Qt.UserRole + 2, joint_group)
+                item.addChild(jg_item)
+
+                jg_children = joint_group.get("children", [])
+                if jg_children:
+                    self._build_model_tree(jg_children, jg_item)
+
+    # ------------------------------------------------------------------
+    # Tree Selection and Dependency Inspector
+    # ------------------------------------------------------------------
+    def _on_tree_selection_changed(self) -> None:
+        """Handle tree selection change - update dependency inspector and sync to 3D view."""
+        from PySide6 import QtCore
+        if self._syncing_from_3d:
+            return
+
+        selected = self._model_tree.selectedItems()
+        if not selected:
+            self._dep_tree.clear()
+            return
+
+        item = selected[0]
+        obj_name = item.data(0, QtCore.Qt.UserRole)
+        if not obj_name:
+            self._dep_tree.clear()
+            return
+
+        self._update_dependency_inspector(obj_name)
+
+        self._syncing_from_tree = True
+        try:
+            import FreeCADGui as Gui
+            import FreeCAD as App
+            doc = App.ActiveDocument
+            if doc:
+                obj = doc.getObject(obj_name)
+                if obj:
+                    Gui.Selection.clearSelection()
+                    Gui.Selection.addSelection(obj)
+        except Exception:
+            pass
+        finally:
+            self._syncing_from_tree = False
+
+    def _update_dependency_inspector(self, obj_name: str) -> None:
+        """Fetch and display InList/OutList dependencies for the selected object."""
+        from PySide6 import QtWidgets
+        name = self._doc_id_input.text().strip()
+        if not name:
+            return
+
+        response = self._run_operation("inspect_object", {"document_id": name, "object_name": obj_name})
+        if response is None or not response.get("ok"):
+            return
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        info = result.get("info", {}) if isinstance(result, dict) else {}
+
+        self._dep_tree.clear()
+
+        depends_on = info.get("depends_on", [])
+        depended_on_by = info.get("depended_on_by", [])
+
+        if depends_on:
+            parent = QtWidgets.QTreeWidgetItem(["depends_on (OutList)", ""])
+            for dep_name in depends_on:
+                child = QtWidgets.QTreeWidgetItem([dep_name, "references"])
+                parent.addChild(child)
+            self._dep_tree.addTopLevelItem(parent)
+            parent.setExpanded(True)
+
+        if depended_on_by:
+            parent = QtWidgets.QTreeWidgetItem(["depended_on_by (InList)", ""])
+            for dep_name in depended_on_by:
+                child = QtWidgets.QTreeWidgetItem([dep_name, "referenced by"])
+                parent.addChild(child)
+            self._dep_tree.addTopLevelItem(parent)
+            parent.setExpanded(True)
+
+    # ------------------------------------------------------------------
+    # Tree Context Menu Actions
+    # ------------------------------------------------------------------
+    def _on_tree_context_menu(self, pos) -> None:
+        """Show context menu for tree items with delete, reorder, set Tip actions."""
+        from PySide6 import QtWidgets, QtCore
+
+        item = self._model_tree.itemAt(pos)
+        if not item:
+            return
+
+        obj_name = item.data(0, QtCore.Qt.UserRole)
+        type_id = item.data(0, QtCore.Qt.UserRole + 1)
+        if not obj_name or not type_id:
+            return
+
+        type_name = type_id.split("::")[-1] if "::" in type_id else type_id
+
+        # Check if this item is a child of a Body (eligible for reorder)
+        parent_item = item.parent()
+        is_body_feature = False
+        if parent_item:
+            parent_type_id = parent_item.data(0, QtCore.Qt.UserRole + 1)
+            if parent_type_id:
+                parent_type_name = parent_type_id.split("::")[-1] if "::" in parent_type_id else parent_type_id
+                is_body_feature = (parent_type_name == "Body")
+
+        menu = QtWidgets.QMenu(self._model_tree)
+
+        if type_name == "Body":
+            set_tip_action = menu.addAction("Set as Tip")
+            set_tip_action.triggered.connect(lambda: self._on_set_body_tip(obj_name))
+            menu.addSeparator()
+
+        if is_body_feature:
+            reorder_action = menu.addAction("Reorder in Body…")
+            reorder_action.triggered.connect(lambda: self._on_reorder_body_feature(obj_name))
+            menu.addSeparator()
+
+        delete_action = menu.addAction("Delete Object")
+        delete_action.triggered.connect(lambda: self._on_delete_from_tree(obj_name))
+
+        menu.exec(self._model_tree.mapToGlobal(pos))
+
+    def _on_delete_from_tree(self, obj_name: str) -> None:
+        """Delete object from tree context menu."""
+        document_id = self._doc_id_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+
+        response = self._run_operation(
+            "delete_object",
+            {"document_id": document_id, "object_name": obj_name},
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        deleted = result.get("deleted", []) if isinstance(result, dict) else []
+        remaining = result.get("remaining", []) if isinstance(result, dict) else []
+        self.refresh_document_label()
+        self._on_refresh_tree()
+        deleted_text = ", ".join(deleted) if deleted else "<none>"
+        self._set_status(
+            f"Deleted '{obj_name}' in workspace document '{document_id}'. "
+            f"Objects removed: {deleted_text}. Objects remaining: {len(remaining)}.",
+            error=False,
+        )
+
+    def _on_reorder_body_feature(self, obj_name: str) -> None:
+        """Reorder a feature within its Body (prompt for new position)."""
+        from PySide6 import QtWidgets
+
+        document_id = self._doc_id_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+
+        response = self._run_operation(
+            "inspect_object",
+            {"document_id": document_id, "object_name": obj_name},
+        )
+        if response is None or not response.get("ok"):
+            return
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        info = result.get("info", {}) if isinstance(result, dict) else {}
+        depended_on_by = info.get("depended_on_by", [])
+
+        body_name = None
+        for dep in depended_on_by:
+            if "Body" in dep:
+                body_name = dep
+                break
+
+        if not body_name:
+            self._set_status(f"Error: Could not find parent Body for '{obj_name}'.", error=True)
+            return
+
+        position, ok = QtWidgets.QInputDialog.getInt(
+            self._model_tree,
+            "Reorder Body Feature",
+            f"Enter new position (0-based) for '{obj_name}' in Body '{body_name}':",
+            0,
+            0,
+            10000,
+        )
+        if not ok:
+            return
+
+        response = self._run_operation(
+            "reorder_body_features",
+            {"document_id": document_id, "body_name": body_name, "feature_name": obj_name, "new_position": position},
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+
+        self.refresh_document_label()
+        self._on_refresh_tree()
+        self._set_status(
+            f"Reordered '{obj_name}' to position {position} in Body '{body_name}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    def _on_set_body_tip(self, obj_name: str) -> None:
+        """Set a feature as the Body's Tip."""
+        document_id = self._doc_id_input.text().strip()
+        if not document_id:
+            self._set_status("Error: Document ID must not be empty.", error=True)
+            return
+
+        response = self._run_operation(
+            "inspect_object",
+            {"document_id": document_id, "object_name": obj_name},
+        )
+        if response is None or not response.get("ok"):
+            return
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        info = result.get("info", {}) if isinstance(result, dict) else {}
+        depended_on_by = info.get("depended_on_by", [])
+
+        body_name = None
+        for dep in depended_on_by:
+            if "Body" in dep:
+                body_name = dep
+                break
+
+        if not body_name:
+            self._set_status(f"Error: Could not find parent Body for '{obj_name}'.", error=True)
+            return
+
+        response = self._run_operation(
+            "set_body_tip",
+            {"document_id": document_id, "body_name": body_name, "feature_name": obj_name},
+        )
+        if response is None or not response.get("ok"):
+            if response is not None:
+                self._set_status(f"Error: {self._error_message(response)}", error=True)
+            return
+
+        result = response.get("result", {}) if isinstance(response, dict) else {}
+        self.refresh_document_label()
+        self._on_refresh_tree()
+        tip_name = result.get("tip_name", obj_name) if isinstance(result, dict) else obj_name
+        self._set_status(
+            f"Set Tip of Body '{body_name}' to '{tip_name}' "
+            f"in workspace document '{document_id}'.",
+            error=False,
+        )
+
+    # ------------------------------------------------------------------
     # Shared handler call
     # ------------------------------------------------------------------
     def _run_operation(self, op: str, params: dict):
@@ -1106,7 +1645,7 @@ class MCPGuiPanel:
             result.get("object_name", name) if isinstance(result, dict) else name
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Box '{obj_name}' in workspace document '{name}'.", error=False
         )
@@ -1154,41 +1693,9 @@ class MCPGuiPanel:
             result.get("object_name", name) if isinstance(result, dict) else name
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Cylinder '{obj_name}' in workspace document '{name}'.", error=False
-        )
-
-    # ------------------------------------------------------------------
-    # List objects
-    # ------------------------------------------------------------------
-    def _on_list_objects(self) -> None:
-        name = self._doc_id_input.text().strip()
-        if not name:
-            self._set_status("Error: Document ID must not be empty.", error=True)
-            return
-
-        response = self._run_operation("list_objects", {"document_id": name})
-        if response is None or not response.get("ok"):
-            if response is not None:
-                self._set_status(f"Error: {self._error_message(response)}", error=True)
-            return
-        result = response.get("result", {}) if isinstance(response, dict) else {}
-        objects = result.get("objects", []) if isinstance(result, dict) else []
-        self._objects_list.clear()
-        count = 0
-        for obj in objects:
-            if not isinstance(obj, dict):
-                continue
-            count += 1
-            label = f"{obj.get('name', '')} ({obj.get('type', '')})"
-            volume = obj.get("volume")
-            if volume is not None:
-                label += f", vol {volume:g}"
-            self._objects_list.addItem(label)
-        self.refresh_document_label()
-        self._set_status(
-            f"Listed {count} object(s) in workspace document '{name}'.", error=False
         )
 
     # ------------------------------------------------------------------
@@ -1224,7 +1731,7 @@ class MCPGuiPanel:
                 self._set_status(f"Error: {self._error_message(response)}", error=True)
             return
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Set {property_name}={value} on object '{object_name}' "
             f"in workspace document '{document_id}'.",
@@ -1263,7 +1770,7 @@ class MCPGuiPanel:
                 self._set_status(f"Error: {self._error_message(response)}", error=True)
             return
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Set placement x={x}, y={y}, z={z} on object '{object_name}' "
             f"in workspace document '{document_id}'.",
@@ -1299,7 +1806,7 @@ class MCPGuiPanel:
             result.get("sketch_name", sketch_name) if isinstance(result, dict) else sketch_name
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Sketch '{created_name}' created on XY plane in workspace document '{document_id}'.",
             error=False,
@@ -1348,7 +1855,7 @@ class MCPGuiPanel:
             result.get("total_edges", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Added rectangle ({width}x{height} at {x},{y}) to sketch '{sketch_name}' "
             f"in workspace document '{document_id}' ({total_edges} geometry).",
@@ -1394,7 +1901,7 @@ class MCPGuiPanel:
             result.get("total_edges", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Added circle (radius {radius} at {center_x},{center_y}) to sketch '{sketch_name}' "
             f"in workspace document '{document_id}' ({total_edges} geometry).",
@@ -1443,7 +1950,7 @@ class MCPGuiPanel:
             result.get("total_edges", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Added triangle ({x1},{y1})-({x2},{y2})-({x3},{y3}) to sketch '{sketch_name}' "
             f"in workspace document '{document_id}' ({total_edges} geometry).",
@@ -1493,7 +2000,7 @@ class MCPGuiPanel:
             result.get("total_edges", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Added ellipse (major {major_radius}, minor {minor_radius} at {center_x},{center_y}) "
             f"to sketch '{sketch_name}' in workspace document '{document_id}' "
@@ -1547,7 +2054,7 @@ class MCPGuiPanel:
             result.get("total_edges", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Added regular polygon ({sides} sides, radius {radius} at {center_x},{center_y}, "
             f"rotation {rotation_deg}deg) to sketch '{sketch_name}' "
@@ -1593,7 +2100,7 @@ class MCPGuiPanel:
             result.get("total_edges", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Added custom polygon ({len(vertices) if isinstance(vertices, list) else 0} vertices) "
             f"to sketch '{sketch_name}' in workspace document '{document_id}' "
@@ -1630,7 +2137,7 @@ class MCPGuiPanel:
         constraint_count = result.get("constraint_count", 0) if isinstance(result, dict) else 0
         geometries = result.get("geometries", []) if isinstance(result, dict) else []
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Inspected sketch '{sketch_name}' in workspace document '{document_id}' "
             f"({geometry_count} geometry, {constraint_count} constraints).",
@@ -1694,7 +2201,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Deleted geometry index {geometry_index} from sketch '{sketch_name}' "
             f"in workspace document '{document_id}' ({geometry_count} geometry remaining).",
@@ -1729,7 +2236,7 @@ class MCPGuiPanel:
         deleted = result.get("deleted", []) if isinstance(result, dict) else []
         remaining = result.get("remaining", []) if isinstance(result, dict) else []
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         deleted_text = ", ".join(deleted) if deleted else "<none>"
         self._set_status(
             f"Deleted '{object_name}' in workspace document '{document_id}'. "
@@ -1778,7 +2285,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Edited line at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
@@ -1824,7 +2331,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Edited circle at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
@@ -1874,7 +2381,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Edited ellipse at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
@@ -1925,7 +2432,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Edited rectangle at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
@@ -1976,7 +2483,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         verts = result.get("vertices", vertices) if isinstance(result, dict) else vertices
         self._set_status(
             f"Edited triangle at index {geometry_index} in sketch '{sketch_name}' "
@@ -2027,7 +2534,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Edited regular polygon at index {geometry_index} in sketch '{sketch_name}' "
             f"in workspace document '{document_id}' "
@@ -2078,7 +2585,7 @@ class MCPGuiPanel:
             result.get("geometry_count", 0) if isinstance(result, dict) else 0
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         verts = result.get("vertices", vertices) if isinstance(result, dict) else vertices
         self._set_status(
             f"Edited polygon at index {geometry_index} in sketch '{sketch_name}' "
@@ -2122,7 +2629,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Pad '{result.get('pad_name', pad_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
@@ -2166,7 +2673,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Pocket '{result.get('pocket_name', pocket_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
@@ -2210,7 +2717,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Revolution '{result.get('revolution_name', revolution_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
@@ -2254,7 +2761,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Groove '{result.get('groove_name', groove_name)}' from sketch "
             f"'{sketch_name}' in Body '{result.get('body_name', body_name)}' "
@@ -2310,7 +2817,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Fillet '{result.get('fillet_name', fillet_name)}' on feature "
             f"'{object_name}' edges {edge_indices} radius {radius}mm in Body "
@@ -2366,7 +2873,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Chamfer '{result.get('chamfer_name', chamfer_name)}' on feature "
             f"'{object_name}' edges {edge_indices} size {size}mm in Body "
@@ -2413,7 +2920,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Linear Pattern '{result.get('linear_pattern_name', pattern_name)}' on feature "
             f"'{object_name}' direction {direction} edge {result.get('direction_edge_index', '?')} "
@@ -2461,7 +2968,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Polar Pattern '{result.get('polar_pattern_name', pattern_name)}' on feature "
             f"'{object_name}' axis {axis} edge {result.get('axis_edge_index', '?')} "
@@ -2505,7 +3012,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Created Mirrored '{result.get('mirrored_name', pattern_name)}' on feature "
             f"'{object_name}' plane {plane} face {result.get('mirror_face_index', '?')} "
@@ -2576,7 +3083,7 @@ class MCPGuiPanel:
             return
         result = response.get("result", {}) if isinstance(response, dict) else {}
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         removed = result.get("removed_faces", faces)
         vol_red = result.get("volume_reduction")
         vol_red_txt = f", volume reduced by {vol_red:.0f} mm^3" if isinstance(vol_red, (int, float)) else ""
@@ -2682,7 +3189,7 @@ class MCPGuiPanel:
             else result_name
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Boolean Cut '{obj_name}' = '{base_object}' - '{tool_object}' "
             f"in workspace document '{document_id}'.",
@@ -2729,7 +3236,7 @@ class MCPGuiPanel:
             else result_name
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Boolean Fuse '{obj_name}' = '{base_object}' + '{tool_object}' "
             f"in workspace document '{document_id}'.",
@@ -2776,7 +3283,7 @@ class MCPGuiPanel:
             else result_name
         )
         self.refresh_document_label()
-        self._objects_list.clear()
+        self._on_refresh_tree()
         self._set_status(
             f"Boolean Common '{obj_name}' = '{base_object}' ∩ '{tool_object}' "
             f"in workspace document '{document_id}'.",
@@ -2789,10 +3296,12 @@ class MCPGuiPanel:
 
     def show(self) -> None:
         self.refresh_document_label()
+        self._register_selection_observer()
         self._dock.show()
         self._dock.raise_()
 
     def hide(self) -> None:
+        self._unregister_selection_observer()
         self._dock.hide()
 
     def is_visible(self) -> bool:
