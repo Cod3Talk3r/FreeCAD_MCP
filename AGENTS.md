@@ -8,6 +8,11 @@
 
 - Use the `token-saver` skill for context-efficient work (exploration, implementation, testing, reporting).
 - Use the `project-memory` skill when starting, continuing, or handing off project work.
+- Use `codebase_memory_mcp` (codebase-memory-mcp) as the code indexing layer for code discovery and query before falling back to grep/glob/read. Prefer `search_graph`, `trace_path`, `get_code_snippet`, `check_index_coverage`, `query_graph`, and `get_architecture` to minimize file reads and token usage. If the graph returns insufficient results or for string literals/configs/non-code files, fall back to grep/glob/read.
+
+## Language Server
+
+- Use `pyright` as the LSP/type checker for Python code. Run `pyright` (via `uv tool install pyright`) to typecheck before considering work complete.
 
 ## Before Starting Work
 
