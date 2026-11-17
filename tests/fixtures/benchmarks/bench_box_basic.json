@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "fixture_id": "bench_box_basic",
+  "goal": "Create a simple box and validate geometry.",
+  "operations": [
+    {"operation": "create_document", "parameters": {"document_id": "bench_box", "workspace": "{{workspace}}"}},
+    {"operation": "create_box", "parameters": {"length": 10.0, "width": 5.0, "height": 3.0}},
+    {"operation": "recompute", "parameters": {}},
+    {"operation": "validate", "parameters": {}},
+    {"operation": "save_document", "parameters": {}}
+  ],
+  "expected_geometric_status": "valid",
+  "engineering_status": "not_assessed",
+  "artifact_assertions": {
+    "fcstd_exists": true,
+    "non_empty": true,
+    "reopenable": true
+  }
+}

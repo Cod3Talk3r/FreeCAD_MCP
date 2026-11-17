@@ -6,8 +6,6 @@ by reusing existing bridge operations and workspace metadata.
 This module must remain FreeCAD-free (no FreeCAD/Part/FreeCADGui imports).
 """
 
-from __future__ import annotations
-
 import os
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -27,6 +25,20 @@ from .workflow_contracts import (
     WorkflowStepRequest,
     WorkflowStepResult,
 )
+
+def _result_ok(result: Any) -> bool:
+    """Return True when a bridge result genuinely indicates success.
+
+    Supports both legacy envelopes (``{"ok": True, ...}``) and the unwrapped
+    payloads returned by ``DirectBackend`` (no top-level ``ok``).  A result that
+    explicitly carries ``ok=False`` or an ``error`` key is never treated as
+    successful.
+    """
+    if not isinstance(result, Mapping):
+        return False
+    if "ok" in result:
+        return bool(result.get("ok"))
+    return "error" not in result
 
 #: Maximum number of per-object summaries included in a snapshot.
 MAX_SNAPSHOT_OBJECTS = 50
@@ -375,7 +387,7 @@ def execute_workflow(
         if step.recover_on_failure:
             # 1. Save the document to ensure current live state is persisted.
             save_result = op_runner("save_document", {"document_id": normalized_doc, "workspace": ws_arg})
-            if not save_result.get("ok"):
+            if not _result_ok(save_result):
                 step_results.append(
                     WorkflowStepResult(
                         step_index=idx,
@@ -404,7 +416,7 @@ def execute_workflow(
 
             # 2. Create a snapshot at the new persisted revision.
             snapshot_result = op_runner("create_snapshot", {"document_id": normalized_doc, "workspace": ws_arg})
-            if not snapshot_result.get("ok"):
+            if not _result_ok(snapshot_result):
                 step_results.append(
                     WorkflowStepResult(
                         step_index=idx,
@@ -462,7 +474,7 @@ def execute_workflow(
                 "restore_snapshot",
                 {"document_id": normalized_doc, "revision": pre_step_snapshot_revision, "workspace": ws_arg},
             )
-            restoration_ok = restore_result.get("ok", False)
+            restoration_ok = _result_ok(restore_result)
             validation_ok = False
             preservation_rev = None
             recovery_error = None

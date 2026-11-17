@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "fixture_id": "bench_cylinder_basic",
+  "goal": "Create a cylinder and validate geometry.",
+  "operations": [
+    {"operation": "create_document", "parameters": {"document_id": "bench_cyl", "workspace": "{{workspace}}"}},
+    {"operation": "create_cylinder", "parameters": {"radius": 2.0, "height": 4.0}},
+    {"operation": "recompute", "parameters": {}},
+    {"operation": "validate", "parameters": {}},
+    {"operation": "save_document", "parameters": {}}
+  ],
+  "expected_geometric_status": "valid",
+  "engineering_status": "out_of_scope",
+  "artifact_assertions": {
+    "fcstd_exists": true,
+    "non_empty": true,
+    "reopenable": true
+  }
+}
