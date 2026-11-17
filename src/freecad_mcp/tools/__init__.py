@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import diagnostics, freecad, modeling, taiga
+from . import diagnostics, freecad, modeling, taiga, workflows
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server.mcpserver import MCPServer
@@ -24,3 +24,4 @@ def register_all(server: MCPServer, settings: Settings) -> None:
     freecad.register(server, settings)
     modeling.register_all(server, settings)
     taiga.register(server, settings)
+    workflows.register(server, settings)

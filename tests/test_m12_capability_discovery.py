@@ -26,6 +26,7 @@ NON_OP_TOOLS = {
     "taiga_status",
     "taiga_score_actions",
     "taiga_build",
+    "describe_workflow_capabilities",
 }
 
 #: Operations in runner.OPERATIONS that are intentionally not exposed as

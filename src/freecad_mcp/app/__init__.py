@@ -9,6 +9,13 @@ from .inspection import (
     ObjectInspection,
     ShapeInfo,
 )
+from .workflow_contracts import (
+    CapabilityCatalog,
+    OperationCapability,
+    WorkflowResult,
+    WorkflowStepRequest,
+    WorkflowStepResult,
+)
 
 __all__ = [
     "ApplicationError",
@@ -16,10 +23,15 @@ __all__ = [
     "BackendStatus",
     "BuildRequest",
     "BuildResult",
+    "CapabilityCatalog",
     "DocumentInspection",
     "InspectionBackend",
     "InspectionRequest",
     "InspectionResult",
     "ObjectInspection",
+    "OperationCapability",
     "ShapeInfo",
+    "WorkflowResult",
+    "WorkflowStepRequest",
+    "WorkflowStepResult",
 ]
