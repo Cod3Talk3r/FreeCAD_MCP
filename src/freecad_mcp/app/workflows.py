@@ -260,11 +260,21 @@ def execute_workflow(
     workspace: str | None = None,
     op_runner: OpRunner,
 ) -> WorkflowResult:
-    """Execute an ordered list of allowlisted operations sequentially (M19 P3).
+    """Execute an ordered list of allowlisted operations sequentially (M19 P3/P4).
 
     Reuses ``op_runner`` (DirectBackend/bridge execution path) for operations and
     validation/inspection helpers. Stops on first step failure by default. Later
     steps are recorded as skipped and not executed.
+
+    When a step has ``recover_on_failure=True``, the step first saves the document
+    and creates a pre-step snapshot. If the operation then fails, that exact
+    snapshot is restored and verified. Recovery only triggers for operation
+    failures (not validation/inspection failures). A recovered step has
+    ``status="recovered"`` and ``ok=True`` but is not counted in
+    ``completed_steps``. The overall workflow status is ``"recovered"`` if at
+    least one step was recovered and no later steps failed; otherwise
+    ``"completed"`` if all steps completed, or ``"failed"`` if any step failed
+    without recovery.
     """
     try:
         normalized_doc = _normalized_document_id(document_id)
@@ -287,6 +297,8 @@ def execute_workflow(
     step_results: list[WorkflowStepResult] = []
     failed = False
     completed_steps = 0
+    any_recovered = False
+    actual_failure = False  # True if a step genuinely failed (not recovery stop)
 
     for idx, step in enumerate(steps):
         if failed:
@@ -306,6 +318,7 @@ def execute_workflow(
                     validation=None,
                     artifact_ref=None,
                     state_ref=None,
+                    recovery=None,
                 )
             )
             continue
@@ -326,13 +339,12 @@ def execute_workflow(
                     ok=False,
                     result=None,
                     error={"message": msg, "error_type": "ValueError"},
+                    recovery=None,
                 )
             )
             failed = True
+            actual_failure = True
             continue
-        # Do not force document/workspace into ops that may not accept them, except
-        # preserve if caller provided; for ops that take document context, ensure
-        # consistency when operation name is known to use document_id.
         if "document_id" in params or step.operation in OPERATIONS:
             params.setdefault("document_id", normalized_doc)
         if "workspace" in params or step.operation in OPERATIONS:
@@ -351,31 +363,238 @@ def execute_workflow(
                         "message": f"unknown or non-allowlisted operation: {step.operation!r}",
                         "error_type": "UnknownOperation",
                     },
+                    recovery=None,
                 )
             )
             failed = True
+            actual_failure = True
             continue
+
+        # Pre-step preparation for recovery-enabled steps.
+        pre_step_snapshot_revision: int | None = None
+        if step.recover_on_failure:
+            # 1. Save the document to ensure current live state is persisted.
+            save_result = op_runner("save_document", {"document_id": normalized_doc, "workspace": ws_arg})
+            if not save_result.get("ok"):
+                step_results.append(
+                    WorkflowStepResult(
+                        step_index=idx,
+                        operation=step.operation,
+                        label=step.label,
+                        status="failed",
+                        ok=False,
+                        result=None,
+                        error={
+                            "message": f"pre-step save failed: {save_result.get('error', 'unknown error')}",
+                            "error_type": "PreStepSaveFailed",
+                        },
+                        recovery={
+                            "attempted": False,
+                            "target_revision": None,
+                            "restoration_ok": False,
+                            "validation_ok": False,
+                            "preservation_snapshot_revision": None,
+                            "error": "pre-step save failed",
+                        },
+                    )
+                )
+                failed = True
+                actual_failure = True
+                continue
+
+            # 2. Create a snapshot at the new persisted revision.
+            snapshot_result = op_runner("create_snapshot", {"document_id": normalized_doc, "workspace": ws_arg})
+            if not snapshot_result.get("ok"):
+                step_results.append(
+                    WorkflowStepResult(
+                        step_index=idx,
+                        operation=step.operation,
+                        label=step.label,
+                        status="failed",
+                        ok=False,
+                        result=None,
+                        error={
+                            "message": f"pre-step snapshot failed: {snapshot_result.get('error', 'unknown error')}",
+                            "error_type": "PreStepSnapshotFailed",
+                        },
+                        recovery={
+                            "attempted": False,
+                            "target_revision": None,
+                            "restoration_ok": False,
+                            "validation_ok": False,
+                            "preservation_snapshot_revision": None,
+                            "error": "pre-step snapshot failed",
+                        },
+                    )
+                )
+                failed = True
+                actual_failure = True
+                continue
+
+            # 3. Capture the exact revision from the snapshot creation response.
+            pre_step_snapshot_revision = snapshot_result.get("result", {}).get("revision")
+            if pre_step_snapshot_revision is None:
+                # Fallback: try to get from top-level if structure differs
+                pre_step_snapshot_revision = snapshot_result.get("revision")
 
         # Execute operation via existing execution path.
         op_result: dict[str, Any] | None = None
+        op_error: dict[str, Any] | None = None
+        operation_succeeded = True  # Assume success unless exception or explicit ok=False
         try:
             raw = op_runner(step.operation, params)
             op_result = dict(raw) if isinstance(raw, Mapping) else {"value": raw}
+            # Support both envelope format (with "ok" field) and direct result format.
+            if "ok" in op_result:
+                operation_succeeded = bool(op_result.get("ok"))
+                if not operation_succeeded:
+                    op_error = op_result.get("error", {"message": "operation failed", "error_type": "OperationFailed"})
         except Exception as exc:  # noqa: BLE001
-            step_results.append(
-                WorkflowStepResult(
-                    step_index=idx,
-                    operation=step.operation,
-                    label=step.label,
-                    status="failed",
-                    ok=False,
-                    result=None,
-                    error={"message": str(exc), "error_type": type(exc).__name__},
-                )
-            )
-            failed = True
-            continue
+            operation_succeeded = False
+            op_error = {"message": str(exc), "error_type": type(exc).__name__}
+            op_result = None
 
+        # Recovery path: only for operation failures when recover_on_failure is True.
+        recovery_info: dict[str, Any] | None = None
+        if not operation_succeeded and step.recover_on_failure and pre_step_snapshot_revision is not None:
+            # Attempt recovery by restoring the pre-step snapshot.
+            restore_result = op_runner(
+                "restore_snapshot",
+                {"document_id": normalized_doc, "revision": pre_step_snapshot_revision, "workspace": ws_arg},
+            )
+            restoration_ok = restore_result.get("ok", False)
+            validation_ok = False
+            preservation_rev = None
+            recovery_error = None
+
+            if restoration_ok:
+                # restore_snapshot already performs internal reopen validation.
+                # Run additional workflow-level verification: fresh state snapshot + validate.
+                try:
+                    verify_snapshot = build_model_state_snapshot(
+                        normalized_doc, workspace=workspace, op_runner=op_runner
+                    )
+                    # Check that core inspection operations were available and validation passed.
+                    verify_notes = verify_snapshot.summary.notes
+                    unavailable = [n for n in verify_notes if " unavailable:" in n]
+                    if unavailable:
+                        validation_ok = False
+                        recovery_error = f"post-recovery verification unavailable: {'; '.join(unavailable)}"
+                    else:
+                        # Run validate to confirm geometric validity.
+                        vraw = op_runner("validate", {"document_id": normalized_doc, "workspace": ws_arg})
+                        vdict = dict(vraw) if isinstance(vraw, Mapping) else {}
+                        # Handle envelope format: {ok: true, result: {all_valid: ...}}
+                        if vdict.get("ok") is False:
+                            validation_ok = False
+                            recovery_error = f"post-recovery validate failed: {vdict.get('error', 'unknown error')}"
+                        else:
+                            result_data = vdict.get("result", vdict)
+                            validation_ok = result_data.get("all_valid", False)
+                            if not validation_ok:
+                                failures = result_data.get("objects", [])
+                                fail_msgs = [f"{o.get('name')}: {o.get('valid')}" for o in failures if not o.get("valid")]
+                                recovery_error = f"post-recovery validation failed: {'; '.join(fail_msgs) or 'invalid geometry'}"
+                except Exception as exc:  # noqa: BLE001
+                    validation_ok = False
+                    recovery_error = f"post-recovery verification error: {exc}"
+
+                preservation_snapshot = restore_result.get("result", {}).get("preservation_snapshot")
+                if preservation_snapshot:
+                    preservation_rev = preservation_snapshot.get("revision")
+
+            if not restoration_ok:
+                recovery_error = restore_result.get("error", "restore failed")
+
+            recovery_info = {
+                "attempted": True,
+                "target_revision": pre_step_snapshot_revision,
+                "restoration_ok": restoration_ok,
+                "validation_ok": validation_ok,
+                "preservation_snapshot_revision": preservation_rev,
+                "error": recovery_error,
+            }
+
+            if restoration_ok and validation_ok:
+                # Recovery successful: mark as recovered, do not count as completed.
+                any_recovered = True
+                step_results.append(
+                    WorkflowStepResult(
+                        step_index=idx,
+                        operation=step.operation,
+                        label=step.label,
+                        status="recovered",
+                        ok=True,
+                        result=op_result,  # Original failed operation result
+                        error=op_error,    # Preserve original operation error
+                        inspection=None,
+                        validation=None,
+                        artifact_ref=None,
+                        state_ref=None,
+                        recovery=recovery_info,
+                    )
+                )
+                # Handle recovery_action: stop (default) or continue to next step.
+                if step.recovery_action == "stop":
+                    # Stop workflow after successful recovery; do not mark as actual failure.
+                    # Subsequent steps will be skipped.
+                    failed = True
+                    stop_after_recovery = True
+                else:
+                    stop_after_recovery = False
+                if stop_after_recovery:
+                    # Mark remaining steps as skipped
+                    for remaining_idx in range(idx + 1, len(steps)):
+                        remaining_step = steps[remaining_idx]
+                        step_results.append(
+                            WorkflowStepResult(
+                                step_index=remaining_idx,
+                                operation=remaining_step.operation,
+                                label=remaining_step.label,
+                                status="skipped",
+                                ok=False,
+                                result=None,
+                                error={
+                                    "message": "skipped due to earlier workflow step recovery (stop)",
+                                    "error_type": "SkippedStep",
+                                },
+                                inspection=None,
+                                validation=None,
+                                artifact_ref=None,
+                                state_ref=None,
+                                recovery=None,
+                            )
+                        )
+                    break
+                continue
+            else:
+                # Recovery failed: mark step as failed with recovery details.
+                step_results.append(
+                    WorkflowStepResult(
+                        step_index=idx,
+                        operation=step.operation,
+                        label=step.label,
+                        status="failed",
+                        ok=False,
+                        result=op_result,
+                        error={
+                            "message": op_error.get("message", "operation failed") if op_error else "operation failed",
+                            "error_type": op_error.get("error_type", "OperationFailed") if op_error else "OperationFailed",
+                            "recovery_failed": True,
+                            "recovery_error": recovery_error,
+                        },
+                        inspection=None,
+                        validation=None,
+                        artifact_ref=None,
+                        state_ref=None,
+                        recovery=recovery_info,
+                    )
+                )
+                failed = True
+                actual_failure = True
+                continue
+
+        # Non-recovery path (or recovery not enabled/triggered).
         # validate_after: honor if requested, report separately from operation success.
         validation_payload: dict[str, Any] | None = None
         validation_failed = False
@@ -386,13 +605,33 @@ def execute_workflow(
                     {"document_id": normalized_doc, "workspace": ws_arg},
                 )
                 vdict = dict(vraw) if isinstance(vraw, Mapping) else {"value": vraw}
-                validation_payload = {"ok": True, "result": vdict}
+                # The validate operation returns an envelope with ok and result containing all_valid.
+                # Check if the operation itself succeeded and if validation passed.
+                if vdict.get("ok") is False:
+                    validation_failed = True
+                    validation_payload = {
+                        "ok": False,
+                        "error": vdict.get("error", {"message": "validate failed", "error_type": "ValidateError"}),
+                        "operation_succeeded": operation_succeeded,
+                    }
+                else:
+                    result_data = vdict.get("result", vdict)
+                    all_valid = result_data.get("all_valid", True)
+                    if not all_valid:
+                        validation_failed = True
+                        validation_payload = {
+                            "ok": True,
+                            "result": result_data,
+                            "validation_failed": True,
+                        }
+                    else:
+                        validation_payload = {"ok": True, "result": result_data}
             except Exception as exc:  # noqa: BLE001
                 validation_failed = True
                 validation_payload = {
                     "ok": False,
                     "error": {"message": str(exc), "error_type": type(exc).__name__},
-                    "operation_succeeded": True,
+                    "operation_succeeded": operation_succeeded,
                 }
 
         # inspect_after: reuse existing read-only snapshot/state functionality.
@@ -425,7 +664,7 @@ def execute_workflow(
                             "message": "; ".join(unavailable_notes),
                             "error_type": "InspectionUnavailable",
                         },
-                        "operation_succeeded": True,
+                        "operation_succeeded": operation_succeeded,
                         "snapshot": snapshot.model_dump(mode="json"),
                     }
                     artifact_ref = None
@@ -455,13 +694,39 @@ def execute_workflow(
                 inspection_payload = {
                     "ok": False,
                     "error": {"message": str(exc), "error_type": type(exc).__name__},
-                    "operation_succeeded": True,
+                    "operation_succeeded": operation_succeeded,
                 }
                 artifact_ref = None
                 state_ref = None
 
+        # Determine step outcome.
+        if not operation_succeeded:
+            # Operation failed and no recovery (or recovery not enabled).
+            step_results.append(
+                WorkflowStepResult(
+                    step_index=idx,
+                    operation=step.operation,
+                    label=step.label,
+                    status="failed",
+                    ok=False,
+                    result=op_result,
+                    error={
+                        "message": op_error.get("message", "operation failed") if op_error else "operation failed",
+                        "error_type": op_error.get("error_type", "OperationFailed") if op_error else "OperationFailed",
+                    },
+                    inspection=None,
+                    validation=None,
+                    artifact_ref=None,
+                    state_ref=None,
+                    recovery=recovery_info,
+                )
+            )
+            failed = True
+            actual_failure = True
+            continue
+
         if validation_failed or inspection_failed:
-            # Distinguish validation/inspection failure from operation failure.
+            # Validation/inspection failure (recovery not triggered for these by default).
             err = (
                 (validation_payload or {}).get("error")
                 if validation_failed
@@ -481,19 +746,22 @@ def execute_workflow(
                             "error_type",
                             "ValidationAfterError" if validation_failed else "InspectionAfterError",
                         ),
-                        "operation_succeeded": True,
-                        "validation_failed": validation_failed,
+                        "operation_succeeded": operation_succeeded,
+"validation_failed": validation_failed,
                         "inspection_failed": inspection_failed,
                     },
                     inspection=inspection_payload,
                     validation=validation_payload,
                     artifact_ref=artifact_ref,
                     state_ref=state_ref,
+                    recovery=None,
                 )
             )
             failed = True
+            actual_failure = True
             continue
 
+        # Step completed successfully.
         step_results.append(
             WorkflowStepResult(
                 step_index=idx,
@@ -507,12 +775,23 @@ def execute_workflow(
                 validation=validation_payload,
                 artifact_ref=artifact_ref,
                 state_ref=state_ref,
+                recovery=None,
             )
         )
         completed_steps += 1
 
-    overall_ok = (not failed) and completed_steps == len(steps)
-    overall_status = "completed" if overall_ok else "failed"
+    # Determine overall workflow outcome.
+    # P3 semantics: completed_steps counts ONLY status == "completed".
+    # P4: recovered steps have ok=True but are NOT counted in completed_steps.
+    if actual_failure:
+        overall_ok = False
+        overall_status = "failed"
+    elif any_recovered:
+        overall_ok = False  # Workflow did not fully complete; at least one step was recovered.
+        overall_status = "recovered"
+    else:
+        overall_ok = True
+        overall_status = "completed"
 
     final_artifact = None
     try:

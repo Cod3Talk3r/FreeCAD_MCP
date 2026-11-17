@@ -169,9 +169,15 @@ def register(server: MCPServer, settings: Settings) -> None:
             "failure by default and marks later steps as skipped (not executed). "
             "Honors inspect_after (reusing existing read-only snapshot/state "
             "inspection) and validate_after (using existing validate operation) per "
-            "step. Reuses P2 artifact/state references; does not infer live snapshot "
-            "revision from persisted metadata. Does not perform recovery/rollback "
-            "orchestration, planning, or arbitrary code execution."
+            "step. Supports optional per-step recovery: when recover_on_failure is "
+            "enabled, the step first saves the document and creates a pre-step "
+            "snapshot; if the operation fails, that snapshot is restored and verified. "
+            "Recovery only triggers for operation failures, not validation/inspection "
+            "failures. A recovered step has status 'recovered' (ok=True) but is not "
+            "counted in completed_steps. Overall workflow status is 'recovered' if "
+            "any step was recovered and no later steps failed. Reuses P2 artifact/state "
+            "references; does not infer live snapshot revision from persisted metadata. "
+            "Does not perform arbitrary code execution or planning."
         ),
         structured_output=True,
     )

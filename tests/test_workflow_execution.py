@@ -417,3 +417,528 @@ def test_workflow_execution_modules_remain_freecad_free() -> None:
     importlib.import_module("freecad_mcp.tools.workflows")
     after = {m for m in sys.modules if "FreeCAD" in m or m == "Part" or m == "FreeCADGui"}
     assert after == before
+
+
+# =============================================================================
+# M19 P4 Recovery Tests
+# =============================================================================
+
+
+def _pre_step_snapshot_runner() -> Any:
+    """Runner that simulates save_document + create_snapshot + operation."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == "restore_snapshot":
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 6, "validation": {"all_passed": True}}}
+        if op == "list_objects":
+            return {"document_id": params["document_id"], "objects": [{"name": "Box", "type": "Part::Box"}], "meta": {}}
+        if op == "get_document_hierarchy":
+            return {"document_id": params["document_id"], "hierarchy": [{"name": "Box"}]}
+        if op == "validate":
+            return {"document_id": params["document_id"], "all_valid": True, "objects": [{"name": "Box", "valid": True}]}
+        return {"ok": True, "op": op, "params": params}
+
+    runner.call_log = call_log  # type: ignore[attr-defined]
+    return runner
+
+
+def _failing_operation_runner(fail_op: str = "create_box") -> Any:
+    """Runner where a specific operation fails."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == fail_op:
+            return {"ok": False, "op": op, "error": {"message": f"{fail_op} failed", "error_type": "OperationError"}}
+        if op == "restore_snapshot":
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 6, "validation": {"all_passed": True}}}
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    runner.call_log = call_log  # type: ignore[attr-defined]
+    return runner
+
+
+def _recovery_restore_fails_runner() -> Any:
+    """Runner where restore_snapshot fails."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == "create_box":
+            return {"ok": False, "op": "create_box", "error": {"message": "create_box failed", "error_type": "OperationError"}}
+        if op == "restore_snapshot":
+            return {"ok": False, "op": "restore_snapshot", "error": "snapshot not found"}
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    runner.call_log = call_log  # type: ignore[attr-defined]
+    return runner
+
+
+def _recovery_post_validation_fails_runner() -> Any:
+    """Runner where post-recovery validation fails."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == "create_box":
+            return {"ok": False, "op": "create_box", "error": {"message": "create_box failed", "error_type": "OperationError"}}
+        if op == "restore_snapshot":
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 6, "validation": {"all_passed": True}}}
+        if op == "list_objects":
+            return {"document_id": params["document_id"], "objects": [{"name": "Box", "type": "Part::Box"}], "meta": {}}
+        if op == "get_document_hierarchy":
+            return {"document_id": params["document_id"], "hierarchy": [{"name": "Box"}]}
+        if op == "validate":
+            return {"document_id": params["document_id"], "all_valid": False, "objects": [{"name": "Box", "valid": False}]}
+        return {"ok": True, "op": op, "params": params}
+
+    runner.call_log = call_log  # type: ignore[attr-defined]
+    return runner
+
+
+def test_recovery_disabled_by_default(tmp_path: Path) -> None:
+    """Recovery is disabled by default; operation failure stops workflow."""
+    runner = _failing_operation_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_document", parameters={}),
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}),
+        WorkflowStepRequest(operation="recompute", parameters={}),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.completed_steps == 1
+    assert result.steps[1].status == "failed"
+    assert result.steps[1].recovery is None
+    assert result.steps[2].status == "skipped"
+    # save_document and create_snapshot should NOT be called
+    save_calls = [c for c in runner.call_log if c[0] == "save_document"]
+    snapshot_calls = [c for c in runner.call_log if c[0] == "create_snapshot"]
+    assert len(save_calls) == 0
+    assert len(snapshot_calls) == 0
+
+
+def test_pre_step_save_failure_prevents_operation(tmp_path: Path) -> None:
+    """If save_document fails, the step fails and operation is not executed."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": False, "op": "save_document", "error": "save failed"}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].error and result.steps[0].error["error_type"] == "PreStepSaveFailed"
+    assert result.steps[0].recovery and result.steps[0].recovery["attempted"] is False
+    # create_snapshot should NOT be called
+    snapshot_calls = [c for c in call_log if c[0] == "create_snapshot"]
+    assert len(snapshot_calls) == 0
+    # Operation should NOT be executed
+    op_calls = [c for c in call_log if c[0] == "create_box"]
+    assert len(op_calls) == 0
+
+
+def test_pre_step_snapshot_failure_prevents_operation(tmp_path: Path) -> None:
+    """If create_snapshot fails, the step fails and operation is not executed."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": False, "op": "create_snapshot", "error": "snapshot failed"}
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].error and result.steps[0].error["error_type"] == "PreStepSnapshotFailed"
+    assert result.steps[0].recovery and result.steps[0].recovery["attempted"] is False
+    # Operation should NOT be executed
+    op_calls = [c for c in call_log if c[0] == "create_box"]
+    assert len(op_calls) == 0
+
+
+def test_exact_pre_step_snapshot_revision_used(tmp_path: Path) -> None:
+    """The exact revision from create_snapshot response is used for recovery."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 42}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 42}}
+        if op == "create_box":
+            return {"ok": False, "op": "create_box", "error": {"message": "failed", "error_type": "OpError"}}
+        if op == "restore_snapshot":
+            # Verify the exact revision is passed
+            assert params["revision"] == 42, f"Expected revision 42, got {params['revision']}"
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 43, "validation": {"all_passed": True}}}
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False  # Workflow stopped after recovery
+    assert result.status == "recovered"
+    assert result.steps[0].status == "recovered"
+    assert result.steps[0].ok is True
+    assert result.steps[0].recovery and result.steps[0].recovery["target_revision"] == 42
+    assert result.steps[0].recovery["restoration_ok"] is True
+    assert result.steps[0].recovery["validation_ok"] is True
+    assert result.completed_steps == 0  # Recovered step not counted
+
+
+def test_operation_failure_triggers_recovery(tmp_path: Path) -> None:
+    """Operation failure with recover_on_failure triggers recovery."""
+    runner = _failing_operation_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False  # Workflow stopped after recovery (default stop)
+    assert result.status == "recovered"
+    assert result.steps[0].status == "recovered"
+    assert result.steps[0].ok is True
+    assert result.steps[0].recovery is not None
+    assert result.steps[0].recovery["attempted"] is True
+    assert result.steps[0].recovery["restoration_ok"] is True
+    assert result.steps[0].recovery["validation_ok"] is True
+    assert result.steps[0].recovery["target_revision"] == 5
+    assert result.completed_steps == 0  # Recovered step not counted
+
+
+def test_restore_failure_marks_step_failed(tmp_path: Path) -> None:
+    """If restore_snapshot fails, step is marked failed with recovery details."""
+    runner = _recovery_restore_fails_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].ok is False
+    assert result.steps[0].recovery is not None
+    assert result.steps[0].recovery["attempted"] is True
+    assert result.steps[0].recovery["restoration_ok"] is False
+    assert "snapshot not found" in (result.steps[0].recovery["error"] or "")
+    assert result.completed_steps == 0
+
+
+def test_post_recovery_verification_failure(tmp_path: Path) -> None:
+    """If post-recovery validation fails, step is marked failed."""
+    runner = _recovery_post_validation_fails_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].recovery is not None
+    assert result.steps[0].recovery["restoration_ok"] is True
+    assert result.steps[0].recovery["validation_ok"] is False
+    assert "validation failed" in (result.steps[0].recovery["error"] or "").lower()
+
+
+def test_recovered_step_not_counted_in_completed_steps(tmp_path: Path) -> None:
+    """Recovered step has ok=True but is not counted in completed_steps."""
+    runner = _failing_operation_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_document", parameters={}),
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+        WorkflowStepRequest(operation="recompute", parameters={}),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    # Step 0 completed, step 1 recovered, step 2 skipped (workflow stops after recovery)
+    assert result.steps[0].status == "completed"
+    assert result.steps[1].status == "recovered"
+    assert result.steps[2].status == "skipped"
+    assert result.completed_steps == 1  # Only step 0 counted
+    assert result.total_steps == 3
+
+
+def test_workflow_status_recovered_when_recovery_succeeds(tmp_path: Path) -> None:
+    """Workflow status is 'recovered' when at least one step recovered and no later failure."""
+    runner = _failing_operation_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "recovered"
+
+
+def test_workflow_status_failed_when_later_step_fails_after_recovery(tmp_path: Path) -> None:
+    """If a later step fails after successful recovery, workflow status is 'failed'."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == "create_box":
+            # First call fails, second call (after recovery) succeeds
+            if len([c for c in call_log if c[0] == "create_box"]) == 1:
+                return {"ok": False, "op": "create_box", "error": {"message": "failed", "error_type": "OpError"}}
+            return {"ok": True, "op": "create_box", "result": {"name": "Box"}}
+        if op == "recompute":
+            return {"ok": False, "op": "recompute", "error": {"message": "recompute failed", "error_type": "OpError"}}
+        if op == "restore_snapshot":
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 6, "validation": {"all_passed": True}}}
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True, recovery_action="continue"),
+        WorkflowStepRequest(operation="recompute", parameters={}),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.steps[0].status == "recovered"
+    assert result.steps[1].status == "failed"
+
+
+def test_recovery_action_continue_proceeds_to_next_step(tmp_path: Path) -> None:
+    """recovery_action='continue' proceeds to next step after successful recovery."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == "create_box":
+            if len([c for c in call_log if c[0] == "create_box"]) == 1:
+                return {"ok": False, "op": "create_box", "error": {"message": "failed", "error_type": "OpError"}}
+            return {"ok": True, "op": "create_box", "result": {"name": "Box"}}
+        if op == "recompute":
+            return {"ok": True, "op": "recompute", "result": {"done": "recompute"}}
+        if op == "restore_snapshot":
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 6, "validation": {"all_passed": True}}}
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True, recovery_action="continue"),
+        WorkflowStepRequest(operation="recompute", parameters={}),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False  # Not all steps completed (step 0 recovered)
+    assert result.status == "recovered"
+    assert result.steps[0].status == "recovered"
+    assert result.steps[1].status == "completed"
+    assert result.completed_steps == 1  # Only step 1 completed
+
+
+def test_recovery_action_stop_halts_workflow(tmp_path: Path) -> None:
+    """recovery_action='stop' (default) halts workflow after recovery."""
+    runner = _failing_operation_runner()
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True, recovery_action="stop"),
+        WorkflowStepRequest(operation="recompute", parameters={}),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "recovered"
+    assert result.steps[0].status == "recovered"
+    assert result.steps[1].status == "skipped"
+    assert result.completed_steps == 0
+
+
+def test_validation_failure_does_not_trigger_recovery(tmp_path: Path) -> None:
+    """Validation failure does not trigger recovery by default."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "create_box":
+            return {"ok": True, "op": "create_box", "result": {"name": "Box"}}
+        if op == "validate":
+            return {"ok": True, "op": "validate", "result": {"all_valid": False, "objects": [{"name": "Box", "valid": False}]}}
+        if op in ("save_document", "create_snapshot", "restore_snapshot"):
+            return {"ok": True, "op": op, "result": {"revision": 5}}
+        if op in ("list_objects", "get_document_hierarchy"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True, validate_after=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].error and result.steps[0].error.get("validation_failed") is True
+    # Recovery should not be attempted (restore_snapshot not called)
+    assert result.steps[0].recovery is None
+    # Pre-step preparation (save_document, create_snapshot) still runs for recovery-enabled steps
+    save_calls = [c for c in call_log if c[0] == "save_document"]
+    snapshot_calls = [c for c in call_log if c[0] == "create_snapshot"]
+    restore_calls = [c for c in call_log if c[0] == "restore_snapshot"]
+    assert len(save_calls) == 1
+    assert len(snapshot_calls) == 1
+    assert len(restore_calls) == 0
+
+
+def test_inspection_failure_does_not_trigger_recovery(tmp_path: Path) -> None:
+    """Inspection failure does not trigger recovery."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "create_box":
+            return {"ok": True, "op": "create_box", "result": {"name": "Box"}}
+        if op == "list_objects":
+            raise RuntimeError("inspect boom")
+        if op in ("get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        if op in ("save_document", "create_snapshot", "restore_snapshot"):
+            return {"ok": True, "op": op, "result": {"revision": 5}}
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True, inspect_after=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].error and result.steps[0].error.get("inspection_failed") is True
+    # Recovery should not be attempted (restore_snapshot not called)
+    assert result.steps[0].recovery is None
+    # Pre-step preparation (save_document, create_snapshot) still runs for recovery-enabled steps
+    save_calls = [c for c in call_log if c[0] == "save_document"]
+    snapshot_calls = [c for c in call_log if c[0] == "create_snapshot"]
+    restore_calls = [c for c in call_log if c[0] == "restore_snapshot"]
+    assert len(save_calls) == 1
+    assert len(snapshot_calls) == 1
+    assert len(restore_calls) == 0
+
+
+def test_document_workspace_mismatch_protection_in_recovery(tmp_path: Path) -> None:
+    """Recovery uses consistent document_id and workspace context."""
+    call_log: list[tuple[str, dict[str, Any]]] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        call_log.append((op, dict(params)))
+        if op == "save_document":
+            assert params["document_id"] == "doc1"
+            assert params["workspace"] == str(tmp_path)
+            return {"ok": True, "op": "save_document", "result": {"revision": 5}}
+        if op == "create_snapshot":
+            assert params["document_id"] == "doc1"
+            assert params["workspace"] == str(tmp_path)
+            return {"ok": True, "op": "create_snapshot", "result": {"revision": 5}}
+        if op == "create_box":
+            return {"ok": False, "op": "create_box", "error": {"message": "failed", "error_type": "OpError"}}
+        if op == "restore_snapshot":
+            assert params["document_id"] == "doc1"
+            assert params["workspace"] == str(tmp_path)
+            assert params["revision"] == 5
+            return {"ok": True, "op": "restore_snapshot", "result": {"restored_revision": 6, "validation": {"all_passed": True}}}
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True, "op": op, "params": params}
+
+    steps = [
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}, recover_on_failure=True),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.steps[0].status == "recovered"
+
+
+def test_existing_p3_behavior_unchanged_without_recovery(tmp_path: Path) -> None:
+    """Workflows without recover_on_failure behave exactly as P3."""
+    calls: list[str] = []
+
+    def runner(op: str, params: dict[str, Any]) -> dict[str, Any]:
+        calls.append(op)
+        if op == "create_box":
+            raise RuntimeError("boom")
+        if op in ("list_objects", "get_document_hierarchy", "validate"):
+            return _inspection_ok_runner()(op, params)
+        return {"ok": True}
+
+    steps = [
+        WorkflowStepRequest(operation="create_document", parameters={}),
+        WorkflowStepRequest(operation="create_box", parameters={"length": 1}),
+        WorkflowStepRequest(operation="recompute", parameters={}),
+    ]
+    result = execute_workflow(document_id="doc1", steps=steps, workspace=str(tmp_path), op_runner=runner)
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.completed_steps == 1
+    assert [s.status for s in result.steps] == ["completed", "failed", "skipped"]
+    assert calls == ["create_document", "create_box"]
+    # save_document and create_snapshot should NOT be called
+    assert "save_document" not in calls
+    assert "create_snapshot" not in calls

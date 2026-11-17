@@ -92,6 +92,22 @@ class WorkflowStepRequest(BaseModel):
             "separately from operation success/failure."
         ),
     )
+    recover_on_failure: bool = Field(
+        default=False,
+        description=(
+            "Attempt snapshot recovery if the operation fails. When enabled, "
+            "the step will first save the document and create a pre-step snapshot. "
+            "If the operation then fails, that exact snapshot is restored and verified. "
+            "Disabled by default."
+        ),
+    )
+    recovery_action: Literal["stop", "continue"] = Field(
+        default="stop",
+        description=(
+            "After successful recovery: 'stop' workflow (default) or 'continue' "
+            "to the next step without retrying the failed operation."
+        ),
+    )
 
 
 class WorkflowStepResult(BaseModel):
@@ -110,13 +126,16 @@ class WorkflowStepResult(BaseModel):
             "requested post-step checks succeeded. 'failed' means the operation "
             "or a requested post-step check failed (see error/inspection/validation "
             "and error.operation_succeeded). 'skipped' means not executed due to an "
-            "earlier failure."
+            "earlier failure. 'recovered' means the operation failed but a pre-step "
+            "snapshot was successfully restored and verified; the original operation "
+            "did not complete."
         )
     )
     ok: bool = Field(
         description=(
             "Whether the step completed successfully including requested post-step "
-            "checks. False for failed and skipped steps."
+            "checks. True for 'completed' and 'recovered' steps. False for failed "
+            "and skipped steps."
         )
     )
     result: Optional[dict[str, Any]] = Field(
@@ -158,6 +177,15 @@ class WorkflowStepResult(BaseModel):
         default=None,
         description="State/freshness reference fields for workflow results.",
     )
+    recovery: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Recovery attempt details when recover_on_failure was True and recovery "
+            "was attempted. Contains: attempted (bool), target_revision (int), "
+            "restoration_ok (bool), validation_ok (bool), "
+            "preservation_snapshot_revision (int | None), error (str | None)."
+        ),
+    )
 
 
 class WorkflowResult(BaseModel):
@@ -171,10 +199,12 @@ class WorkflowResult(BaseModel):
             "completed successfully including requested post-step checks."
         )
     )
-    status: Literal["pending", "running", "completed", "failed", "cancelled"] = Field(
+    status: Literal["pending", "running", "completed", "failed", "cancelled", "recovered"] = Field(
         description=(
-            "Overall workflow lifecycle status. 'failed' includes operation and "
-            "post-step validation/inspection failures."
+            "Overall workflow lifecycle status. 'completed' means all steps "
+            "completed. 'recovered' means at least one step was recovered and "
+            "no later steps failed. 'failed' includes operation and "
+            "post-step validation/inspection failures, or a recovery failure."
         )
     )
     document_id: Optional[str] = Field(
@@ -187,7 +217,7 @@ class WorkflowResult(BaseModel):
     completed_steps: int = Field(
         description=(
             "Number of steps with status 'completed' (operation and all requested "
-            "post-step checks succeeded). Failed and skipped steps are not counted."
+            "post-step checks succeeded). Recovered, failed, and skipped steps are not counted."
         )
     )
     steps: list[WorkflowStepResult] = Field(
