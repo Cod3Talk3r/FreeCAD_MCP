@@ -28,6 +28,7 @@ NON_OP_TOOLS = {
     "taiga_build",
     "describe_workflow_capabilities",
     "get_model_state",
+    "run_workflow",
 }
 
 #: Operations in runner.OPERATIONS that are intentionally not exposed as

@@ -1,10 +1,12 @@
-"""Read-only Method A workflow capability discovery and model-state snapshot (M19 P1/P2).
+"""Read-only Method A workflow capability discovery and model-state snapshot (M19 P1/P2),
+plus deterministic multi-step workflow execution (M19 P3).
 
 Derives capability metadata from currently registered MCP tools and existing
 bridge/runner operation metadata. Provides a concise, bounded model-state
-snapshot by reusing existing bridge operations and workspace metadata.
+snapshot and sequential workflow execution by reusing existing bridge operations
+and workspace metadata.
 
-Does not execute workflows, perform recovery, or import FreeCAD in the parent.
+Does not perform recovery/rollback orchestration or import FreeCAD in the parent.
 """
 
 from __future__ import annotations
@@ -13,8 +15,14 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from .. import __version__
 from ..app.direct import DirectBackend
-from ..app.workflow_contracts import CapabilityCatalog, ModelStateSnapshot, OperationCapability
-from ..app.workflows import build_model_state_snapshot
+from ..app.workflow_contracts import (
+    CapabilityCatalog,
+    ModelStateSnapshot,
+    OperationCapability,
+    WorkflowResult,
+    WorkflowStepRequest,
+)
+from ..app.workflows import build_model_state_snapshot, execute_workflow
 from ..config import Settings
 from ..freecad_bridge import FreeCadBridge
 from ..freecad_bridge.runner import OPERATIONS
@@ -146,6 +154,41 @@ def register(server: MCPServer, settings: Settings) -> None:
 
         return build_model_state_snapshot(
             document_id,
+            workspace=workspace,
+            op_runner=runner,
+        )
+
+    @server.tool(
+        name="run_workflow",
+        title="Run deterministic workflow",
+        description=(
+            "Execute an ordered list of allowlisted FreeCAD operations sequentially "
+            "for Method A workflows using the existing DirectBackend/FreeCadBridge "
+            "execution path. Returns per-step results in requested order with "
+            "operation/validation/inspection outcomes distinguished. Stops on first "
+            "failure by default and marks later steps as skipped (not executed). "
+            "Honors inspect_after (reusing existing read-only snapshot/state "
+            "inspection) and validate_after (using existing validate operation) per "
+            "step. Reuses P2 artifact/state references; does not infer live snapshot "
+            "revision from persisted metadata. Does not perform recovery/rollback "
+            "orchestration, planning, or arbitrary code execution."
+        ),
+        structured_output=True,
+    )
+    def run_workflow(
+        document_id: str,
+        steps: list[WorkflowStepRequest],
+        workspace: Optional[str] = None,
+    ) -> WorkflowResult:
+        """Run a deterministic multi-step workflow for *document_id*."""
+        bridge = FreeCadBridge.from_settings(settings)
+
+        def runner(op: str, op_params: dict[str, Any]) -> dict[str, Any]:
+            return _run_bridge_op(bridge, op, op_params)
+
+        return execute_workflow(
+            document_id=document_id,
+            steps=steps,
             workspace=workspace,
             op_runner=runner,
         )

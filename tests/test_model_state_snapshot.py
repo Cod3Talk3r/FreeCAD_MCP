@@ -152,7 +152,7 @@ def test_build_model_state_snapshot_is_bounded_deterministic_and_reports_unavail
             }
         if op == "get_document_hierarchy":
             return {"document_id": "demo", "hierarchy": [{"name": "AObj"}, {"name": "ZObj"}]}
-        if op == "validate_document":
+        if op == "validate":
             return {
                 "document_id": "demo",
                 "all_valid": True,
@@ -164,7 +164,7 @@ def test_build_model_state_snapshot_is_bounded_deterministic_and_reports_unavail
         raise AssertionError(f"unexpected op {op}")
 
     snap = build_model_state_snapshot("demo", workspace=str(tmp_path), op_runner=runner)
-    assert calls == ["list_objects", "get_document_hierarchy", "validate_document"]
+    assert calls == ["list_objects", "get_document_hierarchy", "validate"]
     assert snap.document_id == "demo"
     assert snap.workspace_root == str(tmp_path.resolve())
     assert snap.state_ref.document_id == "demo"
@@ -201,7 +201,7 @@ def test_build_model_state_snapshot_is_bounded_deterministic_and_reports_unavail
             raise RuntimeError("boom")
         if op == "get_document_hierarchy":
             raise RuntimeError("nope")
-        if op == "validate_document":
+        if op == "validate":
             raise RuntimeError("bad")
         raise AssertionError(op)
 
@@ -213,7 +213,7 @@ def test_build_model_state_snapshot_is_bounded_deterministic_and_reports_unavail
     assert snap3.summary.all_valid is None
     assert any("list_objects unavailable" in n for n in snap3.summary.notes)
     assert any("get_document_hierarchy unavailable" in n for n in snap3.summary.notes)
-    assert any("validate_document unavailable" in n for n in snap3.summary.notes)
+    assert any("validate unavailable" in n for n in snap3.summary.notes)
     assert any("ownership hierarchy unavailable" in n for n in snap3.summary.notes)
     assert any("validation results unavailable" in n for n in snap3.summary.notes)
     assert snap3.artifact_ref.revision == 7
@@ -234,7 +234,7 @@ def test_build_model_state_snapshot_bounds_large_object_lists(tmp_path: Path) ->
             return {"document_id": "big", "objects": objs, "meta": {"revision": 1}}
         if op == "get_document_hierarchy":
             return {"document_id": "big", "hierarchy": []}
-        if op == "validate_document":
+        if op == "validate":
             return {"document_id": "big", "all_valid": True, "objects": []}
         raise AssertionError(op)
 
@@ -253,7 +253,7 @@ def test_build_model_state_snapshot_requires_existing_workspace_api_and_reports_
             return {"document_id": "empty", "objects": [], "meta": {}}
         if op == "get_document_hierarchy":
             return {"document_id": "empty", "hierarchy": []}
-        if op == "validate_document":
+        if op == "validate":
             return {"document_id": "empty", "all_valid": True, "objects": []}
         raise AssertionError(op)
 
@@ -283,7 +283,7 @@ def test_get_model_state_tool_registration_and_structured_output(monkeypatch: py
             return {"ok": True, "op": op, "result": {"document_id": "demo", "objects": [{"name": "Box", "type": "Part::Box"}], "meta": {}}}
         if op == "get_document_hierarchy":
             return {"ok": True, "op": op, "result": {"document_id": "demo", "hierarchy": [{"name": "Box"}]}}
-        if op == "validate_document":
+        if op == "validate":
             return {"ok": True, "op": op, "result": {"document_id": "demo", "all_valid": True, "objects": [{"name": "Box", "valid": True}]}}
         raise AssertionError(op)
 
@@ -333,7 +333,7 @@ def test_get_model_state_tool_registration_and_structured_output(monkeypatch: py
             assert data["summary"]["all_valid"] is True
 
     asyncio.run(_run())
-    assert [op for op, _ in calls] == ["list_objects", "get_document_hierarchy", "validate_document"]
+    assert [op for op, _ in calls] == ["list_objects", "get_document_hierarchy", "validate"]
 
 
 def test_live_snapshot_revision_none_when_persisted_state_may_differ(tmp_path: Path) -> None:
@@ -352,7 +352,7 @@ def test_live_snapshot_revision_none_when_persisted_state_may_differ(tmp_path: P
             }
         if op == "get_document_hierarchy":
             return {"document_id": "demo", "hierarchy": [{"name": "NewUnsavedBox"}]}
-        if op == "validate_document":
+        if op == "validate":
             return {
                 "document_id": "demo",
                 "all_valid": True,

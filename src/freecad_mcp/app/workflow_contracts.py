@@ -76,18 +76,26 @@ class WorkflowStepRequest(BaseModel):
     inspect_after: bool | list[str] = Field(
         default=False,
         description=(
-            "Requested post-step inspection behavior for future workflow execution. "
-            "Not executed in P1."
+            "Requested post-step inspection behavior. False/empty disables. True "
+            "collects the core model-state snapshot (list_objects, "
+            "get_document_hierarchy, validate) via existing read-only operations. "
+            "A list collects that same snapshot and may additionally request extra "
+            "allowlisted read-only inspection operations (executed once, with core "
+            "snapshot operations not duplicated) reported separately under "
+            "inspection.operations."
         ),
     )
     validate_after: bool = Field(
         default=False,
-        description="Request validation after the step in future workflow execution.",
+        description=(
+            "Request existing 'validate' operation after the step. Reported "
+            "separately from operation success/failure."
+        ),
     )
 
 
 class WorkflowStepResult(BaseModel):
-    """Typed result contract for one future Method A workflow step (shape only in P1)."""
+    """Typed result contract for one Method A workflow step (M19 P3 execution)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -96,36 +104,92 @@ class WorkflowStepResult(BaseModel):
     label: Optional[str] = Field(default=None, description="Optional step label.")
     status: Literal[
         "pending", "running", "completed", "failed", "skipped", "recovered"
-    ] = Field(description="Step lifecycle status.")
-    ok: bool = Field(description="Whether the step completed successfully.")
+    ] = Field(
+        description=(
+            "Step lifecycle status. 'completed' means the operation and any "
+            "requested post-step checks succeeded. 'failed' means the operation "
+            "or a requested post-step check failed (see error/inspection/validation "
+            "and error.operation_succeeded). 'skipped' means not executed due to an "
+            "earlier failure."
+        )
+    )
+    ok: bool = Field(
+        description=(
+            "Whether the step completed successfully including requested post-step "
+            "checks. False for failed and skipped steps."
+        )
+    )
     result: Optional[dict[str, Any]] = Field(
-        default=None, description="Structured step result payload when available."
+        default=None,
+        description=(
+            "Structured operation result payload when the operation executed "
+            "successfully (present even if a later post-step check fails)."
+        ),
     )
     error: Optional[dict[str, Any]] = Field(
         default=None,
-        description="Structured error payload (e.g. message/error_type) on failure.",
+        description=(
+            "Structured error payload for operation or post-step check failure, "
+            "or skipped-step reason. Post-step failures may include "
+            "operation_succeeded, validation_failed, inspection_failed flags."
+        ),
+    )
+    inspection: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Inspect-after outcome when requested: ok flag, snapshot "
+            "(core ModelStateSnapshot) and optional operations map for extra "
+            "requested inspections, or error details. Distinguishable from "
+            "operation and validation results."
+        ),
+    )
+    validation: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Validate-after result payload/error when requested; reported separately "
+            "from operation success."
+        ),
     )
     artifact_ref: Optional[dict[str, Any]] = Field(
         default=None,
-        description="Artifact/revision reference fields for future workflow results.",
+        description="Artifact/revision reference fields for workflow results.",
     )
     state_ref: Optional[dict[str, Any]] = Field(
         default=None,
-        description="State/freshness reference fields for future workflow results.",
+        description="State/freshness reference fields for workflow results.",
     )
 
 
 class WorkflowResult(BaseModel):
-    """Typed aggregate result contract for future Method A workflows (shape only in P1)."""
+    """Typed aggregate result contract for Method A workflow execution (M19 P3)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ok: bool = Field(description="Overall workflow success flag.")
+    ok: bool = Field(
+        description=(
+            "Overall workflow success flag. True only when every requested step "
+            "completed successfully including requested post-step checks."
+        )
+    )
     status: Literal["pending", "running", "completed", "failed", "cancelled"] = Field(
-        description="Overall workflow lifecycle status."
+        description=(
+            "Overall workflow lifecycle status. 'failed' includes operation and "
+            "post-step validation/inspection failures."
+        )
+    )
+    document_id: Optional[str] = Field(
+        default=None, description="Normalized workflow document identifier, when applicable."
+    )
+    workspace_root: Optional[str] = Field(
+        default=None, description="Absolute workspace root used for workflow execution."
     )
     total_steps: int = Field(description="Total number of requested steps.")
-    completed_steps: int = Field(description="Number of steps completed successfully.")
+    completed_steps: int = Field(
+        description=(
+            "Number of steps with status 'completed' (operation and all requested "
+            "post-step checks succeeded). Failed and skipped steps are not counted."
+        )
+    )
     steps: list[WorkflowStepResult] = Field(
         default_factory=list, description="Per-step results in execution order."
     )
