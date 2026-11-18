@@ -36,6 +36,11 @@ WORKSPACE_ENV = "FREECAD_MCP_WORKSPACE"
 DEFAULT_TAIGA_TIMEOUT_SECONDS = 120.0
 DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS = 120.0
 
+#: Default per-episode timeout for the isolated Taiga-S1 native episode runtime,
+#: in seconds.  One episode includes a model load plus a ``freecadcmd`` worker
+#: spawn plus the native ``run_episodes`` loop.
+DEFAULT_TAIGA_EPISODE_TIMEOUT_SECONDS = 300.0
+
 #: Default device passed to Taiga's model loader.
 DEFAULT_TAIGA_DEVICE = "cpu"
 
@@ -79,6 +84,7 @@ class Settings:
     taiga_python: str | None = None
     taiga_timeout_seconds: float = DEFAULT_TAIGA_TIMEOUT_SECONDS
     taiga_build_timeout_seconds: float = DEFAULT_TAIGA_BUILD_TIMEOUT_SECONDS
+    taiga_episode_timeout_seconds: float = DEFAULT_TAIGA_EPISODE_TIMEOUT_SECONDS
     taiga_model: str | None = None
     taiga_device: str = DEFAULT_TAIGA_DEVICE
     taiga_source: str | None = DEFAULT_TAIGA_SOURCE
@@ -162,6 +168,20 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
                 f"{ENV_PREFIX}TAIGA_BUILD_TIMEOUT_SECONDS must be positive (got {taiga_build_timeout})"
             )
 
+    taiga_episode_timeout = DEFAULT_TAIGA_EPISODE_TIMEOUT_SECONDS
+    raw_taiga_episode_timeout = env.get(f"{ENV_PREFIX}TAIGA_EPISODE_TIMEOUT_SECONDS")
+    if raw_taiga_episode_timeout and raw_taiga_episode_timeout.strip():
+        try:
+            taiga_episode_timeout = float(raw_taiga_episode_timeout)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ENV_PREFIX}TAIGA_EPISODE_TIMEOUT_SECONDS must be a number (got {raw_taiga_episode_timeout!r})"
+            ) from exc
+        if taiga_episode_timeout <= 0:
+            raise ValueError(
+                f"{ENV_PREFIX}TAIGA_EPISODE_TIMEOUT_SECONDS must be positive (got {taiga_episode_timeout})"
+            )
+
     return Settings(
         server_name=server_name,
         log_level=raw_level,  # type: ignore[arg-type]  # validated against LOG_LEVELS above
@@ -173,5 +193,6 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         taiga_model=taiga_model or None,
         taiga_device=taiga_device or DEFAULT_TAIGA_DEVICE,
         taiga_build_timeout_seconds=taiga_build_timeout,
+        taiga_episode_timeout_seconds=taiga_episode_timeout,
         taiga_source=taiga_source,
     )

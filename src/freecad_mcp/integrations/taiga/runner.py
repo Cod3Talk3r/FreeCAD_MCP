@@ -273,9 +273,228 @@ def _score_actions(params: Mapping[str, Any]) -> dict[str, Any]:
     return {"scores": scores, "device": device}
 
 
+def _validate_start(value: Any) -> dict[str, Any]:
+    """Validate the optional start spec (doc_open/workbench/body)."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise RunnerError("InvalidRequest", "start must be a JSON object.")
+    allowed = {"doc_open", "workbench", "body"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise RunnerError(
+            "InvalidRequest",
+            f"start has unsupported fields: {sorted(unknown)}.",
+        )
+    start: dict[str, Any] = {}
+    if "doc_open" in value and value["doc_open"] is not None:
+        if not isinstance(value["doc_open"], bool):
+            raise RunnerError("InvalidRequest", "start.doc_open must be a boolean.")
+        start["doc_open"] = value["doc_open"]
+    if "workbench" in value and value["workbench"] is not None:
+        wb = value["workbench"]
+        if not isinstance(wb, str) or not wb.strip():
+            raise RunnerError(
+                "InvalidRequest", "start.workbench must be a non-empty string."
+            )
+        start["workbench"] = wb.strip()
+    if "body" in value and value["body"] is not None:
+        if not isinstance(value["body"], bool):
+            raise RunnerError("InvalidRequest", "start.body must be a boolean.")
+        start["body"] = value["body"]
+    return start
+
+
+def _run_episode(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Run one native Taiga episode via the native ``run_episodes`` loop.
+
+    Reuses the pinned native ``Policy``, ``run_episodes`` and ``Worker`` /
+    ``HeadlessSession`` unchanged.  Only the worker process launcher is adapted
+    (via :class:`native_worker_env.NativeWorkerEnv`) so the native worker runs
+    under ``freecadcmd.exe -c`` instead of ``python -m``.
+
+    The model is always loaded from a validated local directory; a Hugging Face
+    repository id is never used and nothing is downloaded.
+    """
+    goal_payload = _validate_json_object(params.get("goal"), "goal")
+    start_payload = _validate_start(params.get("start"))
+    model_path = _validate_model_directory(params.get("model"))
+    freecad_exe = params.get("freecad_executable")
+    taiga_source = params.get("taiga_source")
+    if not isinstance(freecad_exe, str) or not freecad_exe.strip():
+        raise RunnerError(
+            "InvalidRequest",
+            "freecad_executable is required to run a native episode.",
+        )
+    if not isinstance(taiga_source, str) or not taiga_source.strip():
+        raise RunnerError(
+            "InvalidRequest",
+            "taiga_source is required to run a native episode.",
+        )
+    device = _optional_text(params.get("device")) or DEFAULT_DEVICE
+
+    # Import native components lazily (child-only).
+    try:
+        from freecad_s1.goals import StartSpec
+        from freecad_s1.model.net import from_pretrained
+        from freecad_s1.rollout import Policy, run_episodes
+        from freecad_s1.schema import Goal
+    except ImportError as exc:
+        raise RunnerError(
+            "MissingDependency",
+            f"A required Taiga dependency is not importable: {exc}",
+        ) from exc
+
+    # The runner is executed as a standalone script (python runner.py), so
+    # __package__ is empty and relative imports fail.  Add this file's
+    # directory to sys.path and import the sibling module absolutely.
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    from native_worker_env import NativeWorkerEnv, WorkerError  # noqa: PLC0415
+
+    try:
+        goal = Goal.from_json(goal_payload)
+    except Exception as exc:
+        raise RunnerError(
+            "InvalidRequest", f"Goal is not valid per upstream schema: {exc}"
+        ) from exc
+
+    start_spec = StartSpec(**start_payload)
+
+    # Build the reset spec exactly as the native worker expects
+    # ({"goal":..., "start": {...}}).  build_target inside worker.reset is
+    # authoritative; any caller-supplied goal.target is ignored.
+    reset_spec = {
+        "goal": goal.to_json(),
+        "start": {
+            "doc_open": start_spec.doc_open,
+            "workbench": start_spec.workbench,
+            "body": start_spec.body,
+        },
+    }
+
+    env: NativeWorkerEnv | None = None
+    try:
+        model = from_pretrained(str(model_path), device=device)
+        policy = Policy(model, device=device)
+
+        env = NativeWorkerEnv(
+            freecad_exe,
+            taiga_source,
+            timeout=float(params.get("worker_timeout") or 120.0),
+        )
+
+        # run_episodes expects a VecEnv-shaped object with
+        # reset(specs)->[Episode], step(idx, actions), score(idx), close().
+        # NativeWorkerEnv is per-worker, so we wrap it in a one-element
+        # VecEnv-compatible shim that delegates to the single worker.
+        vec = _SingleWorkerVec(env)
+
+        results = run_episodes(policy, vec, [reset_spec], sample=False)
+        if not results:
+            raise RunnerError(
+                "RuntimeError", "run_episodes returned no results."
+            )
+
+        ep = results[0]
+        # Final state: re-observe from the worker before closing so the
+        # caller receives the terminal state regardless of outcome.
+        final_state = None
+        try:
+            final_state = env.call({"op": "observe"}).get("state")
+        except Exception:
+            final_state = None
+
+        return {
+            "ok": True,
+            "level": ep.level,
+            "success": ep.success,
+            "clean": ep.clean,
+            "iou": ep.iou,
+            "steps": ep.steps,
+            "budget": ep.budget,
+            "expert_steps": ep.expert_steps,
+            "agreement": ep.agreement,
+            "outcome": ep.outcome,
+            "features": ep.features,
+            "rule": ep.rule,
+            "deviations": ep.deviations,
+            "history": ep.history,
+            "final_state": final_state,
+        }
+    except WorkerError as exc:
+        raise RunnerError("WorkerError", str(exc)) from exc
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+
+class _SingleWorkerVec:
+    """One-element VecEnv-shaped shim around a single :class:`NativeWorkerEnv`.
+
+    ``freecad_s1.rollout.run_episodes`` calls ``vec.reset(specs)``,
+    ``vec.step(idx, actions)`` and ``vec.score(idx)``.  This shim adapts the
+    single-worker :class:`NativeWorkerEnv` to that interface so the native
+    episode loop runs unchanged.
+    """
+
+    def __init__(self, env: Any) -> None:
+        self._env = env
+        self._episode = None
+
+    def __len__(self) -> int:
+        return 1
+
+    def reset(self, specs: list[dict]) -> list[Any]:
+        from freecad_s1.runtime.client import Episode
+        from freecad_s1.schema import Goal, State
+
+        if len(specs) != 1:
+            raise RunnerError(
+                "RuntimeError", "SingleWorkerVec expects exactly one spec."
+            )
+        r = self._env.reset(specs[0])
+        goal = Goal.from_json(r["goal"])
+        episode = Episode(
+            goal=goal,
+            budget=r["budget"],
+            level=specs[0].get("level", goal.level),
+            state=State.from_json(r["state"]),
+            actions=r["actions"],
+            expert=r["expert"],
+            progress=r.get("progress", -1),
+        )
+        self._episode = episode
+        return [episode]
+
+    def step(self, idx: list[int], actions: list[str], reward: bool = False) -> list[dict]:
+        if idx != [0]:
+            raise RunnerError("RuntimeError", "SingleWorkerVec only supports index 0.")
+        if len(actions) != 1:
+            raise RunnerError(
+                "RuntimeError", "SingleWorkerVec expects one action per step."
+            )
+        r = self._env.step(actions[0], reward=reward)
+        return [r]
+
+    def score(self, idx: list[int]) -> list[dict]:
+        if idx != [0]:
+            raise RunnerError("RuntimeError", "SingleWorkerVec only supports index 0.")
+        r = self._env.score()
+        return [r]
+
+    def close(self) -> None:
+        self._env.close()
+
+
 _HANDLERS = {
     "status": _status,
     "score_actions": _score_actions,
+    "run_episode": _run_episode,
 }
 
 

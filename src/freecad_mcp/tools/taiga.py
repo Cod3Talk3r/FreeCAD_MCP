@@ -20,6 +20,8 @@ from ..config import Settings
 from ..integrations.taiga import TaigaBackend
 from ..integrations.taiga.build import BuildResult, BuildRuntime
 from ..integrations.taiga.child import TaigaChildRunner
+from ..integrations.taiga.episode import EpisodeRuntime, EpisodeResult
+from ..integrations.taiga.runtime import TaigaRuntime
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server.mcpserver import MCPServer
@@ -203,6 +205,59 @@ class TaigaBuildResult(BaseModel):
     error_type: str | None = Field(default=None, description="Structured failure type, if any.")
 
 
+class TaigaEpisodeParams(BaseModel):
+    """Parameters for running one native Taiga episode."""
+
+    goal: dict[str, Any] = Field(
+        description=(
+            "Taiga Goal document: an ordered list of feature intents "
+            '{"kind": "...", "params": {...}} plus optional "level", "scale", '
+            'and "target". The native build_target is authoritative; any '
+            "caller-supplied target is ignored."
+        ),
+    )
+    start: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional initial session condition: "
+            '{"doc_open": true, "workbench": "PartDesignWorkbench", "body": false}. '
+            "Defaults to a fresh PartDesign session."
+        ),
+    )
+
+
+class TaigaEpisodeResult(BaseModel):
+    """Structured result of the ``taiga_episode`` tool."""
+
+    ok: bool = Field(description="True only when the episode reached success (IoU >= 0.99).")
+    status: str = Field(
+        description=(
+            "Episode outcome: success, wrong_geometry, budget, unrecoverable, "
+            "crashed, invalid_goal, timeout, taiga_unavailable, "
+            "child_process_failure, invalid_response, execution_failure."
+        )
+    )
+    goal: dict[str, Any] | None = Field(default=None, description="Echoed normalized goal.")
+    start: dict[str, Any] | None = Field(default=None, description="Echoed start spec.")
+    level: int | None = Field(default=None, description="Goal level.")
+    success: bool = Field(default=False, description="True when Done and IoU >= 0.99.")
+    clean: bool = Field(default=False, description="True when success and no leftover off-plan objects.")
+    iou: float = Field(default=0.0, description="Volumetric IoU of the final solid against the target.")
+    match: bool = Field(default=False, description="True when IoU >= 0.99.")
+    steps: int = Field(default=0, description="Policy steps taken during the episode.")
+    budget: int = Field(default=0, description="Native step budget (authoritative).")
+    expert_steps: int = Field(default=0, description="Expert plan length (budget//2 - 3).")
+    agreement: float = Field(default=0.0, description="Fraction of steps where the policy picked an expert-acceptable action.")
+    deviations: int = Field(default=0, description="Policy steps whose action was not expert-acceptable.")
+    outcome: str | None = Field(default=None, description="Native EpisodeResult outcome string.")
+    features: list[str] | None = Field(default=None, description="Goal feature kinds.")
+    rule: str | None = Field(default=None, description="Held-out composition rule, if any.")
+    history: list[str] | None = Field(default=None, description="Actions taken (kept for failed episodes).")
+    final_state: dict[str, Any] | None = Field(default=None, description="Terminal native State JSON.")
+    error: str | None = Field(default=None, description="Failure message, if any.")
+    error_type: str | None = Field(default=None, description="Structured failure type, if any.")
+
+
 def _make_child_runner(settings: Settings) -> TaigaChildRunner | None:
     """Build the isolated FreeCAD child runner, or None when not configured."""
     if not settings.freecad_executable:
@@ -279,6 +334,105 @@ def _to_build_result(build_result: ApplicationBuildResult, document_id: str) -> 
     )
 
 
+def _make_episode_runtime(settings: Settings) -> tuple[EpisodeRuntime, TaigaRuntime] | None:
+    """Build the episode runtime + Taiga child client, or None when unconfigured."""
+    if not settings.taiga_python:
+        return None
+    if not settings.freecad_executable:
+        return None
+    if not settings.taiga_source:
+        return None
+    if not settings.taiga_model:
+        return None
+    runtime = TaigaRuntime(
+        settings.taiga_python,
+        timeout=settings.taiga_episode_timeout_seconds,
+    )
+    return (
+        EpisodeRuntime(
+            child_runner=runtime.run,
+            timeout=settings.taiga_episode_timeout_seconds,
+        ),
+        runtime,
+    )
+
+
+def taiga_episode(
+    settings: Settings,
+    goal: dict[str, Any],
+    *,
+    start: dict[str, Any] | None = None,
+) -> TaigaEpisodeResult:
+    """Run one native Taiga episode through an isolated FreeCAD + Taiga child. Never raises."""
+    configured = _make_episode_runtime(settings)
+    if configured is None:
+        missing = []
+        if not settings.freecad_executable:
+            missing.append("FREECAD_MCP_FREECAD_EXECUTABLE")
+        if not settings.taiga_source:
+            missing.append("FREECAD_MCP_TAIGA_SOURCE")
+        if not settings.taiga_python:
+            missing.append("FREECAD_MCP_TAIGA_PYTHON")
+        if not settings.taiga_model:
+            missing.append("FREECAD_MCP_TAIGA_MODEL")
+        return TaigaEpisodeResult(
+            ok=False,
+            status="taiga_unavailable",
+            error=(
+                "Native episode runtime is not configured: " + ", ".join(missing) + ". "
+                "Set them and point FREECAD_MCP_TAIGA_MODEL at a local model "
+                "directory (config.json + model.safetensors)."
+            ),
+            error_type="TaigaUnavailableError",
+        )
+
+    runtime, taiga_runtime = configured
+    assert settings.taiga_model and settings.freecad_executable and settings.taiga_source
+    try:
+        result = runtime.run(
+            goal,
+            start,
+            freecad_executable=settings.freecad_executable,
+            taiga_source=settings.taiga_source,
+            model=settings.taiga_model,
+            device=settings.taiga_device,
+        )
+    except Exception as exc:  # noqa: BLE001 - never leak a traceback to the client
+        return TaigaEpisodeResult(
+            ok=False,
+            status="child_process_failure",
+            error=f"Episode runtime failed: {exc}",
+            error_type=type(exc).__name__,
+        )
+    return _to_episode_result(result)
+
+
+def _to_episode_result(result: EpisodeResult) -> TaigaEpisodeResult:
+    return TaigaEpisodeResult(
+        ok=result.ok,
+        status=result.status,
+        goal=result.goal,
+        start=result.start,
+        level=result.level,
+        success=result.success,
+        clean=result.clean,
+        iou=result.iou,
+        match=result.match,
+        steps=result.steps,
+        budget=result.budget,
+        expert_steps=result.expert_steps,
+        agreement=result.agreement,
+        deviations=result.deviations,
+        outcome=result.outcome,
+        features=result.features,
+        rule=result.rule,
+        history=result.history,
+        final_state=result.final_state,
+        error=result.error,
+        error_type=result.error_type,
+    )
+
+
 def register(server: MCPServer, settings: Settings) -> None:
     """Register the optional Taiga-S1 runtime tools on ``server``."""
 
@@ -332,3 +486,24 @@ def register(server: MCPServer, settings: Settings) -> None:
     def taiga_build_tool(params: TaigaBuildParams) -> TaigaBuildResult:
         """Build a Taiga goal and return the structured result."""
         return taiga_build(settings, params.goal, document_id=params.document_id, workspace=params.workspace)
+
+    @server.tool(
+        name="taiga_episode",
+        title="Run native Taiga-S1 episode",
+        description=(
+            "Run one native Taiga-S1 closed-loop episode (Policy → Action → "
+            "Executor) through the pinned native runtime: Policy, "
+            "run_episodes, Worker and HeadlessSession, with native action "
+            "enumeration and executors. The native step budget is "
+            "authoritative. Runs in an isolated subprocess per request and "
+            "tears down the entire owned process tree. Requires "
+            "FREECAD_MCP_FREECAD_EXECUTABLE, FREECAD_MCP_TAIGA_SOURCE, "
+            "FREECAD_MCP_TAIGA_PYTHON and FREECAD_MCP_TAIGA_MODEL (local "
+            "directory). Loads the model offline; nothing is downloaded. Never "
+            "imports FreeCAD or Torch in the server process."
+        ),
+        structured_output=True,
+    )
+    def taiga_episode_tool(params: TaigaEpisodeParams) -> TaigaEpisodeResult:
+        """Run one native episode and return the structured result."""
+        return taiga_episode(settings, params.goal, start=params.start)

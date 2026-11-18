@@ -61,9 +61,10 @@ class TaigaRuntimeNotFoundError(TaigaRuntimeError):
 class TaigaRuntimeTimeoutError(TaigaRuntimeError):
     """The Taiga child process did not finish within the allotted time."""
 
-    def __init__(self, message: str, *, timeout: float) -> None:
+    def __init__(self, message: str, *, timeout: float, pid: int | None = None) -> None:
         super().__init__(message)
         self.timeout = timeout
+        self.pid = pid
 
 
 class TaigaRuntimeRequestError(TaigaRuntimeError):
@@ -97,6 +98,32 @@ class TaigaRuntimeOperationError(TaigaRuntimeError):
     def __init__(self, message: str, *, error_type: str = "RuntimeError") -> None:
         super().__init__(message)
         self.error_type = error_type
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Terminate a process and all its descendants (Windows-aware).
+
+    On Windows this uses ``taskkill /T /F /PID`` which kills the process tree
+    (children and grandchildren).  On POSIX it sends ``SIGKILL`` to the direct
+    child; descendant cleanup on POSIX relies on the child's own ``finally``
+    block (which runs when the child is signalled, unlike Windows
+    ``TerminateProcess`` which kills without running ``finally``).
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(  # noqa: S603 - explicit argv, no shell
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        else:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+    except Exception:
+        pass
 
 
 class TaigaRuntime:
@@ -169,26 +196,59 @@ class TaigaRuntime:
             env[REQUEST_ENV] = str(request_path)
             env[RESPONSE_ENV] = str(response_path)
 
+            # Use explicit Popen + wait(timeout) instead of subprocess.run so
+            # that on timeout we can terminate the *entire owned process tree*
+            # (the torch child AND its freecadcmd worker grandchild).  On
+            # Windows, subprocess.run(timeout=...) only kills the direct child
+            # via TerminateProcess, orphaning the grandchild freecadcmd worker.
+            proc = subprocess.Popen(  # noqa: S603 - explicit argv, no shell
+                [str(self.python), str(self.runner_path)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
             try:
-                completed = subprocess.run(  # noqa: S603 - explicit argv, no shell
-                    [str(self.python), str(self.runner_path)],
-                    env=env,
-                    capture_output=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=effective_timeout,
-                    check=False,
-                )
+                stdout_data, stderr_data = proc.communicate(timeout=effective_timeout)
             except subprocess.TimeoutExpired as exc:
+                # Terminate the entire owned process tree before returning.
+                # The torch child's finally: env.close() may not have run, so
+                # the freecadcmd worker grandchild could still be alive.
+                _kill_process_tree(proc.pid)
+                # Reap the direct child so its resources are released.
+                try:
+                    proc.communicate(timeout=10)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.communicate(timeout=5)
+                    except Exception:
+                        pass
                 raise TaigaRuntimeTimeoutError(
                     f"Taiga did not finish operation {op!r} within "
                     f"{effective_timeout:.0f}s.",
                     timeout=effective_timeout,
+                    pid=proc.pid,
                 ) from exc
             except OSError as exc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
                 raise TaigaRuntimeExecutionError(
                     f"Could not start the Taiga interpreter: {exc}"
                 ) from exc
+
+            # Build a CompletedProcess-like object for the response-path checks
+            # below (keeps the existing returncode/stdout/stderr interface).
+            completed = subprocess.CompletedProcess(
+                args=[str(self.python), str(self.runner_path)],
+                returncode=proc.returncode,
+                stdout=stdout_data,
+                stderr=stderr_data,
+            )
 
             if not response_path.is_file():
                 raise TaigaRuntimeExecutionError(
@@ -235,6 +295,35 @@ class TaigaRuntime:
                 "device": device,
             },
         )
+
+    def run_episode(
+        self,
+        goal: Mapping[str, Any],
+        start: Mapping[str, Any] | None,
+        *,
+        model: str,
+        freecad_executable: str,
+        taiga_source: str,
+        device: str = DEFAULT_DEVICE,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Run one native Taiga episode in the child process.
+
+        Reuses the native ``run_episodes`` / ``Policy`` / ``Worker`` /
+        ``HeadlessSession`` loop.  The child spawns a ``freecadcmd`` worker
+        via :class:`native_worker_env.NativeWorkerEnv` and runs exactly one
+        episode before tearing down the owned process tree.
+        """
+        params: dict[str, Any] = {
+            "goal": dict(goal),
+            "model": model,
+            "freecad_executable": freecad_executable,
+            "taiga_source": taiga_source,
+            "device": device,
+        }
+        if start:
+            params["start"] = dict(start)
+        return self.run("run_episode", params, timeout=timeout)
 
 
 def _decode_envelope(op: str, envelope: Any) -> dict[str, Any]:
