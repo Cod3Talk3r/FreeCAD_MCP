@@ -1,5 +1,6 @@
 """Application contracts and adapters, independent of MCP and FreeCAD."""
 
+from .cad_state import COLLECT_CAD_STATE_OP, CadStateCollector, normalize_cad_state
 from .contracts import ApplicationError, Backend, BackendStatus, BuildRequest, BuildResult
 from .inspection import (
     DocumentInspection,
@@ -53,6 +54,8 @@ __all__ = [
     "CADShapeDiagnostics",
     "CADState",
     "CADStateConversionError",
+    "COLLECT_CAD_STATE_OP",
+    "CadStateCollector",
     "CapabilityCatalog",
     "DocumentArtifactRef",
     "DocumentInspection",
@@ -79,5 +82,6 @@ __all__ = [
     "get_action_mapping",
     "is_executable",
     "is_terminal",
+    "normalize_cad_state",
     "translate_parameters",
 ]

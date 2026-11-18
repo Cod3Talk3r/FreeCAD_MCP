@@ -118,6 +118,9 @@ OP_ASSEMBLY_INSPECT = "assembly_inspect"
 # M18 — Advanced GUI usability and workflow parity
 OP_GET_DOCUMENT_HIERARCHY = "get_document_hierarchy"
 
+# M20 — Read-only Taiga-oriented CAD state collection
+OP_COLLECT_CAD_STATE = "collect_cad_state"
+
 #: Verified joint types only (M17 scope). Indices match the installed
 #: ``Assembly/JointObject.py`` JointType enum ordering.
 ASSEMBLY_JOINT_TYPE_INDICES: dict[str, int] = {"Fixed": 0, "Revolute": 1}
@@ -14911,6 +14914,477 @@ def _op_assembly_inspect(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# M20 — Read-only CAD state collection (Taiga-oriented)
+# ---------------------------------------------------------------------------
+
+#: Sketcher constraint types the Taiga schema recognises.  Anything else is
+#: counted as ``Other`` so the fact that a constraint exists is not lost while
+#: the exact kind stays explicit.
+_TAIGA_CONSTRAINT_KINDS = frozenset(
+    {
+        "Coincident",
+        "Horizontal",
+        "Vertical",
+        "DistanceX",
+        "DistanceY",
+        "Distance",
+        "Radius",
+        "Diameter",
+        "Equal",
+        "PointOnObject",
+        "Symmetric",
+        "Lock",
+        "Other",
+    }
+)
+
+
+def _state_geom_kind(type_id: str) -> str:
+    """Map a sketch geometry TypeId to a Taiga ``GEOMETRY_KINDS`` entry."""
+    if "LineSegment" in type_id or type_id.endswith("::Line"):
+        return "line"
+    if "Circle" in type_id:
+        return "circle"
+    if "Arc" in type_id:
+        return "arc"
+    if "Point" in type_id:
+        return "point"
+    return "other"
+
+
+def _state_constraint_kind(constraint_type: str) -> str:
+    """Map a Sketcher constraint ``Type`` to a Taiga ``CONSTRAINT_KINDS`` entry."""
+    return constraint_type if constraint_type in _TAIGA_CONSTRAINT_KINDS else "Other"
+
+
+def _state_face_dirs(shape: Any) -> list[str]:
+    """Return the dominant face-normal directions present on ``shape``.
+
+    Each face normal is reduced to its dominant axis and sign, producing the
+    ``+X/-X/+Y/-Y/+Z/-Z`` vocabulary the Taiga featurizer consumes.  Returns an
+    empty list when no face normal can be read (e.g. a wire), never a guess.
+    """
+    directions: set[str] = set()
+    try:
+        faces = list(getattr(shape, "Faces", []) or [])
+    except Exception:
+        return []
+    for face in faces:
+        try:
+            normal = face.normalAt(0, 0)
+            components = (float(normal.x), float(normal.y), float(normal.z))
+        except Exception:
+            continue
+        axis = max(range(3), key=lambda i: abs(components[i]))
+        sign = "+" if components[axis] >= 0 else "-"
+        directions.add(f"{sign}{'XYZ'[axis]}")
+    return sorted(directions)
+
+
+def _state_shape_payload(shape: Any) -> dict[str, Any]:
+    """Collect shape diagnostics for ``shape`` without fabricating values."""
+    payload: dict[str, Any] = {
+        "valid": None,
+        "volume": None,
+        "area": None,
+        "bbox": None,
+        "n_faces": None,
+        "n_edges": None,
+        "n_solids": None,
+        "face_dirs": None,
+    }
+    try:
+        payload["valid"] = bool(shape.isValid())
+    except Exception:
+        pass
+    try:
+        payload["volume"] = float(shape.Volume)
+    except Exception:
+        pass
+    try:
+        payload["area"] = float(shape.Area)
+    except Exception:
+        pass
+    try:
+        box = shape.BoundBox
+        payload["bbox"] = [
+            float(box.XLength),
+            float(box.YLength),
+            float(box.ZLength),
+        ]
+    except Exception:
+        pass
+    for key, attr in (
+        ("n_faces", "Faces"),
+        ("n_edges", "Edges"),
+        ("n_solids", "Solids"),
+    ):
+        try:
+            payload[key] = len(list(getattr(shape, attr, []) or []))
+        except Exception:
+            pass
+    directions = _state_face_dirs(shape)
+    # A shape with no readable face normals (e.g. a wire) still has an empty
+    # direction set; ``None`` is reserved for an unavailable shape.
+    payload["face_dirs"] = directions
+    return payload
+
+
+def _state_node_payload(
+    obj: Any,
+    parent_index: int,
+    depth: int,
+    tip_names: set[str],
+) -> dict[str, Any]:
+    """Build one Taiga ``Node`` payload from a FreeCAD document object."""
+    num: dict[str, float] = {}
+    geo: dict[str, int] = {}
+    cons: dict[str, int] = {}
+
+    name = getattr(obj, "Name", "")
+    if name in tip_names:
+        num["tip"] = 1.0
+
+    shape = getattr(obj, "Shape", None)
+    if shape is not None:
+        try:
+            if not shape.isNull():
+                try:
+                    num["valid"] = 1.0 if shape.isValid() else 0.0
+                except Exception:
+                    pass
+                try:
+                    num["n_faces"] = float(len(list(getattr(shape, "Faces", []) or [])))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if getattr(obj, "TypeId", "").endswith("Sketcher::SketchObject"):
+        try:
+            geometry = list(getattr(obj, "Geometry", []) or [])
+        except Exception:
+            geometry = []
+        num["n_geo"] = float(len(geometry))
+        try:
+            num["n_construction"] = float(
+                sum(1 for i in range(len(geometry)) if obj.getConstruction(i))
+            )
+        except Exception:
+            pass
+        try:
+            num["n_constraints"] = float(len(getattr(obj, "Constraints", []) or []))
+        except Exception:
+            pass
+        try:
+            dof = getattr(obj, "DoF", None)
+            if dof is not None:
+                num["dof"] = float(dof)
+        except Exception:
+            pass
+        try:
+            fully = getattr(obj, "FullyConstrained", None)
+            if fully is not None:
+                num["fully_constrained"] = 1.0 if fully else 0.0
+        except Exception:
+            pass
+        for geometry_item in geometry:
+            kind = _state_geom_kind(getattr(geometry_item, "TypeId", ""))
+            geo[kind] = geo.get(kind, 0) + 1
+        try:
+            constraints = list(getattr(obj, "Constraints", []) or [])
+        except Exception:
+            constraints = []
+        for constraint in constraints:
+            kind = _state_constraint_kind(getattr(constraint, "Type", ""))
+            cons[kind] = cons.get(kind, 0) + 1
+
+    return {
+        "name": name,
+        "type": getattr(obj, "TypeId", ""),
+        "parent": parent_index,
+        "depth": depth,
+        "num": num,
+        "geo": geo,
+        "cons": cons,
+    }
+
+
+def _state_selection_payload(_FC: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Collect the GUI selection, or report it unavailable when headless."""
+    if not getattr(_FC, "GuiUp", 0):
+        return [], False
+    try:
+        import FreeCADGui as _Gui  # noqa: PLC0415 - GUI only
+    except Exception:
+        return [], False
+    if not hasattr(_Gui, "Selection"):
+        return [], False
+    try:
+        selection = _Gui.Selection.getSelectionEx()
+    except Exception:
+        return [], False
+
+    items: list[dict[str, Any]] = []
+    for entry in selection:
+        obj = getattr(entry, "Object", None)
+        if obj is None:
+            continue
+        subs = [str(s) for s in (getattr(entry, "SubElementNames", []) or [])]
+        if any(s.startswith("Face") for s in subs):
+            kind = "face"
+        elif any(s.startswith("Edge") for s in subs):
+            kind = "edges"
+        elif any(s.startswith("Vertex") for s in subs):
+            kind = "other"
+        else:
+            kind = "other"
+        normal: list[float] | None = None
+        offset: float | None = None
+        if subs:
+            try:
+                shape_obj = getattr(obj, "Shape", None)
+                target: Any = getattr(shape_obj, subs[0], None) if shape_obj is not None else None
+                if target is None:
+                    raise ValueError("subelement not resolved")
+                face_normal = target.normalAt(0, 0)
+                normal = [
+                    float(face_normal.x),
+                    float(face_normal.y),
+                    float(face_normal.z),
+                ]
+                center = target.CenterOfMass
+                offset = float(
+                    face_normal.x * center.x
+                    + face_normal.y * center.y
+                    + face_normal.z * center.z
+                )
+            except Exception:
+                normal = None
+                offset = None
+        items.append(
+            {
+                "kind": kind,
+                "object": getattr(obj, "Name", ""),
+                "object_type": getattr(obj, "TypeId", ""),
+                "subs": subs,
+                "normal": normal,
+                "offset": offset,
+                "count": len(subs),
+            }
+        )
+    return items, True
+
+
+def _op_collect_cad_state(params: dict[str, Any]) -> dict[str, Any]:
+    """Read-only: collect a JSON-serializable snapshot of the CAD state.
+
+    Never mutates or saves the document.  Fields that cannot be observed in the
+    current FreeCAD context (headless: no workbench, edit mode, undo stack, or
+    GUI selection) are returned as ``None``/empty and listed in
+    ``unavailable_fields`` instead of being fabricated.
+
+    M20 Phase 3A.
+    """
+    from freecad_mcp.freecad_bridge import workspace as ws_mod
+
+    document_id = params.get("document_id") or ""
+    workspace_str = params.get("workspace") or ""
+
+    try:
+        normalized = ws_mod.validate_document_id(document_id)
+    except ValueError as exc:
+        return {"ok": False, "op": OP_COLLECT_CAD_STATE, "error": str(exc)}
+
+    try:
+        wks = (
+            ws_mod.Workspace.from_env()
+            if not workspace_str
+            else ws_mod.Workspace(root=os.path.normpath(workspace_str))
+        )
+    except Exception as exc:
+        return {"ok": False, "op": OP_COLLECT_CAD_STATE, "error": f"workspace error: {exc}"}
+
+    pid = os.getpid()
+    lock_path = wks.lock_path(normalized)
+    lock_status = ws_mod.try_acquire_lock(lock_path, pid=pid)
+    if lock_status.get("status") not in ("acquired", "reacquired"):
+        return {
+            "ok": False,
+            "op": OP_COLLECT_CAD_STATE,
+            "error": lock_status.get("error", "lock failed"),
+        }
+
+    def _fail(message: str) -> dict[str, Any]:
+        ws_mod.release_lock(lock_path, pid)
+        return {"ok": False, "op": OP_COLLECT_CAD_STATE, "error": message}
+
+    try:
+        import FreeCAD as _FC  # noqa: PLC0415 - imported lazily inside FreeCAD
+        doc = _open_existing_document(_FC, wks, normalized)
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    unavailable: list[str] = []
+
+    try:
+        workbench: str | None = None
+        if getattr(_FC, "GuiUp", 0):
+            try:
+                import FreeCADGui as _Gui  # noqa: PLC0415 - GUI only
+
+                active = _Gui.activeWorkbench()
+                raw_name = getattr(active, "name", None)
+                resolved = raw_name() if callable(raw_name) else raw_name
+                workbench = str(resolved) if resolved is not None else None
+            except Exception:
+                workbench = None
+        if workbench is None:
+            unavailable.append("workbench")
+
+        # Edit mode and undo availability are GUI/transaction concepts that a
+        # headless console session cannot observe reliably.
+        unavailable.append("edit")
+        unavailable.append("undo_available")
+
+        objects = list(getattr(doc, "Objects", []) or [])
+        bodies = [o for o in objects if getattr(o, "TypeId", "") == "PartDesign::Body"]
+        has_body = len(bodies) > 0
+
+        tip_names: set[str] = set()
+        for body in bodies:
+            tip = getattr(body, "Tip", None)
+            tip_name = getattr(tip, "Name", None) if tip is not None else None
+            if tip_name:
+                tip_names.add(tip_name)
+
+        # Containment: direct Group membership (Body/Assembly) defines parent.
+        parent_obj: dict[str, Any] = {}
+        for obj in objects:
+            type_id = getattr(obj, "TypeId", "")
+            if type_id.endswith("::Body") or type_id.endswith("::AssemblyObject"):
+                try:
+                    group = list(getattr(obj, "Group", []) or [])
+                except Exception:
+                    group = []
+                for member in group:
+                    parent_obj[getattr(member, "Name", "")] = obj
+
+        name_to_index = {getattr(o, "Name", ""): i for i, o in enumerate(objects)}
+
+        def _depth_for(name: str, seen: frozenset[str] = frozenset()) -> int:
+            if name in seen:
+                return 0
+            parent = parent_obj.get(name)
+            if parent is None:
+                return 0
+            return 1 + _depth_for(getattr(parent, "Name", ""), seen | {name})
+
+        tree = [
+            _state_node_payload(
+                obj,
+                name_to_index.get(getattr(parent_obj.get(getattr(obj, "Name", "")), "Name", ""), -1),
+                _depth_for(getattr(obj, "Name", "")),
+                tip_names,
+            )
+            for obj in objects
+        ]
+
+        selection, selection_available = _state_selection_payload(_FC)
+        if not selection_available:
+            unavailable.append("selection")
+
+        # Primary shape: the single Body's Tip shape, else the only solid-bearing
+        # object.  Ambiguous multi-Body documents leave shape unavailable rather
+        # than picking an arbitrary Body.
+        shape_obj: Any = None
+        shape_source: str | None = None
+        if len(bodies) == 1:
+            tip = getattr(bodies[0], "Tip", None)
+            candidate = getattr(tip, "Shape", None) if tip is not None else None
+            if candidate is not None:
+                try:
+                    if not candidate.isNull():
+                        shape_obj = candidate
+                        shape_source = getattr(tip, "Name", None)
+                except Exception:
+                    shape_obj = None
+        elif len(bodies) == 0:
+            solid_objects: list[Any] = []
+            for obj in objects:
+                candidate = getattr(obj, "Shape", None)
+                if candidate is None:
+                    continue
+                try:
+                    if candidate.isNull():
+                        continue
+                    if not list(getattr(candidate, "Solids", []) or []):
+                        continue
+                except Exception:
+                    continue
+                solid_objects.append(obj)
+            if len(solid_objects) == 1:
+                shape_obj = getattr(solid_objects[0], "Shape", None)
+                shape_source = getattr(solid_objects[0], "Name", None)
+
+        if shape_obj is None:
+            shape_payload: dict[str, Any] = {
+                "valid": None,
+                "volume": None,
+                "area": None,
+                "bbox": None,
+                "n_faces": None,
+                "n_edges": None,
+                "n_solids": None,
+                "face_dirs": None,
+            }
+            unavailable.extend(
+                [
+                    "shape.valid",
+                    "shape.volume",
+                    "shape.area",
+                    "shape.bbox",
+                    "shape.n_faces",
+                    "shape.n_edges",
+                    "shape.n_solids",
+                    "shape.face_dirs",
+                ]
+            )
+        else:
+            shape_payload = _state_shape_payload(shape_obj)
+
+        # No action/event history is observable in a headless console session.
+        unavailable.append("recent")
+        unavailable.append("events")
+
+        import datetime as _datetime  # noqa: PLC0415 - child only
+
+        payload = {
+            "document_id": normalized,
+            "doc_open": True,
+            "workbench": workbench,
+            "edit": None,
+            "has_body": has_body,
+            "undo_available": None,
+            "tree": tree,
+            "selection": selection,
+            "recent": [],
+            "events": [],
+            "shape": shape_payload,
+            "shape_available": shape_obj is not None,
+            "shape_source": shape_source,
+            "recent_flags": [],
+            "unavailable_fields": unavailable,
+            "collected_at": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        return _fail(f"FreeCAD error: {exc}")
+
+    ws_mod.release_lock(lock_path, pid)
+    return {"ok": True, "op": OP_COLLECT_CAD_STATE, "result": payload}
+
+
 OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_PING: _op_ping,
     OP_GET_VERSION: _op_get_version,
@@ -14934,6 +15408,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     OP_SET_BODY_TIP: _op_set_body_tip,
     OP_REORDER_BODY_FEATURES: _op_reorder_body_features,
     OP_GET_DOCUMENT_HIERARCHY: _op_get_document_hierarchy,
+    OP_COLLECT_CAD_STATE: _op_collect_cad_state,
     OP_CREATE_BODY: _op_create_body,
     OP_VALIDATE_REOPEN: _op_validate_reopen,
     OP_CREATE_SKETCH: _op_create_sketch,
