@@ -13,13 +13,33 @@ from .adapter import (
     TaigaBackend,
     TaigaStatusReport,
 )
+from .benchmark import (
+    BenchmarkEpisodeSummary,
+    BenchmarkResult,
+    BenchmarkSaveReopen,
+    BenchmarkScenario,
+    BenchmarkValidation,
+    classify_result,
+    resolve_artifact_path,
+    run_benchmark_scenario,
+    validate_geometry,
+)
 from .runtime import TaigaRuntime, TaigaRuntimeError
 
 __all__ = [
     "ActionScore",
     "ActionScoringResult",
+    "BenchmarkEpisodeSummary",
+    "BenchmarkResult",
+    "BenchmarkSaveReopen",
+    "BenchmarkScenario",
+    "BenchmarkValidation",
     "TaigaBackend",
     "TaigaRuntime",
     "TaigaRuntimeError",
     "TaigaStatusReport",
+    "classify_result",
+    "resolve_artifact_path",
+    "run_benchmark_scenario",
+    "validate_geometry",
 ]

@@ -182,6 +182,25 @@ class NativeWorkerEnv:
         """Score the current solid against the episode target."""
         return self.call({"op": "score"})
 
+    def save(self, fcstd_path: str) -> dict:
+        """Save the current document to ``fcstd_path`` via the native worker.
+
+        Reuses the native ``Worker.handle`` ``save`` op
+        (``freecad_s1.runtime.worker.Worker.handle``), which calls
+        ``s.doc.saveAs(req["fcstd"])``.  This is the *only* save mechanism;
+        no custom FreeCAD save logic is implemented here.
+
+        Args:
+            fcstd_path: Absolute path to the destination ``.fcstd`` file.
+
+        Returns:
+            The worker response (contains ``fcstd`` on success).
+
+        Raises:
+            WorkerError: If the worker reports a failure or exits.
+        """
+        return self.call({"op": "save", "fcstd": str(fcstd_path)})
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

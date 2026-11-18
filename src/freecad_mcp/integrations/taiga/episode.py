@@ -86,6 +86,8 @@ class EpisodeResult:
     rule: str | None = None
     history: list[str] | None = None
     final_state: dict[str, Any] | None = None
+    saved_path: str | None = None
+    save_error: str | None = None
     error: str | None = None
     error_type: str | None = None
 
@@ -153,6 +155,7 @@ class EpisodeRuntime:
         taiga_source: str | None = None,
         model: str | None = None,
         device: str | None = None,
+        save_path: str | None = None,
     ) -> EpisodeResult:
         """Run one episode and return a structured result. Never raises."""
         try:
@@ -205,6 +208,8 @@ class EpisodeRuntime:
         }
         if device:
             params["device"] = device
+        if save_path:
+            params["save_path"] = save_path
 
         try:
             response = self._child_runner(
@@ -330,6 +335,8 @@ def _to_episode_result(
         rule=result.get("rule"),
         history=history,
         final_state=dict(final_state) if final_state else None,
+        saved_path=result.get("saved_path"),
+        save_error=result.get("save_error"),
         error=None,
         error_type=None,
     )

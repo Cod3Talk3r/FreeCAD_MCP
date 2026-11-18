@@ -18,6 +18,12 @@ from ..app.contracts import BuildRequest, BuildResult as ApplicationBuildResult
 from ..app.taiga import TaigaBuildBackend
 from ..config import Settings
 from ..integrations.taiga import TaigaBackend
+from ..integrations.taiga.benchmark import (
+    BenchmarkResult,
+    BenchmarkScenario,
+    resolve_artifact_path,
+    run_benchmark_scenario,
+)
 from ..integrations.taiga.build import BuildResult, BuildRuntime
 from ..integrations.taiga.child import TaigaChildRunner
 from ..integrations.taiga.episode import EpisodeRuntime, EpisodeResult
@@ -254,8 +260,72 @@ class TaigaEpisodeResult(BaseModel):
     rule: str | None = Field(default=None, description="Held-out composition rule, if any.")
     history: list[str] | None = Field(default=None, description="Actions taken (kept for failed episodes).")
     final_state: dict[str, Any] | None = Field(default=None, description="Terminal native State JSON.")
+    saved_path: str | None = Field(default=None, description="Path to the saved FCStd artifact, if save was requested.")
+    save_error: str | None = Field(default=None, description="Save failure message, if save was requested and failed.")
     error: str | None = Field(default=None, description="Failure message, if any.")
     error_type: str | None = Field(default=None, description="Structured failure type, if any.")
+
+
+class TaigaBenchmarkParams(BaseModel):
+    """Parameters for running one native Taiga benchmark scenario."""
+
+    scenario_id: str = Field(
+        description="Unique scenario identifier. Used as the artifact document id stem.",
+    )
+    goal: dict[str, Any] = Field(
+        description=(
+            "Taiga Goal document: an ordered list of feature intents "
+            '{"kind": "...", "params": {...}} plus optional "level", "scale".'
+        ),
+    )
+    start: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            'Optional initial session condition: {"doc_open": true, '
+            '"workbench": "PartDesignWorkbench", "body": false}.'
+        ),
+    )
+    expected_volume_mm3: float | None = Field(
+        default=None,
+        description="Analytically expected volume for independent validation. None skips volume check.",
+    )
+    expected_bbox_mm: list[float] | None = Field(
+        default=None,
+        description="Analytically expected bounding box [x, y, z] for independent validation. None skips bbox check.",
+    )
+    volume_tolerance_pct: float = Field(
+        default=1.0,
+        description="Allowed relative volume error percent for independent validation.",
+    )
+    bbox_tolerance_mm: float = Field(
+        default=0.1,
+        description="Allowed absolute per-axis bounding-box error (mm).",
+    )
+    workspace: str | None = Field(
+        default=None,
+        description="Optional workspace path. Defaults to FREECAD_MCP_WORKSPACE.",
+    )
+
+
+class TaigaBenchmarkResult(BaseModel):
+    """Structured result of the ``taiga_benchmark`` tool."""
+
+    schema_version: str = Field(description="Result schema version.")
+    scenario_id: str = Field(description="Scenario identifier.")
+    classification: str = Field(
+        description=(
+            "Overall classification: geometry_success, geometry_quality_failure, "
+            "model_failure, runtime_failure, invalid_goal, save_reopen_failure."
+        )
+    )
+    episode: dict[str, Any] = Field(description="Native episode outcome (status, IoU, steps, etc.).")
+    independent_validation: dict[str, Any] = Field(
+        description="Independent geometry validation (volume, bbox, solid count vs expected)."
+    )
+    save_reopen: dict[str, Any] = Field(description="Save + fresh-process reopen status.")
+    goal: dict[str, Any] = Field(description="Echoed goal.")
+    start: dict[str, Any] | None = Field(default=None, description="Echoed start spec.")
+    notes: str = Field(default="", description="Human-readable notes.")
 
 
 def _make_child_runner(settings: Settings) -> TaigaChildRunner | None:
@@ -362,6 +432,7 @@ def taiga_episode(
     goal: dict[str, Any],
     *,
     start: dict[str, Any] | None = None,
+    save_path: str | None = None,
 ) -> TaigaEpisodeResult:
     """Run one native Taiga episode through an isolated FreeCAD + Taiga child. Never raises."""
     configured = _make_episode_runtime(settings)
@@ -396,6 +467,7 @@ def taiga_episode(
             taiga_source=settings.taiga_source,
             model=settings.taiga_model,
             device=settings.taiga_device,
+            save_path=save_path,
         )
     except Exception as exc:  # noqa: BLE001 - never leak a traceback to the client
         return TaigaEpisodeResult(
@@ -405,6 +477,106 @@ def taiga_episode(
             error_type=type(exc).__name__,
         )
     return _to_episode_result(result)
+
+
+def _make_benchmark_episode_fn(settings: Settings) -> Any:
+    """Build a ``taiga_episode``-compatible callable for the benchmark runner."""
+
+    def _fn(
+        goal: dict[str, Any],
+        *,
+        start: dict[str, Any] | None = None,
+        save_path: str | None = None,
+    ) -> EpisodeResult:
+        # Reuse the existing taiga_episode path but return the EpisodeResult
+        # (not the Pydantic model) so the benchmark module can access all fields.
+        configured = _make_episode_runtime(settings)
+        if configured is None:
+            return EpisodeResult(
+                ok=False,
+                status="taiga_unavailable",
+                error="Native episode runtime is not configured.",
+                error_type="TaigaUnavailableError",
+            )
+        runtime, _ = configured
+        assert settings.taiga_model and settings.freecad_executable and settings.taiga_source
+        try:
+            return runtime.run(
+                goal,
+                start,
+                freecad_executable=settings.freecad_executable,
+                taiga_source=settings.taiga_source,
+                model=settings.taiga_model,
+                device=settings.taiga_device,
+                save_path=save_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - never leak a traceback
+            return EpisodeResult(
+                ok=False,
+                status="child_process_failure",
+                error=f"Episode runtime failed: {exc}",
+                error_type=type(exc).__name__,
+            )
+
+    return _fn
+
+
+def taiga_benchmark(
+    settings: Settings,
+    scenario_id: str,
+    goal: dict[str, Any],
+    *,
+    start: dict[str, Any] | None = None,
+    expected_volume_mm3: float | None = None,
+    expected_bbox_mm: list[float] | None = None,
+    volume_tolerance_pct: float = 1.0,
+    bbox_tolerance_mm: float = 0.1,
+    workspace: str | None = None,
+) -> TaigaBenchmarkResult:
+    """Run one native Taiga benchmark scenario with independent validation. Never raises."""
+    bbox_tuple: tuple[float, float, float] | None = None
+    if expected_bbox_mm is not None and len(expected_bbox_mm) == 3:
+        bbox_tuple = (float(expected_bbox_mm[0]), float(expected_bbox_mm[1]), float(expected_bbox_mm[2]))
+
+    scenario = BenchmarkScenario(
+        scenario_id=scenario_id,
+        goal=goal,
+        start=start,
+        expected_volume_mm3=expected_volume_mm3,
+        expected_bbox_mm=bbox_tuple,
+        volume_tolerance_pct=volume_tolerance_pct,
+        bbox_tolerance_mm=bbox_tolerance_mm,
+    )
+
+    episode_fn = _make_benchmark_episode_fn(settings)
+    bridge_factory = None
+    if settings.freecad_executable:
+        from ..freecad_bridge.bridge import FreeCadBridge
+
+        def _bridge_factory() -> Any:
+            return FreeCadBridge(settings.freecad_executable or "")
+
+        bridge_factory = _bridge_factory
+
+    result: BenchmarkResult = run_benchmark_scenario(
+        scenario,
+        taiga_episode_fn=episode_fn,
+        freecad_executable=settings.freecad_executable or "",
+        workspace=workspace,
+        bridge_factory=bridge_factory,
+    )
+
+    return TaigaBenchmarkResult(
+        schema_version=result.schema_version,
+        scenario_id=result.scenario_id,
+        classification=result.classification,
+        episode=result.episode.to_dict(),
+        independent_validation=result.independent_validation.to_dict(),
+        save_reopen=result.save_reopen.to_dict(),
+        goal=result.goal,
+        start=result.start,
+        notes=result.notes,
+    )
 
 
 def _to_episode_result(result: EpisodeResult) -> TaigaEpisodeResult:
@@ -428,6 +600,8 @@ def _to_episode_result(result: EpisodeResult) -> TaigaEpisodeResult:
         rule=result.rule,
         history=result.history,
         final_state=result.final_state,
+        saved_path=result.saved_path,
+        save_error=result.save_error,
         error=result.error,
         error_type=result.error_type,
     )
@@ -507,3 +681,35 @@ def register(server: MCPServer, settings: Settings) -> None:
     def taiga_episode_tool(params: TaigaEpisodeParams) -> TaigaEpisodeResult:
         """Run one native episode and return the structured result."""
         return taiga_episode(settings, params.goal, start=params.start)
+
+    @server.tool(
+        name="taiga_benchmark",
+        title="Run Taiga benchmark scenario",
+        description=(
+            "Run one native Taiga-S1 closed-loop episode as a benchmark "
+            "scenario with independent geometry validation and save/reopen "
+            "verification. Saves the artifact to an isolated per-run path "
+            "inside the workspace, validates the final-state geometry against "
+            "analytically-expected volume/bounding-box values, then reopens the "
+            "saved artifact in a fresh FreeCAD process via the existing "
+            "validate_reopen mechanism. Returns a structured result with a "
+            "classification separating model/runtime failures from "
+            "geometry-quality failures. Requires the same Taiga configuration "
+            "as taiga_episode. Never imports FreeCAD or Torch in the server "
+            "process."
+        ),
+        structured_output=True,
+    )
+    def taiga_benchmark_tool(params: TaigaBenchmarkParams) -> TaigaBenchmarkResult:
+        """Run one benchmark scenario and return the structured result."""
+        return taiga_benchmark(
+            settings,
+            params.scenario_id,
+            params.goal,
+            start=params.start,
+            expected_volume_mm3=params.expected_volume_mm3,
+            expected_bbox_mm=params.expected_bbox_mm,
+            volume_tolerance_pct=params.volume_tolerance_pct,
+            bbox_tolerance_mm=params.bbox_tolerance_mm,
+            workspace=params.workspace,
+        )

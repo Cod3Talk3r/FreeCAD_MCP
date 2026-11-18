@@ -305,6 +305,7 @@ class TaigaRuntime:
         freecad_executable: str,
         taiga_source: str,
         device: str = DEFAULT_DEVICE,
+        save_path: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """Run one native Taiga episode in the child process.
@@ -313,6 +314,10 @@ class TaigaRuntime:
         ``HeadlessSession`` loop.  The child spawns a ``freecadcmd`` worker
         via :class:`native_worker_env.NativeWorkerEnv` and runs exactly one
         episode before tearing down the owned process tree.
+
+        When ``save_path`` is given, the native worker's ``save`` op is invoked
+        while the document is still open (before ``env.close()``), persisting
+        the artifact to that path.
         """
         params: dict[str, Any] = {
             "goal": dict(goal),
@@ -323,6 +328,8 @@ class TaigaRuntime:
         }
         if start:
             params["start"] = dict(start)
+        if save_path:
+            params["save_path"] = save_path
         return self.run("run_episode", params, timeout=timeout)
 
 

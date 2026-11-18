@@ -400,11 +400,24 @@ def _run_episode(params: Mapping[str, Any]) -> dict[str, Any]:
         ep = results[0]
         # Final state: re-observe from the worker before closing so the
         # caller receives the terminal state regardless of outcome.
+        assert env is not None  # assigned above; narrows type for pyright
         final_state = None
         try:
             final_state = env.call({"op": "observe"}).get("state")
         except Exception:
             final_state = None
+
+        # Save the artifact via the native worker save op (if requested).
+        # This runs *before* env.close() while the document is still open.
+        saved_path: str | None = None
+        save_error: str | None = None
+        save_path = params.get("save_path")
+        if isinstance(save_path, str) and save_path.strip():
+            try:
+                env.save(save_path)
+                saved_path = save_path
+            except Exception as exc:  # noqa: BLE001 - report, don't crash
+                save_error = f"{type(exc).__name__}: {exc}"
 
         return {
             "ok": True,
@@ -422,6 +435,8 @@ def _run_episode(params: Mapping[str, Any]) -> dict[str, Any]:
             "deviations": ep.deviations,
             "history": ep.history,
             "final_state": final_state,
+            "saved_path": saved_path,
+            "save_error": save_error,
         }
     except WorkerError as exc:
         raise RunnerError("WorkerError", str(exc)) from exc
